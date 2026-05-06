@@ -237,7 +237,7 @@ if __name__ == '__main__':
             print(f'[Reflect] triggered: {task[:80]}')
             dq = agent.put_task(task, source='reflect')
             try:
-                while 'done' not in (item := dq.get(timeout=120)): pass
+                while 'done' not in (item := dq.get(timeout=180)): pass
                 result = item['done']
                 print(result)
             except Exception as e:
