@@ -584,12 +584,24 @@ class GenericAgentTUI(App[None]):
         log.clear()
         if self.current_id is None:
             return
+        # Collect recent task_ids to only expand the latest 3 tasks
+        recent_task_ids: set[int] = set()
+        if not self.fold_mode:
+            seen: list[int] = []
+            for msg in reversed(self.current.messages):
+                if msg.role == "assistant" and msg.task_id not in seen:
+                    seen.append(msg.task_id)
+                    if len(seen) == 5:
+                        break
+            recent_task_ids = set(seen)
         for msg in self.current.messages:
             if msg.role == "user":
                 log.write(Panel(Markdown(msg.content), title="You", border_style="blue"))
             elif msg.role == "assistant":
                 suffix = "" if msg.done else "\n▌"
-                content = render_folded_text(msg.content) if self.fold_mode else msg.content
+                # Fold older tasks even in unfold mode to reduce render cost
+                should_fold = self.fold_mode or (msg.task_id not in recent_task_ids)
+                content = render_folded_text(msg.content) if should_fold else msg.content
                 log.write(Panel(Markdown(content + suffix), title=f"Agent task {msg.task_id}", border_style="green"))
             else:
                 log.write(Panel(Text(msg.content), title="System", border_style="yellow"))

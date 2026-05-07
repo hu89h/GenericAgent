@@ -1004,3 +1004,19 @@ class NativeToolClient:
         if resp: _write_llm_log('Response', resp.raw, self.log_path)
         if resp and hasattr(resp, 'tool_calls') and resp.tool_calls: self._pending_tool_ids = [tc.id for tc in resp.tool_calls]
         return resp
+
+def resolve_session(cfg_name):
+    cfg = reload_mykeys()[0].get(cfg_name)
+    if not cfg: raise ValueError(f"Config '{cfg_name}' not in mykey")
+    if 'native' in cfg_name: return (NativeClaudeSession if 'claude' in cfg_name else NativeOAISession)(cfg=cfg)
+    if 'claude' in cfg_name: return ClaudeSession(cfg=cfg)
+    return LLMSession(cfg=cfg) if 'oai' in cfg_name else None
+
+def resolve_client(cfg_name):
+    s = resolve_session(cfg_name)
+    return (NativeToolClient(s) if isinstance(s, (NativeClaudeSession, NativeOAISession)) else ToolClient(s)) if s else None
+
+def fast_ask(prompt, cfg_name, system=None):
+    sess = resolve_session(cfg_name)
+    if not sess: raise ValueError(f"fast_ask: '{cfg_name}' unsupported (mixin?)")
+    return "".join(sess.raw_ask(([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]))
