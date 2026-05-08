@@ -5,7 +5,7 @@
 - 目录：`temp/{task_name}/`（cwd在temp/时即`./{task_name}/`）
 - 启动：`python agentmain.py --task {name} [--input "短文本"] [--llm_no N]`（cwd=代码根）
 - `--input`自动建目录+清旧output+写input.txt；长文本先手动写input.txt再启动(不带--input)
-- 后台启动，print PID then exit，除非加上--nobg
+- 自动后台启动，print PID then exit
 - subagent的cwd还是temp，不是task目录
 - input：目标+约束即可，subagent同等智能。**禁写步骤/过度描述**，大量数据给路径
 - 可选fork功能（继承对话上下文）: code_run(inline_eval=True)，将变量history（自动注入,str）写入task目录下_history.json
