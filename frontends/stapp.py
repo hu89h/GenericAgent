@@ -17,6 +17,7 @@ from agentmain import GeneraticAgent
 import chatapp_common  # activate /continue command (monkey patches GeneraticAgent)
 from continue_cmd import handle_frontend_command, reset_conversation, list_sessions, extract_ui_messages
 from btw_cmd import handle_frontend_command as btw_handle_frontend
+from export_cmd import last_assistant_text, export_to_temp, wrap_for_clipboard
 
 st.set_page_config(page_title="Cowork", layout="wide")
 
@@ -293,6 +294,38 @@ if prompt := st.chat_input("any task?"):
             {"role": "assistant", "content": answer, "time": ts},
         ]
         st.rerun()  # preserve display_queue/partial_response so resume path drains the running main task
+    if cmd.startswith("/export"):
+        parts = cmd.split(maxsplit=1)
+        sub = parts[1].strip() if len(parts) > 1 else ""
+        sub_lower = sub.lower()
+        if not sub:
+            result = (
+                "**选择导出方式：**\n\n"
+                "- `/export clip` — 整理到代码块中\n"
+                "- `/export <文件名>` — 导出到 `temp/<文件名>`（默认 .md 后缀）\n"
+                "- `/export all` — 显示完整对话日志路径"
+            )
+        elif sub_lower == "all":
+            log = agent.log_path
+            result = (f"📂 完整对话日志:\n\n`{log}`" if os.path.isfile(log)
+                      else f"❌ 当前会话尚无日志文件")
+        else:
+            text = last_assistant_text(agent)
+            if not text:
+                result = "❌ 还没有模型回复可导出"
+            elif sub_lower in ("clip", "copy"):
+                result = f"📋 最后一轮回复（点代码块右上角 📋 复制）:\n\n{wrap_for_clipboard(text)}"
+            else:
+                try:
+                    path = export_to_temp(text, sub)
+                    result = f"✅ 已导出:\n\n`{path}`"
+                except Exception as e:
+                    result = f"❌ 导出失败: {e}"
+        st.session_state.messages = list(st.session_state.messages) + [
+            {"role": "user", "content": cmd, "time": ts},
+            {"role": "assistant", "content": result, "time": ts},
+        ]
+        _reset_and_rerun()
     # Regular prompt: any in-flight task will be aborted by the finally block in
     # agent_backend_stream when StopException interrupts the prior generator.
     st.session_state.messages.append({"role": "user", "content": prompt})
