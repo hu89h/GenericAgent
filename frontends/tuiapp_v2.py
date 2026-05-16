@@ -301,7 +301,7 @@ _DEFAULT_PALETTE: dict[str, str] = {
     "chip_model":  "#a5d6ff",  # model id     — pale blue
     "chip_effort": "#f0883e",  # effort       — amber (heat)
     "chip_tasks":  "#d2a8ff",  # task count   — lavender
-    "chip_time":   "#56d364",  # clock        — leaf green
+    "chip_time":   "#7ec27e",  # clock        — same muted green as the sidebar's active-session marker
 }
 
 _THEME_CYCLE = ["ga-default", "nord", "gruvbox", "dracula", "tokyo-night", "textual-light"]
