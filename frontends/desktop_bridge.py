@@ -211,8 +211,14 @@ class AgentManager:
             if hasattr(agent, "put_task"):
                 display_q = agent.put_task(prompt, images=images or [])
                 pieces = []
+                import queue as _queue
                 while True:
-                    item = display_q.get()
+                    if sess.cancel_requested:
+                        break
+                    try:
+                        item = display_q.get(timeout=1.0)
+                    except _queue.Empty:
+                        continue
                     if isinstance(item, dict):
                         if item.get("next"):
                             text = str(item["next"])
@@ -240,6 +246,11 @@ class AgentManager:
             if sess.cancel_requested:
                 with self.lock:
                     sess.partial = None
+                    # Ensure status stays cancelled (don't overwrite)
+                    if sess.status != "cancelled":
+                        sess.status = "cancelled"
+                    sess.updated_at = time.time()
+                emit_session_state(sess, "cancelled")
                 return
             with self.lock:
                 sess.partial = None
