@@ -3518,7 +3518,14 @@ class GenericAgentTUI(App[None]):
                     out.append(("fold-body", cached_render(seg.get("content", "")), i))
             else:
                 content = _TURN_MARKER_RE.sub("", seg.get("content", ""), count=1)
-                out.append(("text", cached_render(content), None))
+                # While streaming, the tail text segment grows every chunk — Markdown
+                # parsing it per chunk is the streaming-lag root cause. Render as plain
+                # Text during streaming; _stream_update_assistant swaps in the real
+                # Markdown render once m.done flips True.
+                if i == last_i and not m.done:
+                    out.append(("text", Text(content, style=C_FG), None))
+                else:
+                    out.append(("text", cached_render(content), None))
         if m.done:
             m._cached_body = out
             m._cache_key = key
@@ -3734,13 +3741,20 @@ class GenericAgentTUI(App[None]):
             cleaned = _ANSI_CONTROL_RE.sub("", raw)
             last_seg = fold_turns(cleaned)[-1]
             last_text = _TURN_MARKER_RE.sub("", last_seg.get("content", ""), count=1)
-            rendered = self._render_md(last_text, width)
             last_widget = m._segment_widgets[-1]
-            if isinstance(rendered, _MdRender):
-                last_widget._ga_render = rendered
-                last_widget.update(rendered.text)
+            # During streaming use plain Text — Markdown parse per chunk is O(chunks ×
+            # turn_len). Only on the terminal `done` chunk do we render Markdown once
+            # and swap, restoring code blocks / lists / inline styling and clean-copy.
+            if m.done:
+                rendered = self._render_md(last_text, width)
+                if isinstance(rendered, _MdRender):
+                    last_widget._ga_render = rendered
+                    last_widget.update(rendered.text)
+                else:
+                    last_widget.update(rendered)
             else:
-                last_widget.update(rendered)
+                last_widget._ga_render = None
+                last_widget.update(Text(last_text, style=C_FG))
             if m.done and m._spinner_widget is not None:
                 try: m._spinner_widget.remove()
                 except Exception: pass
