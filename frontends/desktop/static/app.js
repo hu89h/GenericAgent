@@ -24,7 +24,8 @@ const I18N = {
     'ctx.pin': '置顶', 'ctx.unpin': '取消置顶', 'ctx.del': '删除',
     'common.close': '关闭', 'common.more': '更多', 'common.optional': '选填',
     'modal.preset': '预设功能', 'modal.addModel': '添加模型', 'modal.editModel': '编辑模型', 'modal.settings': '配置',
-    'set.theme': '主题色', 'set.lang': '语言', 'set.model': '模型', 'set.addModel': '添加模型',
+    'set.appearance': '外观', 'set.plainUi': '素色', 'set.theme': '颜色', 'set.lang': '语言', 'set.model': '模型', 'set.addModel': '添加模型',
+    'appearance.light': '浅色', 'appearance.dark': '深色',
     'set.noModels': '暂无模型，点击下方添加',
     'lang.zh': '简体中文', 'lang.en': 'English',
     'model.name': '备注', 'model.namePh': '会显示在模型列表',
@@ -35,7 +36,8 @@ const I18N = {
     'model.retries': '重试 (次)', 'model.connTimeout': '连接超时 (s)', 'model.readTimeout': '读取超时 (s)',
     'model.save': '保存', 'common.cancel': '取消', 'common.edit': '编辑', 'common.delete': '删除',
     'err.modelSave': '保存失败', 'err.modelRequired': '请填写模型、API Key 和 API 地址',
-    'err.modelDelete': '删除失败', 'confirm.modelDelete': '确定删除该模型配置？',
+    'err.modelDelete': '删除失败', 'err.modelDeleteLast': '至少保留一个模型',
+    'confirm.modelDelete': '确定删除该模型配置？',
     'page.channels.title': '消息通道', 'page.channels.sub': '把 hub.pyw 管理的各 imbot 接入搬进来：每行一个渠道',
     'page.status.title': '状态面板', 'page.status.sub': 'hub.pyw 管理的后台进程/服务，集中查看与启停',
     'page.collab.title': '协作动态', 'page.collab.sub': 'subagent / Hive worker 的实时状态与产出',
@@ -83,7 +85,8 @@ const I18N = {
     'ctx.pin': 'Pin', 'ctx.unpin': 'Unpin', 'ctx.del': 'Delete',
     'common.close': 'Close', 'common.more': 'More', 'common.optional': 'Optional',
     'modal.preset': 'Presets', 'modal.addModel': 'Add model', 'modal.editModel': 'Edit model', 'modal.settings': 'Settings',
-    'set.theme': 'Theme color', 'set.lang': 'Language', 'set.model': 'Model', 'set.addModel': 'Add model',
+    'set.appearance': 'Appearance', 'set.plainUi': 'Plain', 'set.theme': 'Color', 'set.lang': 'Language', 'set.model': 'Model', 'set.addModel': 'Add model',
+    'appearance.light': 'Light', 'appearance.dark': 'Dark',
     'set.noModels': 'No models yet — add one below',
     'lang.zh': '简体中文', 'lang.en': 'English',
     'model.name': 'Note', 'model.namePh': 'Shown in the model list',
@@ -94,7 +97,8 @@ const I18N = {
     'model.retries': 'Retries (×)', 'model.connTimeout': 'Connect (s)', 'model.readTimeout': 'Read (s)',
     'model.save': 'Save', 'common.cancel': 'Cancel', 'common.edit': 'Edit', 'common.delete': 'Delete',
     'err.modelSave': 'Save failed', 'err.modelRequired': 'Model, API Key and base URL are required',
-    'err.modelDelete': 'Delete failed', 'confirm.modelDelete': 'Delete this model profile?',
+    'err.modelDelete': 'Delete failed', 'err.modelDeleteLast': 'At least one model is required',
+    'confirm.modelDelete': 'Delete this model profile?',
     'page.channels.title': 'Channels', 'page.channels.sub': 'imbot channels managed by hub.pyw — one row per channel',
     'page.status.title': 'Status', 'page.status.sub': 'Background processes/services managed by hub.pyw',
     'page.collab.title': 'Collaboration', 'page.collab.sub': 'Live state & output of subagents / Hive workers',
@@ -125,9 +129,28 @@ const I18N = {
     'presetPrompt.mine': 'Collect this week\'s git commits and write a weekly report.',
   },
 };
-let lang = (localStorage.getItem('ga_lang') === 'en') ? 'en' : 'zh';
+const LANGS = ['zh', 'en'];
+let lang = LANGS.includes(localStorage.getItem('ga_lang')) ? localStorage.getItem('ga_lang') : 'zh';
 let theme = localStorage.getItem('ga_theme') || '1';
-const STORE = { lang: 'ga_lang', theme: 'ga_theme', llmNo: 'ga_llm_no' };
+const STORE = { lang: 'ga_lang', theme: 'ga_theme', appearance: 'ga_appearance', plain: 'ga_plain', llmNo: 'ga_llm_no' };
+const APPEARANCE_IDS = ['light', 'dark'];
+const LEGACY_STYLE = { classic: ['light', true], tinted: ['light', false], dark: ['dark', false] };
+
+function migrateAppearance() {
+  let app = localStorage.getItem(STORE.appearance);
+  let plain = localStorage.getItem(STORE.plain) === '1';
+  const legacy = localStorage.getItem('ga_style');
+  if (!app && legacy && LEGACY_STYLE[legacy]) {
+    [app, plain] = LEGACY_STYLE[legacy];
+    localStorage.setItem(STORE.appearance, app);
+    if (plain) localStorage.setItem(STORE.plain, '1');
+    else localStorage.removeItem(STORE.plain);
+    localStorage.removeItem('ga_style');
+  }
+  if (!APPEARANCE_IDS.includes(app)) app = 'light';
+  return { appearance: app, plain: plain && app === 'light' };
+}
+let { appearance, plain: plainUi } = migrateAppearance();
 const bridgeHost = () => `${location.protocol}//${location.hostname}:14168`;
 async function bridgeFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
@@ -156,25 +179,66 @@ function applyI18n() {
     el.setAttribute('placeholder', el.hasAttribute('data-optional-ph') ? optionalPh(phKey) : t(phKey));
   });
   document.querySelectorAll('[data-i18n-title]').forEach(el => { el.setAttribute('title', t(el.dataset.i18nTitle)); });
-  populateLangSelect();
+  renderLangList();
 }
-function populateLangSelect() {
-  if (!langSel) return;
-  langSel.innerHTML = '';
-  ['zh', 'en'].forEach(code => {
-    const opt = document.createElement('option');
-    opt.value = code; opt.textContent = t('lang.' + code);
-    langSel.appendChild(opt);
+function renderLangList() {
+  const box = document.getElementById('lang-list');
+  if (!box) return;
+  box.innerHTML = '';
+  LANGS.forEach(code => {
+    const row = document.createElement('label');
+    row.className = 'model-row' + (lang === code ? ' sel' : '');
+    row.innerHTML = `<input type="radio" name="lang-pick"${lang === code ? ' checked' : ''}><span>${escapeHtml(t('lang.' + code))}</span>`;
+    row.addEventListener('click', (e) => { e.preventDefault(); selectLang(code); });
+    box.appendChild(row);
   });
-  langSel.value = lang;
+}
+function selectLang(code) {
+  if (!LANGS.includes(code) || lang === code) return;
+  lang = code;
+  localStorage.setItem(STORE.lang, lang);
+  applyI18n();
+  renderSessionList();
+  refreshStatusLabel();
+  updateModelChip();
+  renderSettingsModels();
 }
 function applyTheme(id) {
-  theme = String(id || '1');
+  const n = parseInt(id, 10);
+  theme = (n >= 1 && n <= 8) ? String(n) : '1';
   document.documentElement.dataset.theme = theme;
   localStorage.setItem(STORE.theme, theme);
   document.querySelectorAll('#theme-swatches .swatch').forEach(el => {
     el.classList.toggle('sel', el.dataset.theme === theme);
   });
+}
+function syncPlainSwitch() {
+  const row = document.getElementById('plain-ui-row');
+  const sw = document.getElementById('plain-ui-switch');
+  if (!row || !sw) return;
+  const show = appearance === 'light';
+  row.hidden = !show;
+  sw.setAttribute('aria-checked', plainUi ? 'true' : 'false');
+}
+function applyAppearance(nextApp, nextPlain) {
+  appearance = APPEARANCE_IDS.includes(nextApp) ? nextApp : 'light';
+  if (appearance === 'light') {
+    plainUi = !!nextPlain;
+    if (plainUi) localStorage.setItem(STORE.plain, '1');
+    else localStorage.removeItem(STORE.plain);
+  } else {
+    plainUi = false;
+  }
+  localStorage.setItem(STORE.appearance, appearance);
+  document.documentElement.dataset.appearance = appearance;
+  if (plainUi) document.documentElement.dataset.plain = '1';
+  else delete document.documentElement.dataset.plain;
+  document.querySelectorAll('#appearance-seg .appear-card').forEach(el => {
+    const on = el.dataset.appearance === appearance;
+    el.classList.toggle('sel', on);
+    el.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  syncPlainSwitch();
 }
 
 /* ═══════════════ 侧边栏导航 ═══════════════ */
@@ -324,7 +388,6 @@ bindResize(rpResize, rpPanel, -1, 160, 400);  // 右栏:cursor 左移 → 增宽
 bindResize(sbResize, sbPanel, +1, 180, 360);  // 左栏:cursor 右移 → 增宽
 const modelChip  = document.getElementById('model-chip');
 const modelNameEl= modelChip ? modelChip.querySelector('.model-name') : null;
-const langSel    = document.getElementById('lang-select');
 
 let msgsEl = null;
 function ensureMsgs() {
@@ -735,7 +798,8 @@ async function deleteModel(id, name) {
     }
     renderSettingsModels();
   } catch (ex) {
-    alert(ex.message || t('err.modelDelete'));
+    const msg = ex.message || '';
+    alert(msg.includes('last profile') ? t('err.modelDeleteLast') : (msg || t('err.modelDelete')));
   }
 }
 function renderSettingsModels() {
@@ -767,8 +831,9 @@ function renderSettingsModels() {
 function openSettings() {
   openModal('settings-modal');
   renderSettingsModels();
-  populateLangSelect();
+  renderLangList();
   applyTheme(theme);
+  applyAppearance(appearance, plainUi);
 }
 async function loadModelProfiles() {
   try {
@@ -801,14 +866,16 @@ if (themeSwatches) themeSwatches.addEventListener('click', (e) => {
   const sw = e.target.closest('.swatch[data-theme]');
   if (sw) applyTheme(sw.dataset.theme);
 });
-if (langSel) langSel.addEventListener('change', () => {
-  lang = (langSel.value === 'en') ? 'en' : 'zh';
-  localStorage.setItem(STORE.lang, lang);
-  applyI18n();
-  renderSessionList();
-  refreshStatusLabel();
-  updateModelChip();
-  renderSettingsModels();
+const appearanceSeg = document.getElementById('appearance-seg');
+if (appearanceSeg) appearanceSeg.addEventListener('click', (e) => {
+  const btn = e.target.closest('.appear-card[data-appearance]');
+  if (!btn) return;
+  const isLight = btn.dataset.appearance === 'light';
+  applyAppearance(btn.dataset.appearance, isLight && localStorage.getItem(STORE.plain) === '1');
+});
+const plainUiSwitch = document.getElementById('plain-ui-switch');
+if (plainUiSwitch) plainUiSwitch.addEventListener('click', () => {
+  if (appearance === 'light') applyAppearance('light', !plainUi);
 });
 async function loadBridgeConfig() {
   try {
@@ -1005,6 +1072,7 @@ if(tokResetBtn)tokResetBtn.addEventListener('click',()=>{if(tokSince)tokSince.va
 nav.addEventListener('click',(e)=>{const item=e.target.closest('.nav-item');if(item&&item.dataset.page==='token')loadTokenPage();});
 
 /* ═══════════════ 启动 ═══════════════ */
+applyAppearance(appearance, plainUi);
 applyTheme(theme);
 applyI18n();
 updateModelChip();

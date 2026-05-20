@@ -6,6 +6,22 @@
 <link rel="stylesheet" href="styles.css">
 <!-- DEV 脚手架(标注模式)：删本行 + 下方 annot.js 一行即可彻底移除 -->
 <link rel="stylesheet" href="annot.css">
+<script>
+(function(){
+  var t=localStorage.getItem('ga_theme'); if(t) document.documentElement.dataset.theme=t;
+  var legacy=localStorage.getItem('ga_style');
+  var app=localStorage.getItem('ga_appearance');
+  if(!app&&legacy){
+    if(legacy==='dark') app='dark';
+    else{ app='light'; if(legacy==='classic') localStorage.setItem('ga_plain','1'); }
+    localStorage.setItem('ga_appearance',app);
+    localStorage.removeItem('ga_style');
+  }
+  app=app||'light';
+  document.documentElement.dataset.appearance=app;
+  if(app==='light'&&localStorage.getItem('ga_plain')==='1') document.documentElement.dataset.plain='1';
+})();
+</script>
 </head>
 <body>
 
@@ -337,19 +353,41 @@
         </button>
       </div>
       <div class="modal-body set-body">
-        <div>
-          <div class="set-sec-t" data-i18n="set.theme"></div>
-          <div class="swatches" id="theme-swatches">
-            <span class="swatch sel" data-theme="1" role="button" tabindex="0"></span>
-            <span class="swatch" data-theme="2" role="button" tabindex="0"></span>
-            <span class="swatch" data-theme="3" role="button" tabindex="0"></span>
-            <span class="swatch" data-theme="4" role="button" tabindex="0"></span>
-            <span class="swatch" data-theme="5" role="button" tabindex="0"></span>
+        <div class="set-block">
+          <div class="set-sec-t" data-i18n="set.appearance"></div>
+          <div class="appear-cards" id="appearance-seg" role="radiogroup">
+            <button class="appear-card sel" type="button" data-appearance="light" role="radio" aria-checked="true">
+              <span class="appear-preview appear-preview-light" aria-hidden="true"></span>
+              <span class="appear-name" data-i18n="appearance.light"></span>
+            </button>
+            <button class="appear-card" type="button" data-appearance="dark" role="radio" aria-checked="false">
+              <span class="appear-preview appear-preview-dark" aria-hidden="true"></span>
+              <span class="appear-name" data-i18n="appearance.dark"></span>
+            </button>
+          </div>
+          <div class="set-toggle-row" id="plain-ui-row" hidden>
+            <span class="set-toggle-label" data-i18n="set.plainUi"></span>
+            <button class="set-switch" type="button" id="plain-ui-switch" role="switch" aria-checked="false">
+              <span class="set-switch-knob" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
-        <div>
+        <div class="set-block">
+          <div class="set-sec-t" data-i18n="set.theme"></div>
+          <div class="color-grid" id="theme-swatches">
+            <span class="swatch sel" data-theme="1" role="button" tabindex="0" aria-label="1"></span>
+            <span class="swatch" data-theme="2" role="button" tabindex="0" aria-label="2"></span>
+            <span class="swatch" data-theme="3" role="button" tabindex="0" aria-label="3"></span>
+            <span class="swatch" data-theme="4" role="button" tabindex="0" aria-label="4"></span>
+            <span class="swatch" data-theme="5" role="button" tabindex="0" aria-label="5"></span>
+            <span class="swatch" data-theme="6" role="button" tabindex="0" aria-label="6"></span>
+            <span class="swatch" data-theme="7" role="button" tabindex="0" aria-label="7"></span>
+            <span class="swatch" data-theme="8" role="button" tabindex="0" aria-label="8"></span>
+          </div>
+        </div>
+        <div class="set-block">
           <div class="set-sec-t" data-i18n="set.lang"></div>
-          <select class="set-select" id="lang-select"></select>
+          <div class="model-list lang-list" id="lang-list"></div>
         </div>
         <div>
           <div class="set-sec-t" data-i18n="set.model"></div>
