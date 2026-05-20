@@ -21,7 +21,7 @@ const I18N = {
     'preset.add.t': '自定义', 'preset.add.d': '任意一句话存为功能',
     'composer.placeholder': '输入消息… (Enter 发送, Shift+Enter 换行)',
     'search.placeholder': '搜索会话…', 'conv.new': '新对话',
-    'ctx.pin': '置顶', 'ctx.del': '删除',
+    'ctx.pin': '置顶', 'ctx.unpin': '取消置顶', 'ctx.del': '删除',
     'common.close': '关闭', 'common.more': '更多',
     'modal.preset': '预设功能', 'modal.addModel': '添加模型', 'modal.settings': '配置',
     'set.theme': '主题色', 'set.lang': '语言', 'set.model': '模型', 'set.addModel': '添加模型',
@@ -69,7 +69,7 @@ const I18N = {
     'preset.add.t': 'Custom', 'preset.add.d': 'Save any prompt as a function',
     'composer.placeholder': 'Type a message… (Enter to send, Shift+Enter for newline)',
     'search.placeholder': 'Search chats…', 'conv.new': 'New chat',
-    'ctx.pin': 'Pin', 'ctx.del': 'Delete',
+    'ctx.pin': 'Pin', 'ctx.unpin': 'Unpin', 'ctx.del': 'Delete',
     'common.close': 'Close', 'common.more': 'More',
     'modal.preset': 'Presets', 'modal.addModel': 'Add model', 'modal.settings': 'Settings',
     'set.theme': 'Theme color', 'set.lang': 'Language', 'set.model': 'Model', 'set.addModel': 'Add model',
@@ -214,29 +214,38 @@ const rpPanel    = document.getElementById('rightpanel');
 const bodyEl     = document.querySelector('.body');
 if (rpToggle) rpToggle.addEventListener('click', () => bodyEl.classList.toggle('rp-collapsed'));
 
-if (rpResize && rpPanel) {
+const sbToggle = document.getElementById('sb-toggle');
+const sbResize = document.getElementById('sb-resize');
+const sbPanel  = document.querySelector('.sidebar');
+if (sbToggle) sbToggle.addEventListener('click', () => bodyEl.classList.toggle('sb-collapsed'));
+
+// 通用拖拽：dir=+1 拖动 →clientX 增大就增宽(左侧栏);dir=-1 反之(右侧)
+function bindResize(handle, panel, dir, min, max) {
+  if (!handle || !panel) return;
   let dragging = false, startX = 0, startW = 0;
-  rpResize.addEventListener('mousedown', (e) => {
-    dragging = true; startX = e.clientX; startW = rpPanel.offsetWidth;
-    rpResize.classList.add('dragging');
+  handle.addEventListener('mousedown', (e) => {
+    dragging = true; startX = e.clientX; startW = panel.offsetWidth;
+    handle.classList.add('dragging');
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
     e.preventDefault();
   });
   document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
-    const w = Math.min(400, Math.max(160, startW + (startX - e.clientX)));
-    rpPanel.style.width = w + 'px';
-    rpPanel.style.flex = '0 0 ' + w + 'px';
+    const w = Math.min(max, Math.max(min, startW + dir * (e.clientX - startX)));
+    panel.style.width = w + 'px';
+    panel.style.flex = '0 0 ' + w + 'px';
   });
   document.addEventListener('mouseup', () => {
     if (!dragging) return;
     dragging = false;
-    rpResize.classList.remove('dragging');
+    handle.classList.remove('dragging');
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
   });
 }
+bindResize(rpResize, rpPanel, -1, 160, 400);  // 右栏:cursor 左移 → 增宽
+bindResize(sbResize, sbPanel, +1, 180, 360);  // 左栏:cursor 右移 → 增宽
 const modelChip  = document.getElementById('model-chip');
 const modelNameEl= modelChip ? modelChip.querySelector('.model-name') : null;
 const langSel    = document.getElementById('lang-select');
@@ -333,9 +342,10 @@ function renderSessionList() {
     const item = document.createElement('div');
     item.className = 'conv-item' + (sess.id === state.activeId ? ' active' : '') + (busy ? '' : ' idle');
     item.dataset.id = sess.id;
+    const pinSvg = sess.pinned ? `<svg class="ci-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3-1-6z"/></svg>` : '';
     item.innerHTML =
       `<span class="ci-dot"></span><div class="ci-main">` +
-      `<div class="ci-title">${escapeHtml(sess.title || t('conv.defaultTitle'))}</div>` +
+      `<div class="ci-title">${pinSvg}${escapeHtml(sess.title || t('conv.defaultTitle'))}</div>` +
       `<div class="ci-meta">${busy ? t('status.running') : t('status.idle')}</div></div>` +
       `<button class="ci-more" title="${escapeHtml(t('common.more'))}"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg></button>`;
     convListEl.appendChild(item);
@@ -389,6 +399,14 @@ convListEl.addEventListener('click', (e) => {
   if (more) {
     e.stopPropagation();
     menuTargetId = more.closest('.conv-item').dataset.id;
+    // 根据当前会话置顶状态切菜单文案:置顶 / 取消置顶
+    const tgt = state.sessions.get(menuTargetId);
+    const pinSpan = convMenu.querySelector('[data-act="pin"] [data-i18n]');
+    if (pinSpan) {
+      const k = tgt && tgt.pinned ? 'ctx.unpin' : 'ctx.pin';
+      pinSpan.setAttribute('data-i18n', k);
+      pinSpan.textContent = t(k);
+    }
     convMenu.hidden = false;
     const rect = more.getBoundingClientRect();
     convMenu.style.top = (rect.bottom + 4) + 'px';
@@ -403,9 +421,21 @@ convMenu.addEventListener('click', (e) => {
   const act = e.target.closest('.ctx-item')?.dataset.act;
   const sess = menuTargetId && state.sessions.get(menuTargetId);
   if (sess && act === 'pin') {
-    const m = new Map(); m.set(sess.id, sess);
-    for (const [k, v] of state.sessions) if (k !== sess.id) m.set(k, v);
-    state.sessions = m; renderSessionList();
+    if (sess.pinned) {
+      sess.pinned = false;       // 取消置顶 + 放到 pinned 之后、其它 unpinned 之前(unpinned 区域顶部)
+      const others = [...state.sessions.values()].filter(s => s.id !== sess.id);
+      const m = new Map();
+      for (const s of others) if (s.pinned) m.set(s.id, s);  // 先所有仍 pinned 的
+      m.set(sess.id, sess);                                   // 再本会话(刚 unpinned)
+      for (const s of others) if (!s.pinned) m.set(s.id, s);  // 再其它 unpinned
+      state.sessions = m;
+    } else {
+      sess.pinned = true;        // 置顶 + 移到列表顶
+      const m = new Map(); m.set(sess.id, sess);
+      for (const [k, v] of state.sessions) if (k !== sess.id) m.set(k, v);
+      state.sessions = m;
+    }
+    renderSessionList();
   } else if (sess && act === 'del') {
     closeSession(sess.id);
   }
@@ -438,7 +468,20 @@ async function pollSession(sess) {
       const busy = result.status === 'running' || !!result.partial;
       setBusy(sess, busy);
       if (busy) await new Promise(z => setTimeout(z, 500));
-      else { if (r.draftEl) { r.draftEl.remove(); r.draftEl = null; } break; }
+      else {
+        // 退出 poll：若草稿还在(取消时 bridge 不发 final),把已流式输出的文本定稿,加 [已停止] 标记
+        if (r.draftEl) {
+          if (r.draftText && r.draftText.trim()) {
+            const m = { role:'assistant', content: r.draftText + '\n\n_[' + t('status.stopped') + ']_' };
+            sess.messages.push(m);
+            r.draftEl.remove(); r.draftEl = null; r.draftText = '';
+            if (isActive(sess)) appendMessage(sess, m);
+          } else {
+            r.draftEl.remove(); r.draftEl = null;
+          }
+        }
+        break;
+      }
     } while (true);
   } catch (e) {
     showError(t('err.poll') + ': ' + (e.message || e));

@@ -138,7 +138,7 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; }
 
 .body{
   flex:1; display:flex; min-height:0;
-  background:var(--bg); padding:14px; gap:12px;
+  background:var(--bg); padding:14px; gap:6px;
   position:relative;
 }
 
@@ -148,6 +148,7 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; }
   border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow);
   overflow:hidden; display:flex; flex-direction:column;
   padding:14px 12px;
+  transition:width .2s, padding .2s, opacity .15s, flex .2s;
 }
 .brand{ display:flex; align-items:center; gap:10px; padding:6px 6px 16px; }
 .brand-logo{
@@ -378,29 +379,50 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; }
 .send svg{ width:15px; height:15px; }
 
 /* ============ ④ 右侧会话面板 ============ */
-.rp-toggle{
+.rp-toggle, .sb-toggle{
   position:relative; z-index:10; align-self:center;
   width:20px; height:36px; border:1px solid var(--line); border-radius:6px;
   background:var(--panel); cursor:pointer; display:flex; align-items:center; justify-content:center;
-  color:var(--muted); flex:0 0 auto; margin-right:-10px; margin-left:-10px;
-  transition:color .15s, width .2s, margin .2s, opacity .15s;
+  color:var(--txt-2); flex:0 0 auto; margin-right:-10px; margin-left:-10px;
+  opacity:.6;  /* 与折叠态观感一致；hover 恢复满显 */
+  transition:color .15s, opacity .15s, width .2s, margin .2s;
 }
-.rp-toggle:hover{ color:var(--txt-2); border-color:var(--line-strong); }
-.rp-toggle svg{ width:14px; height:14px; transition:transform .2s; }
-.body.rp-collapsed .rp-toggle svg{ transform:rotate(180deg); }
+.rp-toggle:hover, .sb-toggle:hover{ opacity:1; color:var(--txt-2); border-color:var(--line-strong); }
+.rp-toggle svg, .sb-toggle svg{ width:14px; height:14px; transition:transform .2s; }
+/* 视觉上压进对应面板内侧（不改变 flex 布局，仅位移） */
+.rp-toggle{ transform:translateX(24px); }
+.sb-toggle{ transform:translateX(-22px); }
+
+.body.rp-collapsed .rp-toggle svg,
+.body.sb-collapsed .sb-toggle svg{ transform:rotate(180deg); }
 .body.rp-collapsed .rp-toggle{
   position:absolute; right:7px; top:50%; transform:translateY(-50%);
   margin:0; width:20px; opacity:.6;
 }
-.body.rp-collapsed .rp-toggle:hover{ opacity:1; }
+.body.sb-collapsed .sb-toggle{
+  position:absolute; left:7px; top:50%; transform:translateY(-50%);
+  margin:0; width:20px; opacity:.6;
+}
+.body.rp-collapsed .rp-toggle:hover,
+.body.sb-collapsed .sb-toggle:hover{ opacity:1; }
 
-.rp-resize{
+.rp-resize, .sb-resize{
   width:4px; flex:0 0 4px; cursor:col-resize; border-radius:2px;
   background:transparent; transition:background .15s; align-self:stretch;
-  margin-right:-10px;
+  position:relative; z-index:5;  /* gap 缩小后会与面板重叠,提到面板之上保证可拖 */
 }
-.rp-resize:hover, .rp-resize.dragging{ background:var(--blue); }
-.body.rp-collapsed .rp-resize{ display:none; }
+.rp-resize{ margin-right:-10px; }
+.sb-resize{ margin-left:-10px; }
+.rp-resize:hover, .rp-resize.dragging,
+.sb-resize:hover, .sb-resize.dragging{ background:var(--blue); }
+.body.rp-collapsed .rp-resize,
+.body.sb-collapsed .sb-resize{ display:none; }
+
+/* 侧边栏折叠时整块隐藏 */
+.body.sb-collapsed .sidebar{
+  width:0; flex:0 0 0; padding:0; border:none; opacity:0; pointer-events:none; overflow:hidden;
+  margin:0; display:none;
+}
 
 .rightpanel{
   width:220px; flex:0 0 220px; background:var(--panel);
@@ -435,6 +457,7 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; }
 .conv-item.idle .ci-dot{ background:var(--dot-idle); }
 .ci-main{ flex:1; min-width:0; }
 .ci-title{ font-size:13px; font-weight:600; color:var(--txt-strong); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ci-pin{ width:14px; height:14px; color:var(--blue); margin-right:3px; vertical-align:-3px; flex:0 0 auto; display:inline-block; transform:rotate(45deg); transform-origin:50% 50%; }
 .ci-meta{ font-size:11px; color:var(--muted); margin-top:2px; }
 .ci-more{
   flex:0 0 auto; width:22px; height:22px; border:none; background:transparent;
