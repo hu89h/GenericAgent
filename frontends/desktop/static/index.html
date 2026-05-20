@@ -189,17 +189,30 @@
           <div class="page-pad">
             <div class="page-title" data-i18n="page.token.title"></div>
             <div class="page-sub" data-i18n="page.token.sub"></div>
+            <div class="tok-filter">
+              <label data-i18n="tok.from"></label>
+              <input type="datetime-local" id="tok-since">
+              <label data-i18n="tok.to"></label>
+              <input type="datetime-local" id="tok-until">
+              <button class="tok-reset" id="tok-reset" data-i18n="tok.reset"></button>
+            </div>
             <div class="stat-row">
-              <div class="stat"><div class="s-n">1.24M</div><div class="s-l" data-i18n="tok.total"></div></div>
-              <div class="stat"><div class="s-n">¥ 38.6</div><div class="s-l" data-i18n="tok.cost"></div></div>
-              <div class="stat"><div class="s-n">86k</div><div class="s-l" data-i18n="tok.today"></div></div>
+              <div class="stat"><div class="s-n" id="tok-total-n">0</div><div class="s-l" data-i18n="tok.total"></div></div>
+              <div class="stat"><div class="s-n" id="tok-cost-n">¥ 0</div><div class="s-l" data-i18n="tok.cost"></div></div>
+              <div class="stat"><div class="s-n" id="tok-today-n">0</div><div class="s-l" data-i18n="tok.today"></div></div>
             </div>
-            <div class="list">
-              <div class="list-row head"><b data-i18n="tok.colSession"></b><span class="kv" data-i18n="tok.colModel"></span><span class="kv" data-i18n="tok.colIn"></span><span class="kv" data-i18n="tok.colOut"></span><span class="kv" data-i18n="tok.colCost"></span></div>
-              <div class="list-row"><b data-i18n="tok.s1"></b><span class="kv">opus</span><span class="kv">42k</span><span class="kv">11k</span><span class="kv">¥9.2</span></div>
-              <div class="list-row"><b data-i18n="tok.s2"></b><span class="kv">sonnet</span><span class="kv">120k</span><span class="kv">30k</span><span class="kv">¥6.1</span></div>
-              <div class="list-row"><b data-i18n="tok.s3"></b><span class="kv">sonnet</span><span class="kv">88k</span><span class="kv">25k</span><span class="kv">¥4.4</span></div>
-            </div>
+            <table class="tok-table" id="tok-table">
+              <thead><tr>
+                <th data-i18n="tok.colSession"></th>
+                <th data-i18n="tok.colIn"></th>
+                <th data-i18n="tok.colOut"></th>
+                <th data-i18n="tok.colCacheW"></th>
+                <th data-i18n="tok.colCache"></th>
+                <th data-i18n="tok.cost"></th>
+              </tr></thead>
+              <tbody id="tok-tbody"></tbody>
+            </table>
+            <div class="tok-pager" id="tok-pager"></div>
           </div>
         </section>
 

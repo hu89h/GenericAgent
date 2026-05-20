@@ -98,6 +98,8 @@ class AgentManager:
 
     def make_agent(self, sess: Session):
         root = self.ensure_ga_import_path()
+        try: import cost_tracker; cost_tracker.install()
+        except Exception: pass
         old_cwd = os.getcwd()
         try:
             os.chdir(sess.cwd or str(root))
@@ -574,6 +576,27 @@ async def path_open_handler(request):
     return json_ok({"ok": True, "path": str(target)})
 
 
+async def token_stats_handler(request):
+    try:
+        sys.path.insert(0, str(APP_DIR)) if str(APP_DIR) not in sys.path else None
+        import cost_tracker
+        trackers = cost_tracker.all_trackers()
+        records = []
+        for k, v in trackers.items():
+            model = ''
+            sid = k.replace('GA-', '')
+            with manager.lock:
+                sess = manager.sessions.get(sid)
+            if sess and sess.agent:
+                try: model = sess.agent.get_llm_name(model=True) or ''
+                except Exception: pass
+            records.append({"thread": k, "input": v.input, "output": v.output,
+                            "cacheCreate": v.cache_create, "cacheRead": v.cache_read, "model": model})
+    except Exception:
+        records = []
+    return json_ok({"records": records})
+
+
 def create_app():
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/ws", ws_handler)
@@ -589,6 +612,7 @@ def create_app():
     app.router.add_get("/session/{sid}/messages", messages_handler)
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
     app.router.add_post("/path/open", path_open_handler)
+    app.router.add_get("/token-stats", token_stats_handler)
 
     # Serve static frontend (desktop/static/)
     static_dir = APP_DIR / "desktop" / "static"

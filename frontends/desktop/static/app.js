@@ -46,8 +46,8 @@ const I18N = {
     'cm.scheduling': '调度中', 'cm.running': '执行中', 'cm.idleSt': '空闲',
     'cm.master': '已派 3 子任务', 'cm.w1': '子任务：抓取数据', 'cm.w2': '子任务：复核结果', 'cm.sub': '等待派单',
     'tok.total': '累计 token', 'tok.cost': '估算成本', 'tok.today': '今日 token',
-    'tok.colSession': '会话', 'tok.colModel': '模型', 'tok.colIn': '输入', 'tok.colOut': '输出', 'tok.colCost': '成本',
-    'tok.s1': '选股分析', 'tok.s2': '批量整理', 'tok.s3': 'Goal·部署',
+    'tok.colSession': '会话', 'tok.colIn': '输入', 'tok.colOut': '输出', 'tok.colCacheW': '缓存写入', 'tok.colCache': '缓存读取', 'tok.colCost': '成本',
+    'tok.from': '从', 'tok.to': '到', 'tok.reset': '重置', 'tok.noData': '暂无记录',
     'presetPrompt.goal': '进入 Goal 模式：读 L3 goal mode SOP，自主达成我接下来描述的目标。',
     'presetPrompt.explore': '进入自主探索模式：自动浏览并定期向我汇总要点。',
     'presetPrompt.hive': '启动 Goal Hive 模式：按 hive SOP 拉起多个 worker 协同完成我接下来的目标。',
@@ -94,8 +94,8 @@ const I18N = {
     'cm.scheduling': 'Scheduling', 'cm.running': 'Running', 'cm.idleSt': 'Idle',
     'cm.master': 'Dispatched 3 subtasks', 'cm.w1': 'Subtask: fetch data', 'cm.w2': 'Subtask: review results', 'cm.sub': 'Waiting for tasks',
     'tok.total': 'Total tokens', 'tok.cost': 'Est. cost', 'tok.today': 'Today tokens',
-    'tok.colSession': 'Session', 'tok.colModel': 'Model', 'tok.colIn': 'Input', 'tok.colOut': 'Output', 'tok.colCost': 'Cost',
-    'tok.s1': 'Stock screening', 'tok.s2': 'Batch tidy-up', 'tok.s3': 'Goal · Deploy',
+    'tok.colSession': 'Session', 'tok.colIn': 'Input', 'tok.colOut': 'Output', 'tok.colCacheW': 'Cache write', 'tok.colCache': 'Cache read', 'tok.colCost': 'Cost',
+    'tok.from': 'From', 'tok.to': 'To', 'tok.reset': 'Reset', 'tok.noData': 'No records',
     'presetPrompt.goal': 'Enter Goal mode: read the L3 goal-mode SOP and autonomously achieve the goal I describe next.',
     'presetPrompt.explore': 'Enter auto-explore mode: browse autonomously and periodically summarize key points to me.',
     'presetPrompt.hive': 'Start Goal Hive mode: per the hive SOP, spawn multiple workers to collaboratively achieve the goal I describe next.',
@@ -584,6 +584,7 @@ window.ga.onBridgeNotification((msg) => {
     for (const sess of state.sessions.values()) {
       if (sess.bridgeSessionId === msg.sessionId) {
         if (msg.status === 'running' || msg.state === 'running') pollSession(sess);
+        if (msg.state === 'idle' || msg.status === 'idle') tokPollBridge();
         renderSessionList();
         break;
       }
@@ -592,6 +593,131 @@ window.ga.onBridgeNotification((msg) => {
 });
 window.ga.onBridgeError((err) => { console.warn('[bridge error]', err); });
 window.ga.onBridgeClosed(() => { state.bridgeReady = false; runLabel.textContent = t('status.disconnected'); });
+
+/* ═══════════════ Token 统计页 ═══════════════ */
+const tokTbody = document.getElementById('tok-tbody');
+const tokPager = document.getElementById('tok-pager');
+const tokSince = document.getElementById('tok-since');
+const tokUntil = document.getElementById('tok-until');
+const tokTotalN = document.getElementById('tok-total-n');
+const tokTodayN = document.getElementById('tok-today-n');
+const tokCostN = document.getElementById('tok-cost-n');
+const TOK_PER_PAGE = 15;
+let _tokPage = 0;
+const TOK_STORE_KEY = 'ga_token_history';
+
+// Model price table: $/M tokens [input, output]
+const MODEL_PRICES = {
+  'gpt-5.4':[2.50,15],'gpt-5':[1.25,10],'gpt-5-mini':[0.25,2],'gpt-4o':[2.50,10],'gpt-4o-mini':[0.15,0.60],
+  'gpt-4.1':[2,8],'gpt-4.1-mini':[0.40,1.60],'gpt-4.1-nano':[0.10,0.40],'o4-mini':[1.10,4.40],
+  'claude-opus-4-7':[5,25],'claude-opus-4-6':[5,25],'claude-sonnet-4-6':[3,15],'claude-sonnet-4-5':[3,15],'claude-haiku-4-5':[1,5],
+  'deepseek-v4':[0.14,0.28],'deepseek-v4-pro':[0.55,2.19],'deepseek-chat':[0.14,0.28],'deepseek-reasoner':[0.55,2.19],
+  'glm-5.1':[0.50,0.50],'minimax-m2.7':[0.50,0.50],'kimi-for-coding':[0.50,2],
+};
+const CNY_RATE = 7.2;
+function estCost(inp, out, model, cacheRead, cacheCreate) {
+  let p = [3,15];
+  if (model) { const m = model.toLowerCase().replace(/\[.*\]/,''); p = MODEL_PRICES[m] || Object.entries(MODEL_PRICES).find(([k])=>m.includes(k))?.[1] || p; }
+  const isClaudeOrDS = model && /claude|deepseek/i.test(model);
+  const cacheReadRate = isClaudeOrDS ? 0.1 : 0.5;
+  const cacheWriteRate = isClaudeOrDS ? 1.25 : 1.0;
+  const cost = (inp*p[0] + out*p[1] + (cacheRead||0)*p[0]*cacheReadRate + (cacheCreate||0)*p[0]*cacheWriteRate) / 1e6 * CNY_RATE;
+  return cost.toFixed(2);
+}
+function fmtTok(n) { return n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n); }
+function fmtTime(ts) { return new Date(ts*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
+
+function tokLoadHistory() { try { return JSON.parse(localStorage.getItem(TOK_STORE_KEY)||'[]'); } catch(_) { return []; } }
+function tokSaveHistory(h) { localStorage.setItem(TOK_STORE_KEY, JSON.stringify(h)); }
+
+// Poll bridge and snapshot deltas into localStorage
+const TOK_SNAP_KEY = 'ga_token_snap';
+let _tokLastSnap = (() => { try { return JSON.parse(localStorage.getItem(TOK_SNAP_KEY)||'{}'); } catch(_) { return {}; } })();
+let _tokPolling = false;
+async function tokPollBridge() {
+  if (_tokPolling) return;
+  _tokPolling = true;
+  try {
+    const res = await fetch(`http://${location.hostname}:14168/token-stats`);
+    const data = await res.json();
+    const history = tokLoadHistory();
+    for (const r of (data.records||[])) {
+      const key = r.thread;
+      const prev = _tokLastSnap[key] || {input:0,output:0,cacheCreate:0,cacheRead:0};
+      const di = r.input-prev.input, do_ = r.output-prev.output, dc = r.cacheCreate-prev.cacheCreate, dr = r.cacheRead-prev.cacheRead;
+      if (di>0||do_>0||dc>0||dr>0) {
+        const sid = key.replace('GA-','');
+        const sess = [...state.sessions.values()].find(s=>s.bridgeSessionId===sid);
+        const title = sess?.title||sid;
+        history.push({sessionId:sid, title:title, input:di, output:do_, cacheCreate:dc, cacheRead:dr, model:r.model||'', ts:Date.now()/1000});
+        if(sess?.title) history.forEach(h=>{if(h.sessionId===sid&&(!h.title||h.title===sid))h.title=sess.title;});
+      }
+      _tokLastSnap[key] = {input:r.input, output:r.output, cacheCreate:r.cacheCreate, cacheRead:r.cacheRead};
+    }
+    localStorage.setItem(TOK_SNAP_KEY, JSON.stringify(_tokLastSnap));
+    tokSaveHistory(history);
+  } catch(_) {}
+  _tokPolling = false;
+}
+
+function tokGetFiltered() {
+  let records = tokLoadHistory();
+  const since = tokSince?.value ? new Date(tokSince.value).getTime()/1000 : 0;
+  const until = tokUntil?.value ? new Date(tokUntil.value).getTime()/1000 : 0;
+  if (since) records = records.filter(r=>r.ts>=since);
+  if (until) records = records.filter(r=>r.ts<=until);
+  return records;
+}
+
+function tokRenderStats(filtered, all) {
+  let total=0, cost=0;
+  filtered.forEach(r=>{total+=(r.input||0)+(r.output||0); cost+=parseFloat(estCost(r.input||0,r.output||0,r.model,r.cacheRead||0,r.cacheCreate||0));});
+  if(tokTotalN) tokTotalN.textContent=fmtTok(total);
+  if(tokCostN) tokCostN.textContent='¥ '+cost.toFixed(1);
+  const todayStart=new Date(); todayStart.setHours(0,0,0,0); const todayTs=todayStart.getTime()/1000;
+  let todayT=0; all.filter(r=>r.ts>=todayTs).forEach(r=>{todayT+=(r.input||0)+(r.output||0);});
+  if(tokTodayN) tokTodayN.textContent=fmtTok(todayT);
+}
+
+function tokRenderTable(records) {
+  if(!tokTbody) return;
+  const bySession=new Map();
+  for(const r of records){
+    const k=r.sessionId||'?';
+    let title = r.title||k;
+    if(!title||title===k){ const ss=[...state.sessions.values()].find(s=>s.bridgeSessionId===k); if(ss)title=ss.title; }
+    if(!bySession.has(k)) bySession.set(k,{title:title,input:0,output:0,cacheCreate:0,cacheRead:0,lastTs:0,prompts:[]});
+    const s=bySession.get(k); s.input+=r.input||0; s.output+=r.output||0; s.cacheCreate+=r.cacheCreate||0; s.cacheRead+=r.cacheRead||0;
+    if(r.ts>s.lastTs){s.lastTs=r.ts; s.title=r.title||s.title;} s.prompts.push(r);
+  }
+  tokTbody.innerHTML='';
+  if(bySession.size===0){tokTbody.innerHTML=`<tr><td colspan="6" style="color:var(--muted)">${t('tok.noData')}</td></tr>`;if(tokPager)tokPager.innerHTML='';return;}
+  const sorted=[...bySession.values()].sort((a,b)=>b.lastTs-a.lastTs);
+  const totalPages=Math.ceil(sorted.length/TOK_PER_PAGE);
+  if(_tokPage>=totalPages)_tokPage=totalPages-1;
+  const pageItems=sorted.slice(_tokPage*TOK_PER_PAGE,(_tokPage+1)*TOK_PER_PAGE);
+  for(const s of pageItems){
+    let sc=0; s.prompts.forEach(p=>{sc+=parseFloat(estCost(p.input||0,p.output||0,p.model,p.cacheRead||0,p.cacheCreate||0));});
+    const tr=document.createElement('tr'); tr.className='tok-row-session';
+    tr.innerHTML=`<td>${escapeHtml(s.title)}</td><td>${fmtTok(s.input)}</td><td>${fmtTok(s.output)}</td><td>${fmtTok(s.cacheCreate)}</td><td>${fmtTok(s.cacheRead)}</td><td>¥${sc.toFixed(2)}</td>`;
+    tokTbody.appendChild(tr);
+    const details=[]; s.prompts.sort((a,b)=>b.ts-a.ts);
+    for(const p of s.prompts){
+      const dr=document.createElement('tr'); dr.className='tok-detail'; dr.hidden=true;
+      dr.innerHTML=`<td>${fmtTime(p.ts)}${p.model?' · '+escapeHtml(p.model):''}</td><td>${fmtTok(p.input||0)}</td><td>${fmtTok(p.output||0)}</td><td>${fmtTok(p.cacheCreate||0)}</td><td>${fmtTok(p.cacheRead||0)}</td><td>¥${estCost(p.input||0,p.output||0,p.model,p.cacheRead||0,p.cacheCreate||0)}</td>`;
+      tokTbody.appendChild(dr); details.push(dr);
+    }
+    tr.addEventListener('click',()=>{const o=tr.classList.toggle('open');details.forEach(d=>d.hidden=!o);});
+  }
+  if(tokPager){tokPager.innerHTML='';if(totalPages>1)for(let i=0;i<totalPages;i++){const b=document.createElement('button');b.textContent=i+1;if(i===_tokPage)b.className='active';b.addEventListener('click',()=>{_tokPage=i;tokRenderTable(records);});tokPager.appendChild(b);}}
+}
+
+async function loadTokenPage(){await tokPollBridge();const f=tokGetFiltered();const all=tokLoadHistory();tokRenderStats(f,all);tokRenderTable(f);}
+if(tokSince)tokSince.addEventListener('change',()=>{_tokPage=0;loadTokenPage();});
+if(tokUntil)tokUntil.addEventListener('change',()=>{_tokPage=0;loadTokenPage();});
+const tokResetBtn=document.getElementById('tok-reset');
+if(tokResetBtn)tokResetBtn.addEventListener('click',()=>{if(tokSince)tokSince.value='';if(tokUntil)tokUntil.value='';_tokPage=0;loadTokenPage();});
+nav.addEventListener('click',(e)=>{const item=e.target.closest('.nav-item');if(item&&item.dataset.page==='token')loadTokenPage();});
 
 /* ═══════════════ 启动 ═══════════════ */
 applyI18n();

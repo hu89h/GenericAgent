@@ -317,6 +317,37 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; }
 .cm-d{ font-size:11px; color:var(--muted); margin-top:4px; }
 
 /* token 汇总卡 */
+.tok-filter{ display:flex; align-items:center; gap:8px; margin:12px 0; flex-wrap:wrap; }
+.tok-filter label{ font-size:12px; color:var(--muted); }
+.tok-filter input[type="datetime-local"]{
+  border:1px solid var(--line); border-radius:6px; padding:5px 8px;
+  font-size:12px; background:var(--field-bg); color:var(--txt);
+}
+.tok-reset{
+  border:1px solid var(--line); border-radius:6px; padding:5px 10px;
+  font-size:12px; background:var(--field-bg); color:var(--muted); cursor:pointer;
+}
+.tok-reset:hover{ background:var(--hover-2); color:var(--txt-2); }
+.tok-table{ width:100%; border-collapse:collapse; margin-top:14px; font-size:13px; }
+.tok-table th{ text-align:left; padding:8px 12px; font-size:11px; color:var(--muted); background:var(--line-soft); font-weight:600; }
+.tok-table th:not(:first-child){ text-align:right; }
+.tok-table td{ padding:9px 12px; border-bottom:1px solid var(--line-soft); }
+.tok-table td:not(:first-child){ text-align:right; color:var(--muted); font-size:12px; }
+.tok-table td:first-child{ font-weight:600; color:var(--txt-strong); }
+.tok-row-session{ cursor:pointer; }
+.tok-row-session:hover td{ background:var(--hover-dim); }
+.tok-row-session td:first-child::before{ content:'▶'; margin-right:6px; font-size:10px; color:var(--muted2); transition:transform .15s; display:inline-block; }
+.tok-row-session.open td:first-child::before{ transform:rotate(90deg); }
+.tok-detail td{ padding:5px 12px 5px 32px; font-size:11px; color:var(--muted); border-bottom:1px solid var(--line-soft); background:var(--field-bg); }
+.tok-detail td:not(:first-child){ text-align:right; }
+.tok-detail[hidden]{ display:none; }
+.tok-pager{ display:flex; gap:4px; justify-content:center; margin-top:12px; }
+.tok-pager button{
+  min-width:28px; height:28px; border:1px solid var(--line); border-radius:6px;
+  background:var(--card); color:var(--txt-2); font-size:12px; cursor:pointer;
+}
+.tok-pager button:hover{ background:var(--hover-2); }
+.tok-pager button.active{ background:var(--blue); color:var(--on-accent); border-color:var(--blue); }
 .stat-row{ display:flex; gap:12px; margin:14px 0; }
 .stat{ flex:1; border:1px solid var(--line); border-radius:var(--radius); background:var(--card); padding:16px; text-align:center; }
 .s-n{ font-size:20px; font-weight:700; color:var(--txt-strong); }
