@@ -298,6 +298,9 @@ const I18N = {
     'tok.total': '累计 token', 'tok.cost': '估算成本', 'tok.today': '今日 token',
     'tok.colSession': '会话', 'tok.colIn': '输入', 'tok.colOut': '输出', 'tok.colCacheW': '缓存写入', 'tok.colCache': '缓存读取', 'tok.colCost': '成本',
     'tok.from': '从', 'tok.to': '到', 'tok.reset': '重置', 'tok.noData': '暂无记录',
+    'tok.pricingUnknown': '⚠ 此模型计费规则尚未明确，按默认估算',
+    'tok.priceInput': '输入: $', 'tok.priceOutput': '输出: $',
+    'tok.priceCacheW': '缓存写入: $', 'tok.priceCacheR': '缓存读取: $',
     'presetPrompt.goal': '进入 Goal 模式：读 L3 goal mode SOP，自主达成我接下来描述的目标。',
     'presetPrompt.planMode': '进入 Plan 模式：读 L3 plan mode SOP，按其中的探索→规划→执行→验证流程完成我接下来描述的任务。',
     'presetPrompt.explore': '进入自主探索模式：自动浏览并定期向我汇总要点。',
@@ -387,6 +390,9 @@ const I18N = {
     'tok.total': 'Total tokens', 'tok.cost': 'Est. cost', 'tok.today': 'Today tokens',
     'tok.colSession': 'Session', 'tok.colIn': 'Input', 'tok.colOut': 'Output', 'tok.colCacheW': 'Cache write', 'tok.colCache': 'Cache read', 'tok.colCost': 'Cost',
     'tok.from': 'From', 'tok.to': 'To', 'tok.reset': 'Reset', 'tok.noData': 'No records',
+    'tok.pricingUnknown': '⚠ Pricing not confirmed, using defaults',
+    'tok.priceInput': 'Input: $', 'tok.priceOutput': 'Output: $',
+    'tok.priceCacheW': 'Cache write: $', 'tok.priceCacheR': 'Cache read: $',
     'presetPrompt.goal': 'Enter Goal mode: read the L3 goal-mode SOP and autonomously achieve the goal I describe next.',
     'presetPrompt.planMode': 'Enter Plan mode: read the L3 plan-mode SOP and follow its explore→plan→execute→verify flow for the task I describe next.',
     'presetPrompt.explore': 'Enter auto-explore mode: browse autonomously and periodically summarize key points to me.',
@@ -1657,11 +1663,11 @@ function modelPriceTip(model) {
   const cacheReadRate = isClaudeOrDS ? 0.1 : 0.5;
   const cacheWriteRate = isClaudeOrDS ? 1.25 : 1.0;
   const lines = [];
-  if (!known) lines.push(lang === 'zh' ? '⚠ 此模型计费规则尚未明确，按默认估算' : '⚠ Pricing not confirmed, using defaults');
-  lines.push((lang === 'zh' ? '输入: $' : 'Input: $') + p[0] + ' /M tokens');
-  lines.push((lang === 'zh' ? '输出: $' : 'Output: $') + p[1] + ' /M tokens');
-  lines.push((lang === 'zh' ? '缓存写入: $' : 'Cache write: $') + (p[0] * cacheWriteRate).toFixed(2) + ' /M tokens');
-  lines.push((lang === 'zh' ? '缓存读取: $' : 'Cache read: $') + (p[0] * cacheReadRate).toFixed(2) + ' /M tokens');
+  if (!known) lines.push(t('tok.pricingUnknown'));
+  lines.push(t('tok.priceInput') + p[0] + ' /M tokens');
+  lines.push(t('tok.priceOutput') + p[1] + ' /M tokens');
+  lines.push(t('tok.priceCacheW') + (p[0] * cacheWriteRate).toFixed(2) + ' /M tokens');
+  lines.push(t('tok.priceCacheR') + (p[0] * cacheReadRate).toFixed(2) + ' /M tokens');
   return lines.join('\n');
 }
 
