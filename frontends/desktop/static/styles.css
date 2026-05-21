@@ -316,6 +316,7 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; }
   color:var(--blue); cursor:pointer;
 }
 .link-btn:disabled{ opacity:.45; cursor:not-allowed; }
+.list-row .link-btn, .list-row .sw-mini{ flex-shrink:0; }
 .list-empty{
   margin-top:14px; padding:24px; text-align:center;
   font-size:13px; color:var(--muted);

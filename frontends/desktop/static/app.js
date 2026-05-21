@@ -154,6 +154,7 @@ const gaServiceStore = {
         const tail = params.tail ?? 200;
         return http(`/services/logs?id=${encodeURIComponent(id)}&tail=${encodeURIComponent(tail)}`);
       }
+      case 'services/panel': return http('/services/panel');
       case 'app/path/selectGaRoot': return http('/config');
       case 'list_continuable_sessions': return { sessions: [] };
       case 'restore_session': throw new Error('restore_session is not implemented in web2 bridge');
@@ -192,6 +193,7 @@ const gaServiceStore = {
     startService,
     stopService,
     getServiceLogs: (id, tail = 200) => rpc('services/logs', { id, tail }),
+    getServicePanel: () => rpc('services/panel', {}),
     pollSession: (sessionId, afterId = 0) => rpc('session/poll', { sessionId, afterId }),
     rpc,
     onBridgeMessage: (cb) => on('bridge-message', cb),
@@ -227,7 +229,7 @@ const I18N = {
     'composer.placeholder': '输入消息… (Enter 发送, Shift+Enter 换行)',
     'search.placeholder': '搜索会话…', 'conv.new': '新对话',
     'ctx.pin': '置顶', 'ctx.del': '删除',
-    'common.close': '关闭', 'common.more': '更多',
+    'common.close': '关闭', 'common.more': '更多', 'common.save': '保存',
     'modal.preset': '预设功能', 'modal.addModel': '添加模型', 'modal.settings': '配置',
     'set.theme': '主题色', 'set.lang': '语言', 'set.model': '模型', 'set.addModel': '添加模型',
     'page.channels.title': '消息通道', 'page.channels.sub': '后台 IM 进程：列表、启停与日志（同 hub.pyw）',
@@ -283,7 +285,7 @@ const I18N = {
     'composer.placeholder': 'Type a message… (Enter to send, Shift+Enter for newline)',
     'search.placeholder': 'Search chats…', 'conv.new': 'New chat',
     'ctx.pin': 'Pin', 'ctx.del': 'Delete',
-    'common.close': 'Close', 'common.more': 'More',
+    'common.close': 'Close', 'common.more': 'More', 'common.save': 'Save',
     'modal.preset': 'Presets', 'modal.addModel': 'Add model', 'modal.settings': 'Settings',
     'set.theme': 'Theme color', 'set.lang': 'Language', 'set.model': 'Model', 'set.addModel': 'Add model',
     'page.channels.title': 'Channels', 'page.channels.sub': 'Background IM processes: list, start/stop, logs (hub.pyw style)',
@@ -940,7 +942,7 @@ if(tokSince)tokSince.addEventListener('change',()=>{_tokPage=0;loadTokenPage();}
 if(tokUntil)tokUntil.addEventListener('change',()=>{_tokPage=0;loadTokenPage();});
 const tokResetBtn=document.getElementById('tok-reset');
 if(tokResetBtn)tokResetBtn.addEventListener('click',()=>{if(tokSince)tokSince.value='';if(tokUntil)tokUntil.value='';_tokPage=0;loadTokenPage();});
-nav.addEventListener('click',(e)=>{const item=e.target.closest('.nav-item');if(item&&item.dataset.page==='token')loadTokenPage();if(item&&item.dataset.page==='channels')renderChannelList(gaServiceStore.list());});
+nav.addEventListener('click',(e)=>{const item=e.target.closest('.nav-item');if(item&&item.dataset.page==='token')loadTokenPage();if(item&&item.dataset.page==='channels')renderChannelList(gaServiceStore.list());if(item&&item.dataset.page==='status')loadStatusPanel();});
 
 /* ═══════════════ 消息通道（复用 gaServiceStore + WS 同步） ═══════════════ */
 const CHAN_ICON = '<svg class="lr-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
@@ -958,8 +960,8 @@ const chanEmptyEl = document.getElementById('chan-empty');
 const chanLogModal = document.getElementById('chan-log-modal');
 const chanLogPre = document.getElementById('chan-log-pre');
 const chanLogTitle = document.getElementById('chan-log-title');
-let _chanBusy = false;
 let _chanLogId = null;
+let _chanBusy = false;
 let _chanToastTimer = null;
 
 function getToastRoot() {
@@ -1030,7 +1032,7 @@ function channelToastDetail(e) {
 }
 function renderChannelList(channels) {
   if (!chanListEl) return;
-  const rows = channels || [];
+  const rows = (channels || []).filter((ch) => (ch.id || '').startsWith('frontends/'));
   chanListEl.innerHTML = '';
   if (chanEmptyEl) chanEmptyEl.hidden = rows.length > 0;
   for (const ch of rows) {
@@ -1047,11 +1049,13 @@ function renderChannelList(channels) {
       </div>
       <span class="lr-st ${stClass} chan-status"></span>
       <span class="grow"></span>
-      <button type="button" class="sw-mini${running ? ' on' : ''}" data-act="toggle" aria-pressed="${running}"><i></i></button>
-      <button type="button" class="link-btn link sm" data-act="logs"></button>`;
+      <button type="button" class="link-btn link sm" data-act="configure"></button>
+      <button type="button" class="link-btn link sm" data-act="logs"></button>
+      <button type="button" class="sw-mini${running ? ' on' : ''}" data-act="toggle" aria-pressed="${running}"><i></i></button>`;
     row.querySelector('.chan-name').textContent = channelDisplayName(ch);
     row.querySelector('.chan-path').textContent = ch.name || ch.id;
     row.querySelector('.chan-status').textContent = channelStatusLabel(ch.status || 'offline');
+    row.querySelector('[data-act="configure"]').textContent = t('act.configure');
     row.querySelector('[data-act="logs"]').textContent = t('act.logs');
     chanListEl.appendChild(row);
   }
@@ -1087,7 +1091,8 @@ async function openChannelLogs(id) {
   if (!chanLogModal || !chanLogPre) return;
   _chanLogId = id;
   const ch = gaServiceStore.get(id) || { id };
-  if (chanLogTitle) chanLogTitle.textContent = t('modal.channelLogs') + ' · ' + channelDisplayName(ch);
+  const titleName = id === '__bridge__' ? (ch.name || 'bridge') : statusDisplayName(ch);
+  if (chanLogTitle) chanLogTitle.textContent = t('modal.channelLogs') + ' · ' + titleName;
   chanLogPre.textContent = t('ch.loading');
   openModal('chan-log-modal');
   try {
@@ -1098,8 +1103,117 @@ async function openChannelLogs(id) {
     chanLogPre.textContent = t('err.channelLoad') + ': ' + (e.message || e);
   }
 }
+async function openChannelMykey() {
+  try {
+    await window.ga.openMykey();
+  } catch (e) {
+    showChanToast(t('err.channelLoad'), e.message || String(e), 'err');
+  }
+}
+
+/* ═══════════════ 状态面板（复用 ServiceManager + 启停/日志） ═══════════════ */
+const statusListEl = document.getElementById('status-list');
+
+function statusDisplayName(s) {
+  if (!s) return '';
+  if (s.id === '__bridge__') return s.name || 'bridge';
+  if (s.id === 'reflect/scheduler.py') return t('proc.scheduler');
+  return channelDisplayName(s);
+}
+function fmtPid(pid) { return pid ? `PID ${pid}` : '—'; }
+function fmtRes(s) {
+  const cpu = s.cpuPct != null ? `${s.cpuPct}%` : '—';
+  const mem = s.memMb != null ? `${s.memMb}MB` : '—';
+  return `${cpu} / ${mem}`;
+}
+
+function renderStatusPanel(services) {
+  if (!statusListEl) return;
+  statusListEl.innerHTML = '';
+  for (const s of services || []) {
+    const row = document.createElement('div');
+    row.className = 'list-row';
+    row.dataset.serviceId = s.id;
+    const stClass = channelStatusClass(s.status || 'offline');
+    const running = !!s.running;
+    const managed = s.managed !== false;
+    let acts = `<button type="button" class="link-btn link sm" data-act="logs"></button>`;
+    if (managed) {
+      if (running) acts += `<button type="button" class="link-btn link sm" data-act="restart"></button>`;
+      acts += `<button type="button" class="sw-mini${running ? ' on' : ''}" data-act="toggle" aria-pressed="${running}"><i></i></button>`;
+    }
+    row.innerHTML = `
+      <b class="st-name"></b>
+      <span class="lr-st ${stClass} st-status"></span>
+      <span class="kv st-pid"></span>
+      <span class="kv st-res"></span>
+      <span class="grow"></span>
+      ${acts}`;
+    row.querySelector('.st-name').textContent = statusDisplayName(s);
+    row.querySelector('.st-status').textContent = channelStatusLabel(s.status || 'offline');
+    row.querySelector('.st-pid').textContent = fmtPid(s.pid);
+    row.querySelector('.st-res').textContent = fmtRes(s);
+    const logBtn = row.querySelector('[data-act="logs"]');
+    if (logBtn) logBtn.textContent = t('act.logs');
+    const rstBtn = row.querySelector('[data-act="restart"]');
+    if (rstBtn) rstBtn.textContent = t('act.restart');
+    statusListEl.appendChild(row);
+  }
+}
+
+async function loadStatusPanel() {
+  if (!statusListEl) return;
+  const res = await window.ga.getServicePanel();
+  renderStatusPanel(res.services || []);
+}
+
+async function restartService(id) {
+  const label = statusDisplayName(gaServiceStore.get(id) || { id });
+  await window.ga.stopService(id);
+  const res = await window.ga.startService(id);
+  if (res && res.service && res.service.status === 'error') {
+    throw Object.assign(new Error(res.service.lastError || 'start_failed'), { data: res });
+  }
+  showChanToast(t('act.restart') + ' · ' + label, '', 'ok');
+}
+
+if (statusListEl) {
+  statusListEl.addEventListener('click', async (e) => {
+    const row = e.target.closest('.list-row');
+    if (!row) return;
+    const id = row.dataset.serviceId;
+    const actEl = e.target.closest('[data-act]');
+    if (!actEl || !id) return;
+    const act = actEl.dataset.act;
+    if (act === 'logs') {
+      openChannelLogs(id);
+      return;
+    }
+    if (act === 'restart') {
+      if (_chanBusy) return;
+      _chanBusy = true;
+      try {
+        await restartService(id);
+        await loadStatusPanel();
+      } catch (err) {
+        showChanToast(t('act.restart') + ' · ' + statusDisplayName({ id }), err.message || String(err), 'err');
+      } finally {
+        _chanBusy = false;
+      }
+      return;
+    }
+    if (act === 'toggle') {
+      if (actEl.disabled || _chanBusy) return;
+      const running = actEl.classList.contains('on');
+      await toggleChannel(id, running, actEl);
+      if (document.querySelector('.page[data-page="status"].active')) loadStatusPanel();
+    }
+  });
+}
+
 gaServiceStore.onServices((list) => {
   if (document.querySelector('.page[data-page="channels"].active')) renderChannelList(list);
+  if (document.querySelector('.page[data-page="status"].active')) loadStatusPanel();
 });
 if (chanListEl) {
   chanListEl.addEventListener('click', async (e) => {
@@ -1111,6 +1225,10 @@ if (chanListEl) {
     const act = actEl.dataset.act;
     if (act === 'logs') {
       openChannelLogs(id);
+      return;
+    }
+    if (act === 'configure') {
+      openChannelMykey();
       return;
     }
     if (act === 'toggle') {

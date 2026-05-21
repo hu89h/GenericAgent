@@ -22,6 +22,7 @@ HTTP API:
   POST   /services/start        body: {"id":"frontends/qqapp.py"}
   POST   /services/stop         body: {"id":"frontends/qqapp.py"}
   GET    /services/logs?id=frontends/qqapp.py&tail=200
+  GET    /services/panel
 
 WS API (state sync):
   GET /ws -> on connect sends services.snapshot; service.changed on updates
@@ -422,6 +423,7 @@ hub = WsHub()
 # ---------------------------------------------------------------------------
 
 _SKIP = frozenset({"goal_mode.py", "chatapp_common.py", "tuiapp.py", "qtapp.py"})
+BRIDGE_ID = "__bridge__"
 
 _SERVICE_KEYS: Dict[str, tuple] = {
     "frontends/qqapp.py": ("qq_app_id", "qq_app_secret"),
@@ -434,6 +436,8 @@ _SERVICE_KEYS: Dict[str, tuple] = {
 
 
 def _load_mykeys(ga_root: Path) -> dict:
+    if not (ga_root / "mykey.py").exists():
+        return {}
     root = str(ga_root.resolve())
     if root not in sys.path:
         sys.path.insert(0, root)
@@ -455,6 +459,57 @@ def discover_im_services(ga_root: Path) -> List[dict]:
     return out
 
 
+def discover_extra_services(ga_root: Path) -> List[dict]:
+    out: List[dict] = []
+    sched = ga_root / "reflect" / "scheduler.py"
+    if sched.is_file():
+        out.append({
+            "id": "reflect/scheduler.py",
+            "cmd": [sys.executable, "agentmain.py", "--reflect", "reflect/scheduler.py"],
+        })
+    return out
+
+
+def _mem_mb(pid: Optional[int]) -> Optional[int]:
+    if not pid:
+        return None
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+        counters = PROCESS_MEMORY_COUNTERS()
+        counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not h:
+            return None
+        ok = ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(counters), counters.cb)
+        ctypes.windll.kernel32.CloseHandle(h)
+        return round(counters.WorkingSetSize / 1024 / 1024) if ok else None
+    status = Path(f"/proc/{pid}/status")
+    if status.is_file():
+        for line in status.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("VmRSS:"):
+                return round(int(line.split()[1]) / 1024)
+    return None
+
+
+def _cpu_pct(pid: Optional[int]) -> Optional[float]:
+    if not pid:
+        return None
+    try:
+        import psutil
+        return round(psutil.Process(pid).cpu_percent(0) or 0, 1)
+    except Exception:
+        return None
+
+
 class ServiceManager:
     """hub.pyw ServiceManager + HTTP/WS glue."""
 
@@ -463,7 +518,10 @@ class ServiceManager:
         self.procs: Dict[str, subprocess.Popen] = {}
         self.buffers: Dict[str, deque] = {}
         self._emit = emit_fn
-        self._catalog = {s["id"]: s for s in discover_im_services(self.ga_root)}
+        im = discover_im_services(self.ga_root)
+        extra = discover_extra_services(self.ga_root)
+        self._im_catalog = {s["id"]: s for s in im}
+        self._catalog = {**self._im_catalog, **{s["id"]: s for s in extra}}
         self._stopping: Set[str] = set()
 
     def _is_configured(self, sid: str) -> bool:
@@ -502,7 +560,33 @@ class ServiceManager:
         }
 
     def list_state(self) -> List[dict]:
-        return [self._state(sid) for sid in sorted(self._catalog)]
+        return [self._state(sid) for sid in sorted(self._im_catalog)]
+
+    def _bridge_state(self) -> dict:
+        pid = os.getpid()
+        port = int(os.environ.get("BRIDGE_PORT", "14168"))
+        return {
+            "id": BRIDGE_ID,
+            "name": f"bridge (:{port})",
+            "status": "running",
+            "running": True,
+            "pid": pid,
+            "memMb": _mem_mb(pid),
+            "cpuPct": _cpu_pct(pid),
+            "managed": False,
+            "lastError": "",
+        }
+
+    def list_panel_state(self) -> List[dict]:
+        out = [self._bridge_state()]
+        for sid in sorted(self._catalog):
+            item = self._state(sid)
+            item["name"] = sid
+            item["memMb"] = _mem_mb(item.get("pid"))
+            item["cpuPct"] = _cpu_pct(item.get("pid"))
+            item["managed"] = True
+            out.append(item)
+        return out
 
     def _notify(self, sid: str, *, err: str = "") -> None:
         self._emit({"type": "service.changed", "service": self._state(sid, err=err)})
@@ -567,6 +651,8 @@ class ServiceManager:
         return {"ok": True, "service": item}
 
     def read_logs(self, sid: str, tail: int = 200) -> dict:
+        if sid == BRIDGE_ID:
+            return {"ok": True, "lines": [f"GenericAgent bridge pid={os.getpid()}"]}
         if sid not in self._catalog:
             raise KeyError(sid)
         tail = max(1, min(int(tail or 200), 2000))
@@ -740,7 +826,10 @@ async def path_open_handler(request):
     target = target.resolve()
     if not target.exists():
         return json_ok({"ok": False, "error": f"File not found: {target}"}, status=404)
-    _open_path_in_editor(target)
+    try:
+        _open_path_in_editor(target)
+    except OSError as e:
+        return json_ok({"ok": False, "error": str(e), "path": str(target)}, status=500)
     return json_ok({"ok": True, "path": str(target)})
 
 
@@ -749,8 +838,18 @@ def _open_path_in_editor(target: Path) -> None:
     import platform
     path = str(target.resolve())
     if platform.system() == "Windows":
-        os.startfile(path, "edit")
-        return
+        try:
+            os.startfile(path, "edit")
+            return
+        except OSError:
+            pass
+        for cmd in (["notepad.exe", path], ["cursor.cmd", path], ["code.cmd", path], ["cursor", path], ["code", path]):
+            try:
+                subprocess.Popen(cmd, close_fds=True)
+                return
+            except (FileNotFoundError, OSError):
+                continue
+        raise OSError(f"No editor available to open: {path}")
     if platform.system() == "Darwin":
         subprocess.Popen(["open", path])
         return
@@ -782,6 +881,10 @@ async def service_logs_handler(request):
         return json_ok({"ok": False, "error": "missing_id"}, status=400)
     tail = int(request.query.get("tail") or 200)
     return json_ok(services.read_logs(sid, tail=tail))
+
+
+async def service_panel_handler(request):
+    return json_ok({"services": services.list_panel_state()})
 
 
 async def token_stats_handler(request):
@@ -824,12 +927,16 @@ def create_app():
     app.router.add_post("/services/start", service_start_handler)
     app.router.add_post("/services/stop", service_stop_handler)
     app.router.add_get("/services/logs", service_logs_handler)
+    app.router.add_get("/services/panel", service_panel_handler)
 
     # Serve static frontend (desktop/static/)
     static_dir = APP_DIR / "desktop" / "static"
 
     async def index_handler(request):
-        return web.FileResponse(static_dir / "index.html")
+        return web.FileResponse(
+            static_dir / "index.html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     app.router.add_get("/", index_handler)
     app.router.add_static("/", static_dir, show_index=False)

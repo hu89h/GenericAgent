@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>GenericAgent</title>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=4">
 <!-- DEV 脚手架(标注模式)：删本行 + 下方 annot.js 一行即可彻底移除 -->
 <link rel="stylesheet" href="annot.css">
 </head>
@@ -155,12 +155,7 @@
           <div class="page-pad">
             <div class="page-title" data-i18n="page.status.title"></div>
             <div class="page-sub" data-i18n="page.status.sub"></div>
-            <div class="list">
-              <div class="list-row"><b>bridge (:14168)</b><span class="lr-st on" data-i18n="st.running"></span><span class="kv">PID 1234</span><span class="kv">35MB</span><span class="grow"></span><a class="link sm" data-i18n="act.logs"></a><a class="link sm" data-i18n="act.restart"></a></div>
-              <div class="list-row"><b data-i18n="proc.imbotWechat"></b><span class="lr-st on" data-i18n="st.running"></span><span class="kv">PID 1290</span><span class="kv">61MB</span><span class="grow"></span><a class="link sm" data-i18n="act.logs"></a><a class="link sm" data-i18n="act.stop"></a></div>
-              <div class="list-row"><b data-i18n="proc.scheduler"></b><span class="lr-st on" data-i18n="st.running"></span><span class="kv">PID 1305</span><span class="kv">22MB</span><span class="grow"></span><a class="link sm" data-i18n="act.logs"></a><a class="link sm" data-i18n="act.stop"></a></div>
-              <div class="list-row"><b data-i18n="proc.imbotDing"></b><span class="lr-st err" data-i18n="st.abnormal"></span><span class="kv">—</span><span class="kv">—</span><span class="grow"></span><a class="link sm" data-i18n="act.logs"></a><a class="link sm" data-i18n="act.start"></a></div>
-            </div>
+            <div class="list" id="status-list"></div>
           </div>
         </section>
 
@@ -358,7 +353,7 @@
 <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
 <script src="vendor/marked.min.js"></script>
-<script src="app.js"></script>
+<script src="app.js?v=6"></script>
 <script src="annot.js"></script><!-- DEV 脚手架，可删 -->
 </body>
 </html>
