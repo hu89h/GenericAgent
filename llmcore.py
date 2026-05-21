@@ -22,7 +22,7 @@ def reload_mykeys():
     print(f'[Info] Load mykeys from {_mykey_path}')
     globals().update(mykeys=mk)
     if mk.get('langfuse_config'):
-        try: from plugins import langfuse_tracing
+        try: from plugins.hooks import load as _hl; _hl('langfuse_tracing')
         except Exception: pass
     return mk, True
 
