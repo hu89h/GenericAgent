@@ -11,7 +11,7 @@ HTTP API:
   GET    /status
   GET    /config
   POST   /config
-  GET    /model-profiles
+  GET    /model-profiles  (+ POST / PUT / DELETE by id)
   GET    /sessions
   POST   /session/new
   GET    /session/{sid}
@@ -26,7 +26,7 @@ WS API:
 """
 from __future__ import annotations
 
-import asyncio, contextlib, importlib, json, os, sys
+import asyncio, contextlib, importlib, json, os, sys, re
 import threading, time, traceback, uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -88,7 +88,127 @@ class AgentManager:
 
     @property
     def mykey_path(self) -> str:
-        return str(Path(self.ga_root) / "mykey.txt")
+        return str(Path(self.ga_root) / "mykey.py")
+
+    def _mykey_file(self) -> Path:
+        p = Path(self.ga_root) / "mykey.py"
+        if not p.exists():
+            tpl = Path(self.ga_root) / "mykey_template.py"
+            p.write_text(tpl.read_text(encoding="utf-8") if tpl.exists() else "", encoding="utf-8")
+        return p
+
+    @staticmethod
+    def _next_native_var(text: str) -> str:
+        nums = [0]
+        if re.search(r"^native_claude_config\s*=", text, re.M):
+            nums.append(0)
+        nums.extend(int(m.group(1)) for m in re.finditer(r"^native_claude_config(\d+)\s*=", text, re.M))
+        n = max(nums) + 1
+        return "native_claude_config" if n == 1 and not re.search(r"^native_claude_config\s*=", text, re.M) else f"native_claude_config{n}"
+
+    @staticmethod
+    def _format_py_dict(d: dict) -> str:
+        lines = [f"    '{k}': {json.dumps(v, ensure_ascii=False)}," if isinstance(v, str) else f"    '{k}': {v}," for k, v in d.items()]
+        return "{\n" + "\n".join(lines) + "\n}"
+
+    def _invalidate_mykey_cache(self) -> None:
+        self.ensure_ga_import_path()
+        sys.modules.pop("mykey", None)
+        with contextlib.suppress(Exception):
+            import llmcore
+            llmcore._mykey_mtime = None
+
+    def _profile_keys(self) -> List[str]:
+        self.ensure_ga_import_path()
+        from llmcore import reload_mykeys
+        return [k for k in reload_mykeys()[0] if any(x in k for x in ("api", "config", "cookie"))]
+
+    def _profile_at(self, profile_id: int) -> tuple[str, dict]:
+        keys = self._profile_keys()
+        if profile_id < 0 or profile_id >= len(keys):
+            raise ValueError("profile not found")
+        var = keys[profile_id]
+        if "mixin" in var:
+            raise ValueError("mixin profiles not supported here")
+        from llmcore import reload_mykeys
+        cfg = reload_mykeys()[0].get(var)
+        if not isinstance(cfg, dict):
+            raise ValueError("profile not editable")
+        return var, dict(cfg)
+
+    @staticmethod
+    def _find_var_block_span(text: str, var_name: str) -> Optional[tuple[int, int]]:
+        m = re.search(rf"^{re.escape(var_name)}\s*=\s*\{{", text, re.M)
+        if not m:
+            return None
+        start, i, depth = m.start(), m.end() - 1, 0
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    while end < len(text) and text[end] in "\r\n":
+                        end += 1
+                    return start, end
+            i += 1
+        return None
+
+    def _patch_var_block(self, text: str, var: str, cfg: Optional[dict] = None) -> str:
+        if not (span := self._find_var_block_span(text, var)):
+            raise ValueError(f"config block not found: {var}")
+        s, e = span
+        if cfg is None:
+            return text[:s].rstrip() + "\n" + text[e:].lstrip("\n")
+        return text[:s] + f"{var} = {self._format_py_dict(cfg)}\n" + text[e:]
+
+    def _build_cfg(self, data: dict, existing: Optional[dict] = None, *, require_key: bool = True) -> dict:
+        apibase, model = str(data.get("apibase") or "").strip(), str(data.get("model") or "").strip()
+        if not apibase or not model:
+            raise ValueError("apibase and model are required")
+        apikey = str(data.get("apikey") or "").strip() or str((existing or {}).get("apikey") or "").strip()
+        if require_key and not apikey:
+            raise ValueError("apikey is required")
+        cfg: Dict[str, Any] = {"apikey": apikey, "apibase": apibase, "model": model}
+        if name := str(data.get("name") or "").strip():
+            cfg["name"] = name
+        for k in ("max_retries", "connect_timeout", "read_timeout"):
+            if data.get(k) is not None and str(data.get(k)).strip() != "":
+                cfg[k] = int(data[k])
+            elif existing and k in existing:
+                cfg[k] = existing[k]
+        return cfg
+
+    def _save_mykey_text(self, text: str) -> list:
+        self._mykey_file().write_text(text, encoding="utf-8")
+        self._invalidate_mykey_cache()
+        return self.list_model_profiles()
+
+    def add_model_profile(self, data: dict) -> dict:
+        cfg = self._build_cfg(data)
+        text = self._mykey_file().read_text(encoding="utf-8")
+        var = self._next_native_var(text)
+        profiles = self._save_mykey_text(text.rstrip() + f"\n{var} = {self._format_py_dict(cfg)}\n")
+        return {"varName": var, "profileId": profiles[-1]["id"] if profiles else 0, "profiles": profiles}
+
+    def get_model_profile(self, profile_id: int) -> dict:
+        var, cfg = self._profile_at(profile_id)
+        ks = ("model", "apibase", "apikey", "name", "max_retries", "connect_timeout", "read_timeout")
+        return {"id": profile_id, "varName": var, **{k: cfg.get(k, d) for k, d in zip(ks, ("", "", "", "", 5, 15, 300))}}
+
+    def update_model_profile(self, profile_id: int, data: dict) -> dict:
+        var, existing = self._profile_at(profile_id)
+        text = self._mykey_file().read_text(encoding="utf-8")
+        profiles = self._save_mykey_text(self._patch_var_block(text, var, self._build_cfg(data, existing, require_key=False)))
+        return {"varName": var, "profileId": profile_id, "profiles": profiles}
+
+    def delete_model_profile(self, profile_id: int) -> dict:
+        if len(self._profile_keys()) <= 1:
+            raise ValueError("cannot delete the last profile")
+        var, _ = self._profile_at(profile_id)
+        profiles = self._save_mykey_text(self._patch_var_block(self._mykey_file().read_text(encoding="utf-8"), var).rstrip() + "\n")
+        return {"profileId": profile_id, "profiles": profiles}
 
     def ensure_ga_import_path(self) -> Path:
         root = Path(self.ga_root).resolve()
@@ -181,8 +301,10 @@ class AgentManager:
         emit_session_state(sess, "closed")
         return {"ok": True, "sessionId": sid}
 
-    def submit_prompt(self, sid: str, prompt: Any, images: Optional[list] = None) -> dict:
+    def submit_prompt(self, sid: str, prompt: Any, images: Optional[list] = None, llm_no: Optional[int] = None) -> dict:
         prompt, image_ids = normalize_prompt(prompt, images)
+        if llm_no is not None:
+            self.config["llmNo"] = int(llm_no)
         with self.lock:
             sess = self.sessions.get(sid)
             if not sess:
@@ -197,18 +319,22 @@ class AgentManager:
             sess.cancel_requested = False
             sess.last_error = ""
             sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True}
-            t = threading.Thread(target=self.run_agent_turn, args=(sess, prompt, None), daemon=True, name=f"Turn-{sid}")
+            t = threading.Thread(target=self.run_agent_turn, args=(sess, prompt, None, llm_no), daemon=True, name=f"Turn-{sid}")
             sess.thread = t
             t.start()
             seq = sess.msg_seq
         emit_session_state(sess, "running")
         return {"ok": True, "sessionId": sid, "accepted": True, "userMessageId": user_msg["id"], "seq": seq}
 
-    def run_agent_turn(self, sess: Session, prompt: str, images: Optional[list] = None):
+    def run_agent_turn(self, sess: Session, prompt: str, images: Optional[list] = None, llm_no: Optional[int] = None):
         try:
             if sess.agent is None:
                 sess.agent = self.make_agent(sess)
             agent = sess.agent
+            no = self.config.get("llmNo") if llm_no is None else llm_no
+            if no is not None and hasattr(agent, "next_llm"):
+                with contextlib.suppress(Exception):
+                    agent.next_llm(int(no))
             full = ""
             if hasattr(agent, "put_task"):
                 display_q = agent.put_task(prompt, images=images or [])
@@ -497,7 +623,12 @@ async def status_handler(request):
 
 
 async def get_config_handler(request):
-    return json_ok({"gaRoot": manager.ga_root, "mykeyPath": manager.mykey_path, "config": manager.config})
+    profiles = manager.list_model_profiles()
+    active = next((p["id"] for p in profiles if p.get("active")), manager.config.get("llmNo", 0))
+    cfg = dict(manager.config)
+    if "llmNo" not in cfg:
+        cfg["llmNo"] = active
+    return json_ok({"gaRoot": manager.ga_root, "mykeyPath": manager.mykey_path, "config": cfg})
 
 
 async def save_config_handler(request):
@@ -509,7 +640,24 @@ async def save_config_handler(request):
 
 
 async def model_profiles_handler(request):
-    return json_ok({"profiles": manager.list_model_profiles()})
+    try:
+        pid = request.match_info.get("id")
+        if pid is not None:
+            profile_id = int(pid)
+            if request.method == "GET":
+                return json_ok({"profile": manager.get_model_profile(profile_id)})
+            if request.method == "PUT":
+                return json_ok({"ok": True, **manager.update_model_profile(profile_id, await read_json(request))})
+            if request.method == "DELETE":
+                return json_ok({"ok": True, **manager.delete_model_profile(profile_id)})
+            return json_ok({"ok": False, "error": "method not allowed"}, status=405)
+        if request.method == "POST":
+            return json_ok({"ok": True, **manager.add_model_profile(await read_json(request))})
+        return json_ok({"profiles": manager.list_model_profiles()})
+    except ValueError as e:
+        return json_ok({"ok": False, "error": str(e)}, status=400)
+    except Exception as e:
+        return json_ok({"ok": False, "error": str(e)}, status=500)
 
 
 async def list_sessions_handler(request):
@@ -540,7 +688,10 @@ async def prompt_handler(request):
     data = await read_json(request)
     prompt = data.get("prompt", data.get("content", data.get("message", "")))
     images = data.get("images") or []
-    return json_ok(manager.submit_prompt(sid, prompt, images))
+    llm_no = data.get("llmNo")
+    if llm_no is not None:
+        llm_no = int(llm_no)
+    return json_ok(manager.submit_prompt(sid, prompt, images, llm_no=llm_no))
 
 
 async def messages_handler(request):
@@ -604,6 +755,10 @@ def create_app():
     app.router.add_get("/config", get_config_handler)
     app.router.add_post("/config", save_config_handler)
     app.router.add_get("/model-profiles", model_profiles_handler)
+    app.router.add_post("/model-profiles", model_profiles_handler)
+    app.router.add_get("/model-profiles/{id}", model_profiles_handler)
+    app.router.add_put("/model-profiles/{id}", model_profiles_handler)
+    app.router.add_delete("/model-profiles/{id}", model_profiles_handler)
     app.router.add_get("/sessions", list_sessions_handler)
     app.router.add_post("/session/new", new_session_handler)
     app.router.add_get("/session/{sid}", get_session_handler)

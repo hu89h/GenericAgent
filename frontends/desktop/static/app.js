@@ -22,9 +22,22 @@ const I18N = {
     'composer.placeholder': '输入消息… (Enter 发送, Shift+Enter 换行)',
     'search.placeholder': '搜索会话…', 'conv.new': '新对话',
     'ctx.pin': '置顶', 'ctx.unpin': '取消置顶', 'ctx.del': '删除',
-    'common.close': '关闭', 'common.more': '更多',
-    'modal.preset': '预设功能', 'modal.addModel': '添加模型', 'modal.settings': '配置',
-    'set.theme': '主题色', 'set.lang': '语言', 'set.model': '模型', 'set.addModel': '添加模型',
+    'common.close': '关闭', 'common.more': '更多', 'common.optional': '选填',
+    'modal.preset': '预设功能', 'modal.addModel': '添加模型', 'modal.editModel': '编辑模型', 'modal.settings': '配置',
+    'set.appearance': '外观', 'set.plainUi': '素色', 'set.theme': '颜色', 'set.lang': '语言', 'set.model': '模型', 'set.addModel': '添加模型',
+    'appearance.light': '浅色', 'appearance.dark': '深色',
+    'set.noModels': '暂无模型，点击下方添加',
+    'lang.zh': '简体中文', 'lang.en': 'English',
+    'model.name': '备注', 'model.namePh': '会显示在模型列表',
+    'model.apikey': 'API Key', 'model.apikeyPh': 'sk-...', 'model.apikeyKeep': '留空则保持原 Key 不变',
+    'model.apibase': 'API 地址', 'model.apibasePh': 'https://.../v1/messages',
+    'model.model': '模型', 'model.modelPh': 'model 参数名',
+    'model.modelHint': '须与中转站/官方文档中的 model 字段完全一致',
+    'model.retries': '重试 (次)', 'model.connTimeout': '连接超时 (s)', 'model.readTimeout': '读取超时 (s)',
+    'model.save': '保存', 'common.cancel': '取消', 'common.edit': '编辑', 'common.delete': '删除',
+    'err.modelSave': '保存失败', 'err.modelRequired': '请填写模型、API Key 和 API 地址',
+    'err.modelDelete': '删除失败', 'err.modelDeleteLast': '至少保留一个模型',
+    'confirm.modelDelete': '确定删除该模型配置？',
     'page.channels.title': '消息通道', 'page.channels.sub': '把 hub.pyw 管理的各 imbot 接入搬进来：每行一个渠道',
     'page.status.title': '状态面板', 'page.status.sub': 'hub.pyw 管理的后台进程/服务，集中查看与启停',
     'page.collab.title': '协作动态', 'page.collab.sub': 'subagent / Hive worker 的实时状态与产出',
@@ -70,9 +83,22 @@ const I18N = {
     'composer.placeholder': 'Type a message… (Enter to send, Shift+Enter for newline)',
     'search.placeholder': 'Search chats…', 'conv.new': 'New chat',
     'ctx.pin': 'Pin', 'ctx.unpin': 'Unpin', 'ctx.del': 'Delete',
-    'common.close': 'Close', 'common.more': 'More',
-    'modal.preset': 'Presets', 'modal.addModel': 'Add model', 'modal.settings': 'Settings',
-    'set.theme': 'Theme color', 'set.lang': 'Language', 'set.model': 'Model', 'set.addModel': 'Add model',
+    'common.close': 'Close', 'common.more': 'More', 'common.optional': 'Optional',
+    'modal.preset': 'Presets', 'modal.addModel': 'Add model', 'modal.editModel': 'Edit model', 'modal.settings': 'Settings',
+    'set.appearance': 'Appearance', 'set.plainUi': 'Plain', 'set.theme': 'Color', 'set.lang': 'Language', 'set.model': 'Model', 'set.addModel': 'Add model',
+    'appearance.light': 'Light', 'appearance.dark': 'Dark',
+    'set.noModels': 'No models yet — add one below',
+    'lang.zh': '简体中文', 'lang.en': 'English',
+    'model.name': 'Note', 'model.namePh': 'Shown in the model list',
+    'model.apikey': 'API Key', 'model.apikeyPh': 'sk-...', 'model.apikeyKeep': 'Leave blank to keep the current key',
+    'model.apibase': 'API base URL', 'model.apibasePh': 'https://.../v1/messages',
+    'model.model': 'Model', 'model.modelPh': 'model parameter name',
+    'model.modelHint': 'Must match the model field in your provider docs exactly',
+    'model.retries': 'Retries (×)', 'model.connTimeout': 'Connect (s)', 'model.readTimeout': 'Read (s)',
+    'model.save': 'Save', 'common.cancel': 'Cancel', 'common.edit': 'Edit', 'common.delete': 'Delete',
+    'err.modelSave': 'Save failed', 'err.modelRequired': 'Model, API Key and base URL are required',
+    'err.modelDelete': 'Delete failed', 'err.modelDeleteLast': 'At least one model is required',
+    'confirm.modelDelete': 'Delete this model profile?',
     'page.channels.title': 'Channels', 'page.channels.sub': 'imbot channels managed by hub.pyw — one row per channel',
     'page.status.title': 'Status', 'page.status.sub': 'Background processes/services managed by hub.pyw',
     'page.collab.title': 'Collaboration', 'page.collab.sub': 'Live state & output of subagents / Hive workers',
@@ -103,14 +129,118 @@ const I18N = {
     'presetPrompt.mine': 'Collect this week\'s git commits and write a weekly report.',
   },
 };
-let lang = (localStorage.getItem('ga_lang') === 'en') ? 'en' : 'zh';
+const LANGS = ['zh', 'en'];
+let lang = LANGS.includes(localStorage.getItem('ga_lang')) ? localStorage.getItem('ga_lang') : 'zh';
+let theme = localStorage.getItem('ga_theme') || '1';
+const STORE = { lang: 'ga_lang', theme: 'ga_theme', appearance: 'ga_appearance', plain: 'ga_plain', llmNo: 'ga_llm_no' };
+const APPEARANCE_IDS = ['light', 'dark'];
+const LEGACY_STYLE = { classic: ['light', true], tinted: ['light', false], dark: ['dark', false] };
+
+function migrateAppearance() {
+  let app = localStorage.getItem(STORE.appearance);
+  let plain = localStorage.getItem(STORE.plain) === '1';
+  const legacy = localStorage.getItem('ga_style');
+  if (!app && legacy && LEGACY_STYLE[legacy]) {
+    [app, plain] = LEGACY_STYLE[legacy];
+    localStorage.setItem(STORE.appearance, app);
+    if (plain) localStorage.setItem(STORE.plain, '1');
+    else localStorage.removeItem(STORE.plain);
+    localStorage.removeItem('ga_style');
+  }
+  if (!APPEARANCE_IDS.includes(app)) app = 'light';
+  return { appearance: app, plain: plain && app === 'light' };
+}
+let { appearance, plain: plainUi } = migrateAppearance();
+const bridgeHost = () => `${location.protocol}//${location.hostname}:14168`;
+async function bridgeFetch(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  const init = { ...opts, headers };
+  if (init.body && typeof init.body !== 'string') {
+    headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(init.body);
+  }
+  const res = await fetch(`${bridgeHost()}${path}`, init);
+  let data = {};
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) throw new Error(data.error || data.message || res.statusText);
+  return data;
+}
 function t(key) { return (I18N[lang] && I18N[lang][key]) || (I18N.zh[key]) || key; }
+function optionalPh(key) {
+  const sep = (lang === 'en') ? ', ' : '，';
+  return `${t('common.optional')}${sep}${t(key)}`;
+}
 function applyI18n() {
   document.documentElement.lang = (lang === 'en') ? 'en' : 'zh-CN';
   document.title = t('app.title');
   document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
-  document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.setAttribute('placeholder', t(el.dataset.i18nPh)); });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+    const phKey = el.dataset.i18nPh;
+    el.setAttribute('placeholder', el.hasAttribute('data-optional-ph') ? optionalPh(phKey) : t(phKey));
+  });
   document.querySelectorAll('[data-i18n-title]').forEach(el => { el.setAttribute('title', t(el.dataset.i18nTitle)); });
+  renderLangList();
+}
+function renderLangList() {
+  const box = document.getElementById('lang-list');
+  if (!box) return;
+  box.innerHTML = '';
+  LANGS.forEach(code => {
+    const row = document.createElement('label');
+    row.className = 'model-row' + (lang === code ? ' sel' : '');
+    row.innerHTML = `<input type="radio" name="lang-pick"${lang === code ? ' checked' : ''}><span>${escapeHtml(t('lang.' + code))}</span>`;
+    row.addEventListener('click', (e) => { e.preventDefault(); selectLang(code); });
+    box.appendChild(row);
+  });
+}
+function selectLang(code) {
+  if (!LANGS.includes(code) || lang === code) return;
+  lang = code;
+  localStorage.setItem(STORE.lang, lang);
+  applyI18n();
+  renderSessionList();
+  refreshStatusLabel();
+  updateModelChip();
+  renderSettingsModels();
+}
+function applyTheme(id) {
+  const n = parseInt(id, 10);
+  theme = (n >= 1 && n <= 8) ? String(n) : '1';
+  const root = document.documentElement;
+  root.dataset.theme = theme;
+  localStorage.setItem(STORE.theme, theme);
+  root.style.setProperty('--blue', getComputedStyle(root).getPropertyValue(`--swatch-${theme}`).trim());
+  document.querySelectorAll('#theme-swatches .swatch').forEach(el => {
+    el.classList.toggle('sel', el.dataset.theme === theme);
+  });
+}
+function syncPlainSwitch() {
+  const row = document.getElementById('plain-ui-row');
+  const sw = document.getElementById('plain-ui-switch');
+  if (!row || !sw) return;
+  const show = appearance === 'light';
+  row.hidden = !show;
+  sw.setAttribute('aria-checked', plainUi ? 'true' : 'false');
+}
+function applyAppearance(nextApp, nextPlain) {
+  appearance = APPEARANCE_IDS.includes(nextApp) ? nextApp : 'light';
+  if (appearance === 'light') {
+    plainUi = !!nextPlain;
+    if (plainUi) localStorage.setItem(STORE.plain, '1');
+    else localStorage.removeItem(STORE.plain);
+  } else {
+    plainUi = false;
+  }
+  localStorage.setItem(STORE.appearance, appearance);
+  document.documentElement.dataset.appearance = appearance;
+  if (plainUi) document.documentElement.dataset.plain = '1';
+  else delete document.documentElement.dataset.plain;
+  document.querySelectorAll('#appearance-seg .appear-card').forEach(el => {
+    const on = el.dataset.appearance === appearance;
+    el.classList.toggle('sel', on);
+    el.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  syncPlainSwitch();
 }
 
 /* ═══════════════ 侧边栏导航 ═══════════════ */
@@ -128,8 +258,11 @@ nav.addEventListener('click', (e) => {
 const openModal = (id) => { const m = document.getElementById(id); if (m) m.hidden = false; };
 const closeModals = () => document.querySelectorAll('.modal').forEach(m => m.hidden = true);
 const bindClick = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
-bindClick('add-model-btn', (e) => { e.stopPropagation(); openModal('add-model-modal'); });
-bindClick('settings-btn',  (e) => { e.stopPropagation(); openModal('settings-modal'); });
+bindClick('add-model-btn', (e) => {
+  e.stopPropagation();
+  openAddModelForm();
+});
+bindClick('settings-btn',  (e) => { e.stopPropagation(); openSettings(); });
 bindClick('preset-btn',    (e) => { e.stopPropagation(); openModal('preset-modal'); });
 document.querySelectorAll('.modal').forEach(m =>
   m.addEventListener('click', (e) => { if (e.target.closest('[data-close]')) m.hidden = true; }));
@@ -142,6 +275,15 @@ if (typeof marked !== 'undefined') {
 const ALLOWED_URI_RE = /^(https?:|mailto:|tel:|#|\/)/i;
 function escapeHtml(s) {
   const d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML;
+}
+/** GA list_llms 形如 SessionClass/备注；桌面 UI 只展示 / 后一段 */
+function profileLabel(name) {
+  const s = String(name || '');
+  const i = s.indexOf('/');
+  return (i >= 0 ? s.slice(i + 1) : s).trim();
+}
+function normalizeProfiles(list) {
+  return (list || []).map(p => ({ ...p, name: profileLabel(p.name) || p.name }));
 }
 function sanitizeMarkdown(html) {
   const tpl = document.createElement('template');
@@ -248,7 +390,6 @@ bindResize(rpResize, rpPanel, -1, 160, 400);  // 右栏:cursor 左移 → 增宽
 bindResize(sbResize, sbPanel, +1, 180, 360);  // 左栏:cursor 右移 → 增宽
 const modelChip  = document.getElementById('model-chip');
 const modelNameEl= modelChip ? modelChip.querySelector('.model-name') : null;
-const langSel    = document.getElementById('lang-select');
 
 let msgsEl = null;
 function ensureMsgs() {
@@ -560,7 +701,7 @@ async function handleSlash(cmd) {
     case 'new': await newSession(); break;
     case 'clear': { const s = activeSess(); if (s) { s.messages = []; renderAllMessages(s); } break; }
     case 'stop': if (await cancelPrompt()) showSystem(t('sys.stopRequested')); break;
-    case 'settings': openModal('settings-modal'); break;
+    case 'settings': openSettings(); break;
     default: showSystem(t('slash.unknown') + ': /' + name);
   }
 }
@@ -575,52 +716,222 @@ document.querySelectorAll('.fcard').forEach(card => {
   });
 });
 
-/* ═══════════════ 模型档位 ═══════════════ */
+/* ═══════════════ 模型 / 设置 ═══════════════ */
 function updateModelChip() {
   if (modelNameEl) modelNameEl.textContent = state.modelName || t('model.auto');
+}
+async function selectModel(id, name) {
+  state.llmNo = id;
+  state.modelName = profileLabel(name) || name || null;
+  localStorage.setItem(STORE.llmNo, String(id));
+  updateModelChip();
+  renderSettingsModels();
+  try { await window.ga.saveConfig({ config: { llmNo: id } }); } catch (_) {}
+}
+const MODEL_ACT_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+const MODEL_ACT_DEL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+let editingModelId = null;
+
+function setModelApikeyMode(isAdd) {
+  const apikey = document.getElementById('model-apikey-input');
+  const apikeyReq = document.querySelector('#model-apikey-label .field-req');
+  if (!apikey) return;
+  apikey.required = isAdd;
+  apikey.dataset.i18nPh = isAdd ? 'model.apikeyPh' : 'model.apikeyKeep';
+  if (isAdd) apikey.removeAttribute('data-optional-ph');
+  else { apikey.value = ''; apikey.setAttribute('data-optional-ph', ''); }
+  if (apikeyReq) apikeyReq.hidden = !isAdd;
+}
+
+function openAddModelForm() {
+  editingModelId = null;
+  const form = document.getElementById('add-model-form');
+  const title = document.getElementById('model-form-title');
+  const errEl = document.getElementById('add-model-err');
+  if (title) title.dataset.i18n = 'modal.addModel';
+  if (form) form.reset();
+  setModelApikeyMode(true);
+  if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
+  openModal('add-model-modal');
+  applyI18n();
+}
+async function openEditModelForm(id) {
+  editingModelId = id;
+  const errEl = document.getElementById('add-model-err');
+  if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
+  try {
+    const res = await bridgeFetch(`/model-profiles/${id}`);
+    const p = res.profile;
+    if (!p) throw new Error(t('err.modelSave'));
+    const form = document.getElementById('add-model-form');
+    const title = document.getElementById('model-form-title');
+    if (title) title.dataset.i18n = 'modal.editModel';
+    if (form) {
+      form.model.value = p.model || '';
+      form.apibase.value = p.apibase || '';
+      form.name.value = p.name || '';
+      form.max_retries.value = p.max_retries ?? 5;
+      form.connect_timeout.value = p.connect_timeout ?? 15;
+      form.read_timeout.value = p.read_timeout ?? 300;
+    }
+    setModelApikeyMode(false);
+    openModal('add-model-modal');
+    applyI18n();
+  } catch (ex) {
+    alert(ex.message || t('err.modelSave'));
+  }
+}
+async function deleteModel(id, name) {
+  const label = profileLabel(name) || name || ('#' + id);
+  if (!confirm(`${t('confirm.modelDelete')}\n${label}`)) return;
+  try {
+    const res = await bridgeFetch(`/model-profiles/${id}`, { method: 'DELETE', body: {} });
+    if (res?.ok === false || res?.error) throw new Error(res.error || t('err.modelDelete'));
+    const wasActive = state.llmNo === id;
+    const oldNo = state.llmNo;
+    state.modelProfiles = normalizeProfiles(res.profiles || []);
+    if (wasActive) {
+      const p = state.modelProfiles[0];
+      if (p) await selectModel(p.id ?? 0, p.name);
+      else { state.llmNo = 0; state.modelName = null; updateModelChip(); }
+    } else if (oldNo > id) {
+      const p = state.modelProfiles[oldNo - 1];
+      if (p) await selectModel(p.id ?? (oldNo - 1), p.name);
+    }
+    renderSettingsModels();
+  } catch (ex) {
+    const msg = ex.message || '';
+    alert(msg.includes('last profile') ? t('err.modelDeleteLast') : (msg || t('err.modelDelete')));
+  }
+}
+function renderSettingsModels() {
+  const box = document.getElementById('model-list');
+  if (!box) return;
+  box.innerHTML = '';
+  const list = state.modelProfiles || [];
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'set-empty'; empty.textContent = t('set.noModels');
+    box.appendChild(empty); return;
+  }
+  for (const p of list) {
+    const id = p.id ?? 0;
+    const label = profileLabel(p.name) || p.name || ('#' + id);
+    const row = document.createElement('label');
+    row.className = 'model-row' + (state.llmNo === id ? ' sel' : '');
+    row.innerHTML = `<input type="radio" name="model-pick"${state.llmNo === id ? ' checked' : ''}><span class="model-row-name">${escapeHtml(label)}</span><span class="model-row-actions"><button type="button" class="model-act" data-act="edit" title="${escapeHtml(t('common.edit'))}">${MODEL_ACT_EDIT}</button><button type="button" class="model-act model-act-del" data-act="delete" title="${escapeHtml(t('common.delete'))}">${MODEL_ACT_DEL}</button></span>`;
+    row.querySelector('[data-act="edit"]').addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); openEditModelForm(id); });
+    row.querySelector('[data-act="delete"]').addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); deleteModel(id, p.name); });
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.model-row-actions')) return;
+      e.preventDefault();
+      selectModel(id, p.name);
+    });
+    box.appendChild(row);
+  }
+}
+function openSettings() {
+  openModal('settings-modal');
+  renderSettingsModels();
+  renderLangList();
+  applyTheme(theme);
+  applyAppearance(appearance, plainUi);
 }
 async function loadModelProfiles() {
   try {
     const res = await window.ga.getModelProfiles();
     const list = res?.profiles || res?.result?.profiles || [];
-    state.modelProfiles = list;
-    const active = list.find(p => p.active) || list[0];
-    if (active) { state.llmNo = active.id ?? 0; state.modelName = active.name || null; }
+    state.modelProfiles = normalizeProfiles(list);
+    const saved = localStorage.getItem(STORE.llmNo);
+    if (saved != null && list.length) {
+      const n = parseInt(saved, 10);
+      const p = state.modelProfiles.find(x => (x.id ?? 0) === n);
+      if (p) { state.llmNo = n; state.modelName = profileLabel(p.name) || p.name || null; }
+    } else {
+      const active = state.modelProfiles.find(p => p.active) || state.modelProfiles[0];
+      if (active) { state.llmNo = active.id ?? 0; state.modelName = profileLabel(active.name) || active.name || null; }
+    }
     updateModelChip();
+    renderSettingsModels();
   } catch (_) {}
 }
 if (modelChip) modelChip.addEventListener('click', (e) => {
   e.preventDefault();
   const list = state.modelProfiles || [];
-  if (!list.length) return;
+  if (!list.length) { openSettings(); return; }
   const idx = list.findIndex(p => (p.id ?? 0) === state.llmNo);
   const next = list[(idx + 1) % list.length];
-  state.llmNo = next.id ?? 0; state.modelName = next.name || null;
-  updateModelChip();
+  selectModel(next.id ?? 0, next.name);
+});
+const themeSwatches = document.getElementById('theme-swatches');
+if (themeSwatches) themeSwatches.addEventListener('click', (e) => {
+  const sw = e.target.closest('.swatch[data-theme]');
+  if (sw) applyTheme(sw.dataset.theme);
+});
+const appearanceSeg = document.getElementById('appearance-seg');
+if (appearanceSeg) appearanceSeg.addEventListener('click', (e) => {
+  const btn = e.target.closest('.appear-card[data-appearance]');
+  if (!btn) return;
+  const isLight = btn.dataset.appearance === 'light';
+  applyAppearance(btn.dataset.appearance, isLight && localStorage.getItem(STORE.plain) === '1');
+});
+const plainUiSwitch = document.getElementById('plain-ui-switch');
+if (plainUiSwitch) plainUiSwitch.addEventListener('click', () => {
+  if (appearance === 'light') applyAppearance('light', !plainUi);
+});
+async function loadBridgeConfig() {
+  try {
+    const res = await window.ga.getConfig();
+    const cfg = res?.config || {};
+    if (cfg.llmNo != null && state.modelProfiles.length) {
+      const p = state.modelProfiles.find(x => (x.id ?? 0) === cfg.llmNo);
+      if (p) { state.llmNo = cfg.llmNo; state.modelName = p.name || null; updateModelChip(); }
+    }
+  } catch (_) {}
+}
+
+const addModelForm = document.getElementById('add-model-form');
+if (addModelForm) addModelForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errEl = document.getElementById('add-model-err');
+  const fd = new FormData(addModelForm);
+  const payload = Object.fromEntries(fd.entries());
+  const isEdit = editingModelId != null;
+  if (!payload.apibase?.trim() || !payload.model?.trim()) {
+    if (errEl) { errEl.textContent = t('err.modelRequired'); errEl.hidden = false; }
+    return;
+  }
+  if (!isEdit && !payload.apikey?.trim()) {
+    if (errEl) { errEl.textContent = t('err.modelRequired'); errEl.hidden = false; }
+    return;
+  }
+  try {
+    const res = isEdit
+      ? await bridgeFetch(`/model-profiles/${editingModelId}`, { method: 'PUT', body: payload })
+      : await bridgeFetch('/model-profiles', { method: 'POST', body: payload });
+    if (res?.ok === false || res?.error) throw new Error(res.error || t('err.modelSave'));
+    state.modelProfiles = normalizeProfiles(res.profiles || []);
+    const pid = isEdit ? editingModelId : (res.profileId ?? state.modelProfiles.at(-1)?.id ?? 0);
+    const p = state.modelProfiles.find(x => (x.id ?? 0) === pid) || state.modelProfiles.at(-1);
+    if (p) await selectModel(p.id ?? pid, p.name);
+    document.getElementById('add-model-modal').hidden = true;
+    addModelForm.reset();
+    editingModelId = null;
+    if (errEl) errEl.hidden = true;
+  } catch (ex) {
+    if (errEl) { errEl.textContent = (ex.message || t('err.modelSave')); errEl.hidden = false; }
+  }
 });
 
-/* ═══════════════ 上传按钮（占位）═══════════════ */
 const uploadBtn = chatPage.querySelector('.composer-top .ic-btn');
 if (uploadBtn) uploadBtn.addEventListener('click', (e) => { e.preventDefault(); showSystem(t('upload.hint')); });
 
-/* ═══════════════ 语言切换 ═══════════════ */
-if (langSel) {
-  langSel.value = lang;
-  langSel.addEventListener('change', () => {
-    lang = (langSel.value === 'en') ? 'en' : 'zh';
-    localStorage.setItem('ga_lang', lang);
-    applyI18n();
-    renderSessionList();
-    refreshStatusLabel();
-    updateModelChip();
-  });
-}
-
 /* ═══════════════ bridge 事件 ═══════════════ */
-window.ga.onBridgeReady(() => {
+window.ga.onBridgeReady(async () => {
   state.bridgeReady = true;
   if (!state.activeId) { refreshStatusLabel(); refreshEmptyState(null); }
-  loadModelProfiles();
+  await loadModelProfiles();
+  await loadBridgeConfig();
 });
 window.ga.onBridgeNotification((msg) => {
   if (msg && msg.type === 'session-state') {
@@ -681,7 +992,7 @@ async function tokPollBridge() {
   if (_tokPolling) return;
   _tokPolling = true;
   try {
-    const res = await fetch(`http://${location.hostname}:14168/token-stats`);
+    const res = await bridgeFetch('/token-stats');
     const data = await res.json();
     const history = tokLoadHistory();
     for (const r of (data.records||[])) {
@@ -763,6 +1074,8 @@ if(tokResetBtn)tokResetBtn.addEventListener('click',()=>{if(tokSince)tokSince.va
 nav.addEventListener('click',(e)=>{const item=e.target.closest('.nav-item');if(item&&item.dataset.page==='token')loadTokenPage();});
 
 /* ═══════════════ 启动 ═══════════════ */
+applyAppearance(appearance, plainUi);
+applyTheme(theme);
 applyI18n();
 updateModelChip();
 renderSessionList();

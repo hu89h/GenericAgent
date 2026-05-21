@@ -6,6 +6,22 @@
 <link rel="stylesheet" href="styles.css">
 <!-- DEV 脚手架(标注模式)：删本行 + 下方 annot.js 一行即可彻底移除 -->
 <link rel="stylesheet" href="annot.css">
+<script>
+(function(){
+  var t=localStorage.getItem('ga_theme'); if(t) document.documentElement.dataset.theme=t;
+  var legacy=localStorage.getItem('ga_style');
+  var app=localStorage.getItem('ga_appearance');
+  if(!app&&legacy){
+    if(legacy==='dark') app='dark';
+    else{ app='light'; if(legacy==='classic') localStorage.setItem('ga_plain','1'); }
+    localStorage.setItem('ga_appearance',app);
+    localStorage.removeItem('ga_style');
+  }
+  app=app||'light';
+  document.documentElement.dataset.appearance=app;
+  if(app==='light'&&localStorage.getItem('ga_plain')==='1') document.documentElement.dataset.plain='1';
+})();
+</script>
 </head>
 <body>
 
@@ -300,12 +316,29 @@
     <div class="modal-backdrop" data-close></div>
     <div class="modal-card" role="dialog">
       <div class="modal-head">
-        <div class="modal-title" data-i18n="modal.addModel"></div>
+        <div class="modal-title" id="model-form-title" data-i18n="modal.addModel"></div>
         <button class="modal-x" data-close data-i18n-title="common.close" title="">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
         </button>
       </div>
-      <div class="modal-body"><!-- 留给实现者 --></div>
+      <div class="modal-body model-form-body">
+        <form id="add-model-form" class="model-form" autocomplete="off">
+          <label><span class="field-label"><span data-i18n="model.model"></span><span class="field-req" aria-hidden="true">*</span></span><input name="model" required data-i18n-ph="model.modelPh"><span class="field-hint" data-i18n="model.modelHint"></span></label>
+          <label id="model-apikey-label"><span class="field-label"><span data-i18n="model.apikey"></span><span class="field-req" aria-hidden="true">*</span></span><input name="apikey" type="password" data-i18n-ph="model.apikeyPh" id="model-apikey-input"></label>
+          <label><span class="field-label"><span data-i18n="model.apibase"></span><span class="field-req" aria-hidden="true">*</span></span><input name="apibase" required data-i18n-ph="model.apibasePh"></label>
+          <label><span data-i18n="model.name"></span><input name="name" data-i18n-ph="model.namePh" data-optional-ph></label>
+          <div class="model-form-row">
+            <label class="model-form-mini"><span data-i18n="model.retries"></span><input name="max_retries" type="number" min="1" value="5"></label>
+            <label class="model-form-mini"><span data-i18n="model.connTimeout"></span><input name="connect_timeout" type="number" min="1" value="15"></label>
+            <label class="model-form-mini"><span data-i18n="model.readTimeout"></span><input name="read_timeout" type="number" min="5" value="300"></label>
+          </div>
+          <p class="model-form-err" id="add-model-err" hidden></p>
+          <div class="model-form-actions">
+            <button type="button" class="set-btn ghost" data-close data-i18n="common.cancel"></button>
+            <button type="submit" class="set-btn primary"><span data-i18n="model.save"></span></button>
+          </div>
+        </form>
+      </div>
     </div>
   </div>
 
@@ -320,26 +353,46 @@
         </button>
       </div>
       <div class="modal-body set-body">
-        <div>
-          <div class="set-sec-t" data-i18n="set.theme"></div>
-          <div class="swatches">
-            <span class="swatch s1 sel"></span>
-            <span class="swatch s2"></span>
-            <span class="swatch s3"></span>
-            <span class="swatch s4"></span>
-            <span class="swatch s5"></span>
+        <div class="set-block">
+          <div class="set-sec-t" data-i18n="set.appearance"></div>
+          <div class="appear-cards" id="appearance-seg" role="radiogroup">
+            <button class="appear-card sel" type="button" data-appearance="light" role="radio" aria-checked="true">
+              <span class="appear-preview appear-preview-light" aria-hidden="true"></span>
+              <span class="appear-name" data-i18n="appearance.light"></span>
+            </button>
+            <button class="appear-card" type="button" data-appearance="dark" role="radio" aria-checked="false">
+              <span class="appear-preview appear-preview-dark" aria-hidden="true"></span>
+              <span class="appear-name" data-i18n="appearance.dark"></span>
+            </button>
+          </div>
+          <div class="set-toggle-row" id="plain-ui-row" hidden>
+            <span class="set-toggle-label" data-i18n="set.plainUi"></span>
+            <button class="set-switch" type="button" id="plain-ui-switch" role="switch" aria-checked="false">
+              <span class="set-switch-knob" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
-        <div>
+        <div class="set-block">
+          <div class="set-sec-t" data-i18n="set.theme"></div>
+          <div class="color-grid" id="theme-swatches">
+            <span class="swatch sel" data-theme="1" role="button" tabindex="0" aria-label="1"></span>
+            <span class="swatch" data-theme="2" role="button" tabindex="0" aria-label="2"></span>
+            <span class="swatch" data-theme="3" role="button" tabindex="0" aria-label="3"></span>
+            <span class="swatch" data-theme="4" role="button" tabindex="0" aria-label="4"></span>
+            <span class="swatch" data-theme="5" role="button" tabindex="0" aria-label="5"></span>
+            <span class="swatch" data-theme="6" role="button" tabindex="0" aria-label="6"></span>
+            <span class="swatch" data-theme="7" role="button" tabindex="0" aria-label="7"></span>
+            <span class="swatch" data-theme="8" role="button" tabindex="0" aria-label="8"></span>
+          </div>
+        </div>
+        <div class="set-block">
           <div class="set-sec-t" data-i18n="set.lang"></div>
-          <select class="set-select" id="lang-select">
-            <option value="zh">简体中文</option>
-            <option value="en">English</option>
-          </select>
+          <div class="model-list lang-list" id="lang-list"></div>
         </div>
         <div>
           <div class="set-sec-t" data-i18n="set.model"></div>
-          <button class="set-btn" id="add-model-btn">
+          <div class="model-list" id="model-list"></div>
+          <button class="set-btn" id="add-model-btn" type="button">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             <span data-i18n="set.addModel"></span>
           </button>
