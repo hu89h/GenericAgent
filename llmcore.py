@@ -27,9 +27,6 @@ def reload_mykeys():
     mk = _load_mykeys(); _mykey_mtime = os.stat(_mykey_path).st_mtime_ns
     print(f'[Info] Load mykeys from {_mykey_path}')
     globals().update(mykeys=mk)
-    if mk.get('langfuse_config'):
-        try: from plugins.hooks import load as _hl; _hl('langfuse_tracing')
-        except Exception: pass
     return mk, True
 
 def __getattr__(name):  # once guard in PEP 562
