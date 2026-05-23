@@ -958,12 +958,25 @@ async def status_handler(request):
     })
 
 
+_SETTINGS = Path.home() / ".ga_desktop_settings.json"
+_UI_KEYS = ("lang", "theme", "appearance", "plain", "llmNo", "fontSize")
+
+
+def _desktop_ui() -> dict:
+    try:
+        ui = json.loads(_SETTINGS.read_text(encoding="utf-8")).get("ui")
+        return dict(ui) if isinstance(ui, dict) else {}
+    except Exception:
+        return {}
+
+
 async def get_config_handler(request):
     profiles = manager.list_model_profiles()
     active = next((p["id"] for p in profiles if p.get("active")), manager.config.get("llmNo", 0))
     cfg = dict(manager.config)
     if "llmNo" not in cfg:
         cfg["llmNo"] = active
+    cfg.update(_desktop_ui())
     return json_ok({"gaRoot": manager.ga_root, "mykeyPath": manager.mykey_path, "config": cfg})
 
 
@@ -971,6 +984,18 @@ async def save_config_handler(request):
     data = await read_json(request)
     cfg = data.get("config", data)
     if isinstance(cfg, dict):
+        patch = {k: cfg[k] for k in _UI_KEYS if k in cfg}
+        if patch:
+            try:
+                doc = json.loads(_SETTINGS.read_text(encoding="utf-8")) if _SETTINGS.is_file() else {}
+                if not isinstance(doc, dict):
+                    doc = {}
+                ui = doc["ui"] if isinstance(doc.get("ui"), dict) else {}
+                ui.update(patch)
+                doc["ui"] = ui
+                _SETTINGS.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as e:
+                print(f"[bridge] save ui prefs failed: {e}", file=sys.stderr)
         manager.config.update(cfg)
     return json_ok({"ok": True, "gaRoot": manager.ga_root, "mykeyPath": manager.mykey_path, "config": manager.config})
 

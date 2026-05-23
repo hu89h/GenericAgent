@@ -3,16 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <title>GenericAgent</title>
-<link rel="stylesheet" href="styles.css?v=10">
+<link rel="stylesheet" href="styles.css?v=17">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css" crossorigin="anonymous">
+<link id="hljs-theme" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css" crossorigin="anonymous">
 <!-- DEV 脚手架(标注模式)：删本行 + 下方 annot.js 一行即可彻底移除 -->
 <link rel="stylesheet" href="annot.css">
 <script>
 (function(){
   var t=localStorage.getItem('ga_theme'); if(t) document.documentElement.dataset.theme=t;
+  var l=localStorage.getItem('ga_lang'); if(l==='en') document.documentElement.lang='en';
   var legacy=localStorage.getItem('ga_style');
   var app=localStorage.getItem('ga_appearance');
   if(!app&&legacy){
@@ -24,6 +25,18 @@
   app=app||'light';
   document.documentElement.dataset.appearance=app;
   if(app==='light'&&localStorage.getItem('ga_plain')==='1') document.documentElement.dataset.plain='1';
+  var LEGACY_FONT={sm:12,md:14,lg:16};
+  function chatFontPx(v){
+    if(v&&LEGACY_FONT[v]) return LEGACY_FONT[v];
+    var n=parseInt(v,10); if(!isNaN(n)&&n>=10&&n<=20) return n;
+    return 14;
+  }
+  var fs=localStorage.getItem('ga_font_size');
+  var cfp=chatFontPx(fs);
+  document.documentElement.dataset.chatFont=String(cfp);
+  document.documentElement.style.setProperty('--chat-font',cfp+'px');
+  var hljs=document.getElementById('hljs-theme');
+  if(hljs&&app==='dark') hljs.href='https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css';
   try{ var sraw=localStorage.getItem('ga_sessions'); if(sraw && JSON.parse(sraw).length) document.documentElement.dataset.bootHasSessions='1'; }catch(_){}
 })();
 </script>
@@ -380,6 +393,21 @@
           </div>
         </div>
         <div class="set-block">
+          <div class="set-sec-t" id="chat-font-label" data-i18n="set.fontSize"></div>
+          <div class="chat-font-panel">
+            <div class="chat-font-stepper" id="chat-font-stepper" role="slider"
+              aria-valuemin="10" aria-valuemax="20" aria-valuenow="14"
+              aria-valuetext="14px" aria-labelledby="chat-font-label" tabindex="0">
+              <div class="chat-font-segments" id="chat-font-segments"></div>
+            </div>
+            <span class="chat-font-value" id="chat-font-value" aria-hidden="true">14px</span>
+            <div class="chat-font-scale" aria-hidden="true">
+              <span class="chat-font-scale-min">10</span>
+              <span class="chat-font-scale-max">20</span>
+            </div>
+          </div>
+        </div>
+        <div class="set-block">
           <div class="set-sec-t" data-i18n="set.theme"></div>
           <div class="color-grid" id="theme-swatches">
             <span class="swatch sel" data-theme="1" role="button" tabindex="0" aria-label="1"></span>
@@ -423,7 +451,7 @@
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
-<script src="app.js?v=17"></script>
+<script src="app.js?v=24"></script>
 <script src="annot.js"></script><!-- DEV 脚手架，可删 -->
 </body>
 </html>

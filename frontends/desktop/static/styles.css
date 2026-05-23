@@ -169,6 +169,7 @@ html[data-appearance="dark"][data-theme="7"],
 html[data-appearance="dark"][data-theme="8"]{ --on-accent:#0d1117; }
 
 html,body{ height:100%; }
+html{ --chat-font:14px; }
 body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; }
 
 #app{
@@ -273,6 +274,44 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; }
 .set-switch:focus-visible{ outline:2px solid var(--blue); outline-offset:2px; }
 
 .lang-list{ margin-bottom:0; }
+
+.chat-font-panel{
+  display:grid; grid-template-columns:1fr auto; grid-template-rows:auto auto;
+  column-gap:14px; row-gap:6px; align-items:center;
+  padding:12px 14px; border:1px solid var(--line); border-radius:10px;
+  background:var(--field-bg);
+}
+.chat-font-stepper{ grid-column:1; grid-row:1; cursor:pointer; touch-action:none; border-radius:6px; }
+.chat-font-value{
+  grid-column:2; grid-row:1 / 3; align-self:center;
+  font-size:13px; font-weight:600; color:var(--txt-strong);
+  font-variant-numeric:tabular-nums; text-align:right; line-height:1;
+  padding-left:14px; border-left:1px solid var(--line); min-width:42px;
+}
+.chat-font-scale{ grid-column:1; grid-row:2; }
+.chat-font-stepper:focus{ outline:none; }
+.chat-font-stepper:focus-visible{
+  outline:2px solid var(--blue); outline-offset:2px;
+}
+.chat-font-segments{
+  display:grid; grid-template-columns:repeat(11, 1fr); gap:3px;
+}
+.chat-font-seg{
+  height:7px; border:none; padding:0; margin:0; border-radius:2px;
+  background:var(--line); cursor:pointer;
+  transition:background .12s;
+}
+.chat-font-seg.on{ background:color-mix(in srgb, var(--blue) 55%, var(--line)); }
+.chat-font-seg.cur{ background:var(--blue); }
+.chat-font-seg:hover{ background:color-mix(in srgb, var(--blue) 35%, var(--line)); }
+.chat-font-seg.on:hover{ background:color-mix(in srgb, var(--blue) 55%, var(--line)); }
+.chat-font-seg.cur:hover{ background:var(--blue); }
+.chat-font-scale{
+  display:grid; grid-template-columns:repeat(11, 1fr); gap:3px;
+  font-size:11px; line-height:1; color:var(--muted); font-variant-numeric:tabular-nums;
+}
+.chat-font-scale-min{ grid-column:1; justify-self:start; }
+.chat-font-scale-max{ grid-column:11; justify-self:end; }
 
 /* 颜色：mac 式 4×2 色盘 */
 .color-grid{
@@ -534,7 +573,7 @@ html[data-appearance="dark"] .swatch[data-theme="8"].sel::after{
 .msg.assistant,.msg.error{ justify-content:flex-start; }
 .msg.system{ justify-content:center; }
 .bubble{
-  max-width:80%; padding:10px 14px; border-radius:12px; font-size:13px;
+  max-width:80%; padding:10px 14px; border-radius:12px; font-size:var(--chat-font);
   line-height:1.6; white-space:pre-wrap; word-break:break-word;
   background:var(--blue-bg); color:var(--txt-strong);
 }
@@ -542,13 +581,26 @@ html[data-appearance="dark"] .swatch[data-theme="8"].sel::after{
 .bubble.err{ background:var(--danger-bg); color:var(--danger-text); white-space:normal; }
 .bubble.sys{ background:transparent; color:var(--muted); font-size:12px; padding:4px 8px; }
 .bubble.md p{ margin:0 0 8px; } .bubble.md p:last-child{ margin:0; }
-.bubble.md pre{ background:var(--field-bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; overflow:auto; font-size:12px; }
-.bubble.md :not(pre) > code{ background:var(--field-bg); border-radius:4px; padding:1px 5px; font-size:12px; }
+.bubble.md pre{ background:var(--field-bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; overflow:auto; font-size:.86em; }
+.bubble.md :not(pre) > code{ background:var(--field-bg); border-radius:4px; padding:1px 5px; font-size:.86em; }
 .bubble.md a{ color:var(--blue); }
 .bubble.md ul,.bubble.md ol{ margin:0 0 8px; padding-left:20px; }
+.bubble.md blockquote{
+  margin:0 0 8px; padding:0 0 0 12px;
+  border-left:3px solid var(--line-strong); color:var(--txt-2);
+}
+.bubble.md h1,.bubble.md h2,.bubble.md h3,.bubble.md h4,.bubble.md h5,.bubble.md h6{
+  color:var(--txt-strong); margin:0 0 8px; line-height:1.35;
+}
+.bubble.md h1{ font-size:1.25em; } .bubble.md h2{ font-size:1.15em; } .bubble.md h3{ font-size:1.05em; }
+.bubble.md strong,.bubble.md b{ color:var(--txt-strong); font-weight:600; }
+.bubble.md hr{ border:none; border-top:1px solid var(--line-strong); margin:10px 0; }
+.bubble.md table{ width:100%; border-collapse:collapse; margin:0 0 8px; font-size:.92em; }
+.bubble.md th,.bubble.md td{ border:1px solid var(--line); padding:6px 10px; text-align:left; }
+.bubble.md th{ background:var(--line-soft); color:var(--txt-strong); }
 .fold{ margin:6px 0; border:1px solid var(--line); border-radius:8px; background:var(--field-bg); }
-.fold summary{ cursor:pointer; padding:6px 10px; font-size:12px; color:var(--muted); user-select:none; }
-.fold pre{ margin:0; padding:10px 12px; border:none; border-top:1px solid var(--line); background:transparent; font-size:12px; overflow:auto; }
+.bubble .fold summary{ cursor:pointer; padding:6px 10px; font-size:.86em; color:var(--muted); user-select:none; }
+.bubble .fold pre{ margin:0; padding:10px 12px; border:none; border-top:1px solid var(--line); background:transparent; font-size:.86em; overflow:auto; }
 .cursor{ display:inline-block; width:7px; height:14px; background:var(--blue); vertical-align:-2px; margin-left:2px; animation:blink 1s steps(2) infinite; }
 @keyframes blink{ 50%{ opacity:0; } }
 .run-state.busy .dot{ animation:blink 1s steps(2) infinite; }
@@ -732,9 +784,9 @@ html[data-boot-has-sessions] .chat-start{ display:none !important; }
 }
 .chip.sm{ padding:4px 9px; font-size:11px; }
 .chip-ic{ width:12px; height:12px; flex:0 0 auto; }
-.input{
+.composer .input{
   width:100%; min-height:58px; resize:none; border:1px solid var(--line);
-  border-radius:var(--radius); padding:12px 14px; font-size:13px; outline:none;
+  border-radius:var(--radius); padding:12px 14px; font-size:var(--chat-font); outline:none;
   font-family:inherit; background:var(--card); color:var(--txt);
 }
 .input:focus{ border-color:var(--blue); }
@@ -1119,7 +1171,7 @@ html[data-boot-has-sessions] .chat-start{ display:none !important; }
 .fold.fold-retry pre{ font-size:11px; color:var(--muted); }
 /* ---- 代码块容器 + 复制按钮 ---- */
 .bubble.md pre{ position:relative; background:var(--field-bg); border-radius:8px; padding:12px; overflow-x:auto; }
-.bubble.md pre code{ font-size:13px; }
+.bubble.md pre code{ font-size:.92em; }
 .code-copy-btn{
   position:absolute; top:6px; right:6px; background:var(--bg); border:1px solid var(--line);
   border-radius:6px; padding:2px 8px; font-size:11px; cursor:pointer; opacity:0; transition:opacity .2s;
@@ -1137,6 +1189,18 @@ html[data-boot-has-sessions] .chat-start{ display:none !important; }
 .katex-block:hover .latex-copy-btn{ opacity:1; }
 /* ---- highlight.js 适配 ---- */
 .hljs{ background:transparent !important; padding:0 !important; }
+html[data-appearance="dark"] .bubble.md{
+  --md-link:color-mix(in srgb, var(--blue) 42%, #ffffff);
+}
+html[data-appearance="dark"] .bubble.md .katex{ color:var(--txt); }
+html[data-appearance="dark"] .bubble.md a{ color:var(--md-link); }
+html[data-appearance="dark"] .bubble.md :not(pre) > code{
+  background:var(--line-soft); border:1px solid var(--line); color:var(--txt);
+}
+html[data-appearance="dark"] .bubble.md pre{
+  background:var(--line-soft); border-color:var(--line-strong);
+}
+html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
 /* ---- 打字机光标 ---- */
 .cursor-blink::after{
   content:'▍'; animation:blink 1s step-end infinite; color:var(--blue);

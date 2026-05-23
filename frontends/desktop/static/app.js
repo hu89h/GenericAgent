@@ -241,7 +241,7 @@ const I18N = {
     'customPreset.empty': '标题和 Prompt 不能为空',
     'customPreset.removeTitle': '删除',
     'builtinPreset.restoreBtn': '恢复默认预设',
-    'set.appearance': '外观', 'set.plainUi': '素色', 'set.theme': '颜色', 'set.lang': '语言', 'set.model': '模型', 'set.addModel': '添加模型',
+    'set.appearance': '外观', 'set.plainUi': '素色', 'set.fontSize': '聊天字号', 'set.theme': '颜色', 'set.lang': '语言', 'set.model': '模型', 'set.addModel': '添加模型',
     'appearance.light': '浅色', 'appearance.dark': '深色',
     'set.noModels': '暂无模型，点击下方添加',
     'lang.zh': '简体中文', 'lang.en': 'English',
@@ -337,7 +337,7 @@ const I18N = {
     'customPreset.empty': 'Title and Prompt cannot be empty',
     'customPreset.removeTitle': 'Delete',
     'builtinPreset.restoreBtn': 'Restore defaults',
-    'set.appearance': 'Appearance', 'set.plainUi': 'Plain', 'set.theme': 'Color', 'set.lang': 'Language', 'set.model': 'Model', 'set.addModel': 'Add model',
+    'set.appearance': 'Appearance', 'set.plainUi': 'Plain', 'set.fontSize': 'Chat font size', 'set.theme': 'Color', 'set.lang': 'Language', 'set.model': 'Model', 'set.addModel': 'Add model',
     'appearance.light': 'Light', 'appearance.dark': 'Dark',
     'set.noModels': 'No models yet — add one below',
     'lang.zh': '简体中文', 'lang.en': 'English',
@@ -411,27 +411,59 @@ const I18N = {
   },
 };
 const LANGS = ['zh', 'en'];
-let lang = LANGS.includes(localStorage.getItem('ga_lang')) ? localStorage.getItem('ga_lang') : 'zh';
-let theme = localStorage.getItem('ga_theme') || '1';
-const STORE = { lang: 'ga_lang', theme: 'ga_theme', appearance: 'ga_appearance', plain: 'ga_plain', llmNo: 'ga_llm_no', sessions: 'ga_sessions', activeId: 'ga_active_id' };
+const STORE = { lang: 'ga_lang', theme: 'ga_theme', appearance: 'ga_appearance', plain: 'ga_plain', fontSize: 'ga_font_size', llmNo: 'ga_llm_no', sessions: 'ga_sessions', activeId: 'ga_active_id' };
 const APPEARANCE_IDS = ['light', 'dark'];
-const LEGACY_STYLE = { classic: ['light', true], tinted: ['light', false], dark: ['dark', false] };
+const CHAT_FONT_MIN = 10;
+const CHAT_FONT_MAX = 20;
+const CHAT_FONT_DEFAULT = 14;
+const CHAT_FONT_LEGACY = { sm: 12, md: 14, lg: 16 };
+const HLJS_THEME_BASE = 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/';
 
-function migrateAppearance() {
-  let app = localStorage.getItem(STORE.appearance);
-  let plain = localStorage.getItem(STORE.plain) === '1';
-  const legacy = localStorage.getItem('ga_style');
-  if (!app && legacy && LEGACY_STYLE[legacy]) {
-    [app, plain] = LEGACY_STYLE[legacy];
-    localStorage.setItem(STORE.appearance, app);
-    if (plain) localStorage.setItem(STORE.plain, '1');
-    else localStorage.removeItem(STORE.plain);
-    localStorage.removeItem('ga_style');
-  }
-  if (!APPEARANCE_IDS.includes(app)) app = 'light';
-  return { appearance: app, plain: plain && app === 'light' };
+function normalizeChatFontSize(value) {
+  if (typeof value === 'string' && CHAT_FONT_LEGACY[value]) return CHAT_FONT_LEGACY[value];
+  const n = parseInt(value, 10);
+  if (Number.isFinite(n)) return Math.min(CHAT_FONT_MAX, Math.max(CHAT_FONT_MIN, n));
+  return CHAT_FONT_DEFAULT;
 }
-let { appearance, plain: plainUi } = migrateAppearance();
+
+function bootUiFromDom() {
+  const root = document.documentElement;
+  const out = { lang: 'zh', theme: '1', appearance: 'light', plainUi: false, chatFontSize: CHAT_FONT_DEFAULT };
+  if (root.lang === 'en') out.lang = 'en';
+  if (root.dataset.theme) out.theme = root.dataset.theme;
+  if (APPEARANCE_IDS.includes(root.dataset.appearance)) out.appearance = root.dataset.appearance;
+  if (out.appearance === 'light' && root.dataset.plain === '1') out.plainUi = true;
+  if (root.dataset.chatFont) out.chatFontSize = normalizeChatFontSize(root.dataset.chatFont);
+  return out;
+}
+let { lang, theme, appearance, plainUi, chatFontSize } = bootUiFromDom();
+
+function syncHljsTheme() {
+  const link = document.getElementById('hljs-theme');
+  if (link) link.href = HLJS_THEME_BASE + (appearance === 'dark' ? 'github-dark.min.css' : 'github.min.css');
+  document.querySelectorAll('.bubble.md pre code').forEach(block => {
+    if (typeof hljs !== 'undefined') hljs.highlightElement(block);
+  });
+}
+
+/** 服务端 ui 落盘后的本地镜像，仅供 index.html 内联脚本首帧防闪；不是真相源。 */
+function syncBootCache() {
+  localStorage.setItem(STORE.lang, lang);
+  localStorage.setItem(STORE.theme, theme);
+  localStorage.setItem(STORE.appearance, appearance);
+  localStorage.setItem(STORE.fontSize, String(chatFontSize));
+  if (plainUi) localStorage.setItem(STORE.plain, '1');
+  else localStorage.removeItem(STORE.plain);
+  localStorage.setItem(STORE.llmNo, String(state.llmNo));
+}
+async function persistUiPrefs() {
+  try {
+    await window.ga.saveConfig({
+      config: { lang, theme, appearance, plain: plainUi, llmNo: state.llmNo, fontSize: chatFontSize },
+    });
+    syncBootCache();
+  } catch (_) {}
+}
 const bridgeHost = () => `${location.protocol}//${location.hostname}:14168`;
 async function bridgeFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
@@ -482,7 +514,6 @@ function renderLangList() {
 function selectLang(code) {
   if (!LANGS.includes(code) || lang === code) return;
   lang = code;
-  localStorage.setItem(STORE.lang, lang);
   applyI18n();
   renderSessionList();
   refreshStatusLabel();
@@ -491,17 +522,100 @@ function selectLang(code) {
   if (typeof renderAllPresets === 'function') renderAllPresets();
   if (document.querySelector('.page[data-page="channels"].active')) renderChannelList(gaServiceStore.list());
   if (document.querySelector('.page[data-page="status"].active')) loadStatusPanel();
+  void persistUiPrefs();
 }
-function applyTheme(id) {
+function syncChatFontSegments(value) {
+  document.querySelectorAll('.chat-font-seg').forEach(el => {
+    const v = parseInt(el.dataset.value, 10);
+    el.classList.toggle('on', v <= value);
+    el.classList.toggle('cur', v === value);
+  });
+  const stepper = document.getElementById('chat-font-stepper');
+  if (stepper) {
+    stepper.setAttribute('aria-valuenow', String(value));
+    stepper.setAttribute('aria-valuetext', `${value}px`);
+  }
+}
+function chatFontFromPointer(clientX) {
+  const segs = document.getElementById('chat-font-segments');
+  if (!segs) return chatFontSize;
+  const rect = segs.getBoundingClientRect();
+  const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  return CHAT_FONT_MIN + Math.round(ratio * (CHAT_FONT_MAX - CHAT_FONT_MIN));
+}
+function initChatFontStepper() {
+  const segs = document.getElementById('chat-font-segments');
+  if (!segs || segs.childElementCount) return;
+  for (let i = CHAT_FONT_MIN; i <= CHAT_FONT_MAX; i++) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chat-font-seg';
+    btn.dataset.value = String(i);
+    btn.tabIndex = -1;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      applyChatFontSize(i);
+    });
+    segs.appendChild(btn);
+  }
+  const stepper = document.getElementById('chat-font-stepper');
+  if (!stepper || stepper.dataset.bound) return;
+  stepper.dataset.bound = '1';
+  let dragging = false;
+  const pick = (clientX, persist) => applyChatFontSize(chatFontFromPointer(clientX), { persist });
+  stepper.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    stepper.setPointerCapture(e.pointerId);
+    pick(e.clientX, false);
+  });
+  stepper.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    pick(e.clientX, false);
+  });
+  const endDrag = (e, persist) => {
+    if (!dragging) return;
+    dragging = false;
+    try { stepper.releasePointerCapture(e.pointerId); } catch (_) {}
+    pick(e.clientX, persist);
+  };
+  stepper.addEventListener('pointerup', (e) => endDrag(e, true));
+  stepper.addEventListener('pointercancel', (e) => endDrag(e, false));
+  stepper.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      applyChatFontSize(chatFontSize - 1);
+    } else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      applyChatFontSize(chatFontSize + 1);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      applyChatFontSize(CHAT_FONT_MIN);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      applyChatFontSize(CHAT_FONT_MAX);
+    }
+  });
+}
+function applyChatFontSize(size, { persist } = { persist: true }) {
+  chatFontSize = normalizeChatFontSize(size);
+  document.documentElement.dataset.chatFont = String(chatFontSize);
+  document.documentElement.style.setProperty('--chat-font', `${chatFontSize}px`);
+  const label = document.getElementById('chat-font-value');
+  if (label) label.textContent = `${chatFontSize}px`;
+  syncChatFontSegments(chatFontSize);
+  if (persist) void persistUiPrefs();
+}
+function applyTheme(id, { persist } = { persist: true }) {
   const n = parseInt(id, 10);
   theme = (n >= 1 && n <= 8) ? String(n) : '1';
   const root = document.documentElement;
   root.dataset.theme = theme;
-  localStorage.setItem(STORE.theme, theme);
   root.style.setProperty('--blue', getComputedStyle(root).getPropertyValue(`--swatch-${theme}`).trim());
   document.querySelectorAll('#theme-swatches .swatch').forEach(el => {
     el.classList.toggle('sel', el.dataset.theme === theme);
   });
+  if (persist) void persistUiPrefs();
 }
 function syncPlainSwitch() {
   const row = document.getElementById('plain-ui-row');
@@ -511,16 +625,10 @@ function syncPlainSwitch() {
   row.hidden = !show;
   sw.setAttribute('aria-checked', plainUi ? 'true' : 'false');
 }
-function applyAppearance(nextApp, nextPlain) {
+function applyAppearance(nextApp, nextPlain, { persist } = { persist: true }) {
   appearance = APPEARANCE_IDS.includes(nextApp) ? nextApp : 'light';
-  if (appearance === 'light') {
-    plainUi = !!nextPlain;
-    if (plainUi) localStorage.setItem(STORE.plain, '1');
-    else localStorage.removeItem(STORE.plain);
-  } else {
-    plainUi = false;
-  }
-  localStorage.setItem(STORE.appearance, appearance);
+  if (appearance === 'light') plainUi = !!nextPlain;
+  else plainUi = false;
   document.documentElement.dataset.appearance = appearance;
   if (plainUi) document.documentElement.dataset.plain = '1';
   else delete document.documentElement.dataset.plain;
@@ -530,6 +638,8 @@ function applyAppearance(nextApp, nextPlain) {
     el.setAttribute('aria-checked', on ? 'true' : 'false');
   });
   syncPlainSwitch();
+  syncHljsTheme();
+  if (persist) void persistUiPrefs();
 }
 
 /* ═══════════════ 侧边栏导航 ═══════════════ */
@@ -1311,10 +1421,9 @@ function updateModelChip() {
 async function selectModel(id, name) {
   state.llmNo = id;
   state.modelName = profileLabel(name) || name || null;
-  localStorage.setItem(STORE.llmNo, String(id));
   updateModelChip();
   renderSettingsModels();
-  try { await window.ga.saveConfig({ config: { llmNo: id } }); } catch (_) {}
+  await persistUiPrefs();
 }
 const MODEL_ACT_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 const MODEL_ACT_DEL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
@@ -1426,22 +1535,19 @@ function openSettings() {
   openModal('settings-modal');
   renderSettingsModels();
   renderLangList();
-  applyTheme(theme);
-  applyAppearance(appearance, plainUi);
+  applyTheme(theme, { persist: false });
+  applyAppearance(appearance, plainUi, { persist: false });
+  applyChatFontSize(chatFontSize, { persist: false });
 }
 async function loadModelProfiles() {
   try {
     const res = await window.ga.getModelProfiles();
     const list = res?.profiles || res?.result?.profiles || [];
     state.modelProfiles = normalizeProfiles(list);
-    const saved = localStorage.getItem(STORE.llmNo);
-    if (saved != null && list.length) {
-      const n = parseInt(saved, 10);
-      const p = state.modelProfiles.find(x => (x.id ?? 0) === n);
-      if (p) { state.llmNo = n; state.modelName = profileLabel(p.name) || p.name || null; }
-    } else {
-      const active = state.modelProfiles.find(p => p.active) || state.modelProfiles[0];
-      if (active) { state.llmNo = active.id ?? 0; state.modelName = profileLabel(active.name) || active.name || null; }
+    const active = state.modelProfiles.find(p => p.active) || state.modelProfiles[0];
+    if (active) {
+      state.llmNo = active.id ?? 0;
+      state.modelName = profileLabel(active.name) || active.name || null;
     }
     updateModelChip();
     renderSettingsModels();
@@ -1511,7 +1617,7 @@ if (appearanceSeg) appearanceSeg.addEventListener('click', (e) => {
   const btn = e.target.closest('.appear-card[data-appearance]');
   if (!btn) return;
   const isLight = btn.dataset.appearance === 'light';
-  applyAppearance(btn.dataset.appearance, isLight && localStorage.getItem(STORE.plain) === '1');
+  applyAppearance(btn.dataset.appearance, isLight && plainUi);
 });
 const plainUiSwitch = document.getElementById('plain-ui-switch');
 if (plainUiSwitch) plainUiSwitch.addEventListener('click', () => {
@@ -1521,10 +1627,23 @@ async function loadBridgeConfig() {
   try {
     const res = await window.ga.getConfig();
     const cfg = res?.config || {};
+    if (LANGS.includes(cfg.lang)) {
+      lang = cfg.lang;
+      applyI18n();
+    }
+    if (cfg.theme != null) applyTheme(cfg.theme, { persist: false });
+    if (cfg.appearance) applyAppearance(cfg.appearance, !!cfg.plain, { persist: false });
+    if (cfg.fontSize != null) applyChatFontSize(cfg.fontSize, { persist: false });
     if (cfg.llmNo != null && state.modelProfiles.length) {
       const p = state.modelProfiles.find(x => (x.id ?? 0) === cfg.llmNo);
-      if (p) { state.llmNo = cfg.llmNo; state.modelName = p.name || null; updateModelChip(); }
+      if (p) {
+        state.llmNo = cfg.llmNo;
+        state.modelName = profileLabel(p.name) || p.name || null;
+        updateModelChip();
+        renderSettingsModels();
+      }
     }
+    syncBootCache();
   } catch (_) {}
 }
 
@@ -2501,8 +2620,11 @@ if (chanListEl) {
 
 /* ═══════════════ 启动 ═══════════════ */
 loadSessions();
-applyAppearance(appearance, plainUi);
-applyTheme(theme);
+applyAppearance(appearance, plainUi, { persist: false });
+applyTheme(theme, { persist: false });
+initChatFontStepper();
+applyChatFontSize(chatFontSize, { persist: false });
+syncHljsTheme();
 state.planMode = localStorage.getItem('ga_plan') === '1';
 state.autoMode = localStorage.getItem('ga_auto') === '1';
 if (state.planMode && state.autoMode) {
