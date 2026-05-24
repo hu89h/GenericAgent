@@ -361,7 +361,7 @@ class AgentManager:
         self._persist()
         return {"ok": True, "sessionId": sid}
 
-    def submit_prompt(self, sid: str, prompt: Any, images: Optional[list] = None, llm_no: Optional[int] = None, display: Optional[str] = None) -> dict:
+    def submit_prompt(self, sid: str, prompt: Any, images: Optional[list] = None, llm_no: Optional[int] = None, display: Optional[str] = None, files_meta: Optional[list] = None, image_metas: Optional[list] = None) -> dict:
         prompt, image_ids = normalize_prompt(prompt, images)
         if llm_no is not None:
             self.config["llmNo"] = int(llm_no)
@@ -376,6 +376,10 @@ class AgentManager:
                 extra["image_ids"] = image_ids
             if isinstance(display, str) and display.strip() and display != prompt:
                 extra["display"] = display
+            if files_meta:
+                extra["files"] = files_meta
+            if image_metas:
+                extra["images"] = image_metas
             user_msg = self.add_message(sess, "user", prompt, **extra)
             sess.status = "running"
             sess.cancel_requested = False
@@ -1073,10 +1077,13 @@ async def prompt_handler(request):
     prompt = data.get("prompt", data.get("content", data.get("message", "")))
     images = data.get("images") or []
     display = data.get("display")
+    files_meta = data.get("files") or []        # 非图片附件 [{name, path}]
+    image_metas = data.get("imageMetas") or []   # 图片附件 [{name, path}]（不含 dataUrl）
     llm_no = data.get("llmNo")
     if llm_no is not None:
         llm_no = int(llm_no)
-    return json_ok(manager.submit_prompt(sid, prompt, images, llm_no=llm_no, display=display))
+    return json_ok(manager.submit_prompt(sid, prompt, images, llm_no=llm_no, display=display,
+                                          files_meta=files_meta, image_metas=image_metas))
 
 
 async def messages_handler(request):
@@ -1124,8 +1131,10 @@ async def path_open_handler(request):
     try:
         if mode == "reveal":
             _reveal_path_in_file_manager(target)
+        elif kind == "upload":
+            _open_path_default(target)  # 用户文件用系统默认程序(open 动词),避免 edit 动词 fallback 记事本
         else:
-            _open_path_in_editor(target)
+            _open_path_in_editor(target)  # mykey 等配置文件仍用编辑器(edit 动词)
     except OSError as e:
         return json_ok({"ok": False, "error": str(e), "path": str(target)}, status=500)
     return json_ok({"ok": True, "path": str(target)})
@@ -1184,6 +1193,34 @@ async def upload_delete_handler(request):
         return json_ok({"ok": False, "error": str(e)})
 
 
+async def upload_raw_handler(request):
+    """Stream an uploaded file. inline by default (browser preview / <img>),
+    ?download=1 forces a download. Path must live under _WEB_UPLOAD_DIR
+    (whitelist — prevents path traversal). Works for remote browsers too,
+    so it covers both 'preview after refresh' and 'download from remote'."""
+    import mimetypes
+    from urllib.parse import quote
+    raw = request.query.get("path", "")
+    try:
+        target = Path(raw).resolve()
+        target.relative_to(_WEB_UPLOAD_DIR.resolve())
+    except (ValueError, OSError):
+        return web.Response(status=403, text="path not in upload dir")
+    if not target.is_file():
+        return web.Response(status=404, text="file not found")
+    ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    disp = "attachment" if request.query.get("download") in ("1", "true") else "inline"
+    orig_name = target.name.split("__", 1)[-1]  # 去掉 <uuid>__ 前缀，还原原始文件名
+    return web.Response(
+        body=target.read_bytes(),
+        content_type=ctype,
+        headers={
+            "Content-Disposition": f"{disp}; filename*=UTF-8''{quote(orig_name)}",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 def _open_path_in_editor(target: Path) -> None:
     """Open a file in the user's editor; Windows .py often has no default association."""
     import platform
@@ -1219,6 +1256,24 @@ def _reveal_path_in_file_manager(target: Path) -> None:
         return
     # Linux: no universal "select file" command; fall back to opening parent dir
     subprocess.Popen(["xdg-open", str(target.parent)])
+
+
+def _open_path_default(target: Path) -> None:
+    """Open a file with the OS default app (default 'open' verb).
+
+    For user uploads. Unlike _open_path_in_editor (which uses Windows' 'edit'
+    verb and falls back to Notepad), this respects each file type's registered
+    default app — PDF viewer, Word, archive tool, etc. — so binaries like pdf
+    or docx no longer land in Notepad as garbage."""
+    import platform
+    path = str(target.resolve())
+    if platform.system() == "Windows":
+        os.startfile(path)  # default "open" verb = double-click behavior
+        return
+    if platform.system() == "Darwin":
+        subprocess.Popen(["open", path])
+        return
+    subprocess.Popen(["xdg-open", path])
 
 
 def _mykey_file() -> Path:
@@ -1348,6 +1403,7 @@ def create_app():
     app.router.add_post("/path/open", path_open_handler)
     app.router.add_post("/upload", upload_handler)
     app.router.add_delete("/upload", upload_delete_handler)
+    app.router.add_get("/upload/raw", upload_raw_handler)
     app.router.add_get("/token-stats", token_stats_handler)
     app.router.add_get("/token-history", get_token_history_handler)
     app.router.add_post("/token-history", post_token_history_handler)

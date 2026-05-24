@@ -1025,7 +1025,7 @@ function msgNode(msg) {
   if (msg.role === 'user') {
     const shown = (typeof msg.display === 'string' && msg.display.length) ? msg.display : msg.content;
     const imgsHtml = (msg.images && msg.images.length)
-      ? `<div class="user-imgs">${msg.images.map(im => `<img src="${im.dataUrl}" alt="">`).join('')}</div>`
+      ? `<div class="user-imgs">${msg.images.map(im => `<img src="${im.dataUrl || uploadRawUrl(im.path)}" data-path="${escapeHtml(im.path || '')}" alt="">`).join('')}</div>`
       : '';
     const filesHtml = (msg.files && msg.files.length)
       ? `<div class="user-files">${msg.files.map(f => {
@@ -1435,7 +1435,7 @@ async function sendPrompt(text) {
     .join('\n\n');
   const usedFiles = collectUsedFiles(text);
   const userMsg = { role: 'user', content: text };
-  const previewImgs = usedFiles.filter(f => f.isImage && f.dataUrl).map(f => ({ id: 'f-' + f.sid, dataUrl: f.dataUrl }));
+  const previewImgs = usedFiles.filter(f => f.isImage).map(f => ({ id: 'f-' + f.sid, name: f.name, path: f.path, dataUrl: f.dataUrl || '' }));
   if (previewImgs.length) userMsg.images = previewImgs;
   const previewFiles = usedFiles.filter(f => !f.isImage).map(f => ({ id: 'f-' + f.sid, name: f.name, path: f.path }));
   if (previewFiles.length) userMsg.files = previewFiles;
@@ -1463,7 +1463,8 @@ async function sendPrompt(text) {
         state.activeId = sess.id;
       }
     }
-    const res = await window.ga.rpc('session/prompt', { sessionId: sid, prompt: composedPrompt, display: text, llmNo: state.llmNo });
+    const res = await window.ga.rpc('session/prompt', { sessionId: sid, prompt: composedPrompt, display: text, llmNo: state.llmNo,
+      files: previewFiles, imageMetas: previewImgs.map(im => ({ name: im.name, path: im.path })) });
     if (res?.error) throw new Error(res.error.message || res.error);
     removeUsedPendingFiles(usedFiles);
     const uid = Number(res.userMessageId || res.result?.userMessageId || 0);
@@ -2473,7 +2474,22 @@ if (msgArea) {
   });
 }
 
+function uploadRawUrl(path, download) {
+  return `http://${location.hostname}:14168/upload/raw?path=${encodeURIComponent(path || '')}${download ? '&download=1' : ''}`;
+}
+function bridgeIsLocal() {
+  return location.hostname === '127.0.0.1' || location.hostname === 'localhost';
+}
 async function openUploadFile(path, name) {
+  // 远程访问：浏览器无法调起 bridge 那台/本机的系统程序，降级为下载到本机
+  if (!bridgeIsLocal()) {
+    const a = document.createElement('a');
+    a.href = uploadRawUrl(path, true);
+    a.download = name || '';
+    document.body.appendChild(a); a.click(); a.remove();
+    return;
+  }
+  // 本地：bridge 与你同机，调系统默认程序打开 / 在文件夹显示
   const mode = isPreviewableByName(name || path) ? 'open' : 'reveal';
   try {
     const res = await fetch(`http://${location.hostname}:14168/path/open`, {
