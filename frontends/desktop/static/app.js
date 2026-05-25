@@ -287,6 +287,7 @@ const I18N = {
     'upload.dropHint': '松开以上传文件',
     'lightbox.closeTitle': '关闭',
     'fold.thinking': '思考', 'fold.tool': '工具调用', 'fold.toolResult': '工具结果', 'fold.llm': 'LLM Running', 'fold.turn': '第 {n} 轮',
+    'timing.elapsed': '已运行 {t}',
     'model.auto': '自动选择',
     'model.menuLabel': '选择模型',
     'chip.plan': 'Plan',
@@ -392,6 +393,7 @@ const I18N = {
     'upload.dropHint': 'Drop to upload files',
     'lightbox.closeTitle': 'Close',
     'fold.thinking': 'Thinking', 'fold.tool': 'Tool call', 'fold.toolResult': 'Tool result', 'fold.llm': 'LLM Running', 'fold.turn': 'Turn {n}',
+    'timing.elapsed': 'Elapsed {t}',
     'model.auto': 'Auto',
     'model.menuLabel': 'Select model',
     'chip.plan': 'Plan',
@@ -827,9 +829,11 @@ function renderAssistant(text) {
     const isLast = (i === segs.length - 1);
     if (seg.n == null) return foldBlocks(seg.body);
     const sum = extractTurnSummary(seg.body);
-    // Strip the <summary> tag from body before rendering to avoid duplication with head
-    const cleanBody = seg.body.replace(/<summary>[\s\S]*?<\/summary>\s*/i, '');
-    const inner = foldBlocks(cleanBody);
+    // Strip the <summary> tag from body to avoid duplication with head
+    const bodyForRender = sum
+      ? seg.body.replace(/<summary>[\s\S]*?<\/summary>\s*/i, '')
+      : seg.body;
+    const inner = foldBlocks(bodyForRender);
     const head = sum
       ? `${escapeHtml(turnLabel(seg.n))}：<span class="turn-head-sum">${escapeHtml(sum)}</span>`
       : escapeHtml(turnLabel(seg.n));
@@ -895,7 +899,7 @@ const state = {
 };
 function rt(sess) {
   let r = state.runtime.get(sess.id);
-  if (!r) { r = { polling:false, busy:false, lastId:0, seen:new Set(), draftEl:null, draftText:'' }; state.runtime.set(sess.id, r); }
+  if (!r) { r = { polling:false, busy:false, lastId:0, seen:new Set(), draftEl:null, draftText:'', taskStartedAt:null, taskEndedAt:null, taskTimerId:null }; state.runtime.set(sess.id, r); }
   return r;
 }
 const activeSess = () => state.sessions.get(state.activeId) || null;
@@ -1073,7 +1077,15 @@ function renderAllMessages(sess) {
 }
 function appendMessage(sess, msg) {
   if (!isActive(sess)) return;
-  ensureMsgs().appendChild(msgNode(msg));
+  const el = msgNode(msg);
+  ensureMsgs().appendChild(el);
+  if (msg.role === 'assistant') {
+    const r = rt(sess);
+    if (r.taskStartedAt) {
+      ensureTaskElapsedBadge(el, r.taskStartedAt, r.taskEndedAt || Date.now());
+      r.taskStartedAt = null; r.taskEndedAt = null;
+    }
+  }
   refreshEmptyState(sess); scrollBottom(true);
 }
 function isNearBottom(threshold = 80) {
@@ -1094,6 +1106,8 @@ function renderDraft(sess) {
   const box = ensureMsgs();
   if (!r.draftEl || r.draftEl.parentNode !== box) {
     r.draftEl = document.createElement('div'); r.draftEl.className = 'msg assistant'; box.appendChild(r.draftEl);
+    // 正在计时则立即挂载 badge，避免等 1s tick 后才出现导致跳动
+    if (r.taskStartedAt) ensureTaskElapsedBadge(r.draftEl, r.taskStartedAt, null);
   }
   if (!r.twState) r.twState = { shown: 0, timer: null };
   const tw = r.twState;
@@ -1114,10 +1128,13 @@ function renderDraft(sess) {
   refreshEmptyState(sess);
 }
 
-// 重写打字机气泡：先记 near + 保存 <details> open 态；innerHTML 替换后恢复 open；仅当原先贴底才滚
+// 重写打字机气泡：先记 near + 保存 <details> open 态 + badge；innerHTML 替换后恢复；仅当原先贴底才滚
 function rewriteDraftBubble(r, visible) {
   const wasNear = isNearBottom();
   const openIdx = [];
+  // 保存 badge（会被 innerHTML 覆盖）
+  const oldBadge = r.draftEl ? r.draftEl.querySelector(':scope > .task-elapsed') : null;
+  const badgeText = oldBadge ? oldBadge.textContent : null;
   if (r.draftEl) {
     r.draftEl.querySelectorAll('details').forEach((d, i) => { if (d.open) openIdx.push(i); });
   }
@@ -1125,6 +1142,14 @@ function rewriteDraftBubble(r, visible) {
   postRenderEnhance(r.draftEl.querySelector('.bubble'));
   const dets = r.draftEl.querySelectorAll('details');
   openIdx.forEach(i => { if (dets[i]) dets[i].open = true; });
+  // 恢复 badge
+  if (badgeText) {
+    const badge = document.createElement('div');
+    badge.className = 'task-elapsed';
+    badge.textContent = badgeText;
+    badge.dataset.live = '1';
+    r.draftEl.prepend(badge);
+  }
   if (wasNear) scrollBottom(true);
 }
 
@@ -1143,11 +1168,69 @@ function statusLabel() {
   return state.bridgeReady ? t('status.ready') : t('status.disconnected');
 }
 function refreshStatusLabel() { runLabel.textContent = statusLabel(); }
+
+/* ═══════════════ 消息计时 ═══════════════ */
+function formatTaskElapsed(ms) {
+  const v = Number(ms);
+  if (!Number.isFinite(v) || v < 0) return '';
+  const sec = Math.round(v / 1000);
+  if (sec < 60) return t('timing.elapsed').replace('{t}', `${Math.max(1, sec)}s`);
+  const min = Math.floor(sec / 60), s = sec % 60;
+  if (min < 60) return t('timing.elapsed').replace('{t}', `${min}m ${s}s`);
+  const hr = Math.floor(min / 60), m = min % 60;
+  return t('timing.elapsed').replace('{t}', `${hr}h ${m}m`);
+}
+
+function ensureTaskElapsedBadge(wrap, startedAt, endedAt) {
+  if (!wrap || !startedAt) return null;
+  let badge = wrap.querySelector(':scope > .task-elapsed');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.className = 'task-elapsed';
+    wrap.prepend(badge);
+  }
+  const elapsed = (endedAt || Date.now()) - startedAt;
+  badge.textContent = formatTaskElapsed(elapsed);
+  badge.dataset.live = endedAt ? '' : '1';
+  return badge;
+}
+
+function startTaskTimer(sess) {
+  const r = rt(sess);
+  if (r.taskStartedAt) return;  // 已在计时，不重置
+  r.taskStartedAt = Date.now();
+  r.taskEndedAt = null;
+  if (r.taskTimerId) clearInterval(r.taskTimerId);
+  r.taskTimerId = setInterval(() => {
+    if (!r.taskStartedAt) return;
+    const el = r.draftEl || document.querySelector('.msg-list .msg.assistant:last-child');
+    if (el) ensureTaskElapsedBadge(el, r.taskStartedAt, null);
+    // 更新左上角状态栏显示实时耗时
+    if (isActive(sess)) {
+      const elapsed = Date.now() - r.taskStartedAt;
+      runLabel.textContent = formatTaskElapsed(elapsed);
+    }
+  }, 1000);
+}
+
+function stopTaskTimer(sess) {
+  const r = rt(sess);
+  if (r.taskTimerId) { clearInterval(r.taskTimerId); r.taskTimerId = null; }
+  if (!r.taskStartedAt) return;
+  r.taskEndedAt = Date.now();
+}
+
 function setBusy(sess, busy) {
   const r = rt(sess); r.busy = busy;
+  if (busy) startTaskTimer(sess); else stopTaskTimer(sess);
   if (!isActive(sess)) return;
   runToggle.classList.toggle('busy', busy);
-  runLabel.textContent = busy ? t('status.running') : (state.bridgeReady ? t('status.ready') : t('status.disconnected'));
+  if (busy) {
+    const elapsed = Date.now() - (r.taskStartedAt || Date.now());
+    runLabel.textContent = formatTaskElapsed(elapsed);
+  } else {
+    runLabel.textContent = state.bridgeReady ? t('status.ready') : t('status.disconnected');
+  }
   if (sendBtn) {
     sendBtn.classList.toggle('is-stop', busy);
     sendBtn.setAttribute('aria-label', busy ? t('act.stop') : t('act.send'));
