@@ -1285,15 +1285,18 @@ function setBusy(sess, busy) {
 
 /* ═══════════════ 会话 ═══════════════ */
 function isUntitled(x) { return !x || /^(new chat|新对话|新会话)$/i.test(String(x).trim()); }
+function sortedSessions() {
+  // display order: pinned first, then most-recently-active. [0] is the topmost.
+  return [...state.sessions.values()].sort((a, b) => {
+    if (a.pinned && !b.pinned) return -1;
+    if (!a.pinned && b.pinned) return 1;
+    return (b.lastActiveTs || 0) - (a.lastActiveTs || 0);
+  });
+}
 function renderSessionList() {
   convListEl.innerHTML = '';
   const query = (searchInput ? searchInput.value : '').trim().toLowerCase();
-  const all = [...state.sessions.values()]
-    .sort((a, b) => {
-      if (a.pinned && !b.pinned) return -1;
-      if (!a.pinned && b.pinned) return 1;
-      return (b.lastActiveTs || 0) - (a.lastActiveTs || 0);
-    });
+  const all = sortedSessions();
   const filtered = query
     ? all.filter(s => {
         const title = (s.title || '').toLowerCase();
@@ -1364,7 +1367,7 @@ async function closeSession(id) {
   }
   state.sessions.delete(id); state.runtime.delete(id);
   if (state.activeId === id) {
-    const next = state.sessions.keys().next().value || null;
+    const next = (sortedSessions()[0] || {}).id || null;  // 切到列表最靠上的会话
     if (next) setActiveSession(next);
     else { state.activeId = null; if (msgsEl) msgsEl.innerHTML = ''; refreshEmptyState(null); refreshStatusLabel(); }
   }
