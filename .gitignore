@@ -48,6 +48,7 @@ memory/*
 !memory/L4_raw_sessions/
 memory/L4_raw_sessions/*
 !memory/L4_raw_sessions/compress_session.py
+!memory/L4_raw_sessions/salient_mining_sop.md
 
 # ljqCtrl related tools
 !memory/ljqCtrl.py
