@@ -1342,15 +1342,14 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   font-style:italic; color:var(--muted); font-weight:normal; margin-left:4px;
 }
 
-/* ═══════════════ ask_user 多选卡片 (Claude Code 风格) ═══════════════ */
+/* —— ask_user 提问卡片 —— */
 .ask-user-card{
   margin:10px 0 4px;
   border:1px solid var(--line);
   border-left:3px solid var(--blue);
   border-radius:var(--radius);
-  background:var(--blue-soft);
+  background:var(--card);
   padding:12px 14px 10px;
-  box-shadow:var(--shadow);
 }
 .ask-user-head{
   display:flex; align-items:center; gap:8px;
@@ -1374,7 +1373,6 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   background:rgba(127,127,127,.14);
   padding:1px 5px; border-radius:4px; font-size:.92em;
 }
-
 .ask-options{
   display:flex; flex-direction:column; gap:6px;
   margin:8px 0;
@@ -1387,10 +1385,9 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   border-radius:var(--radius-sm);
   background:var(--card);
   color:var(--txt);
-  font-size:13.5px;
+  font-size:13.5px; line-height:1.4;
   cursor:pointer;
-  transition:border-color .12s ease, background .12s ease, transform .04s ease;
-  font-family:inherit;
+  transition:border-color .12s ease, background .12s ease, transform .08s ease;
 }
 .ask-option:hover{
   border-color:var(--blue);
@@ -1407,8 +1404,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   border-radius:6px;
   background:rgba(127,127,127,.14);
   color:var(--muted);
-  font-size:11.5px; font-weight:600;
-  font-variant-numeric:tabular-nums;
+  font-size:11px; font-weight:600;
   flex-shrink:0;
 }
 .ask-option:hover .ask-option-key{
@@ -1428,8 +1424,6 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
 .ask-option:hover .ask-option-arrow{
   opacity:1; transform:translateX(2px); color:var(--blue);
 }
-
-/* 已应答状态 */
 .ask-user-card.is-answered{ opacity:.85; }
 .ask-user-card.is-answered .ask-option{
   cursor:default; opacity:.55;
@@ -1451,106 +1445,45 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
 .ask-user-card.is-answered .ask-option.is-chosen .ask-option-key{
   background:var(--blue); color:var(--on-accent);
 }
-
 .ask-user-hint{
   margin-top:6px;
   font-size:11.5px; color:var(--muted);
   font-style:italic;
 }
-
-/* —— 批量向导 —— */
-.ask-user-wizard .ask-user-head{ position:relative; }
-.ask-wizard-dots{
-  display:inline-flex; align-items:center; gap:5px;
-  margin-left:auto; padding-left:8px;
-}
-.ask-dot{
-  width:8px; height:8px; border-radius:50%;
-  background:rgba(127,127,127,.28);
-  cursor:pointer;
-  transition:background .15s ease, transform .12s ease;
-}
-.ask-dot:hover{ transform:scale(1.2); }
-.ask-dot.is-answered{ background:var(--blue); opacity:.7; }
-.ask-dot.is-current{ background:var(--blue); opacity:1; transform:scale(1.25); }
-
-.ask-slides{ position:relative; }
-.ask-slide{
-  animation:askSlideIn .18s ease;
-}
-.ask-slide[hidden]{ display:none; }
-@keyframes askSlideIn{
-  from{ opacity:0; transform:translateX(8px); }
-  to  { opacity:1; transform:translateX(0); }
-}
-.ask-step-meta{
-  font-size:11.5px; color:var(--muted);
-  margin-bottom:6px; letter-spacing:.02em;
-}
-
-.ask-custom-row{
-  margin:8px 0 4px;
-}
+.ask-custom-row{ margin:8px 0 4px; }
 .ask-custom-input{
   width:100%;
   padding:8px 12px;
   border:1px solid var(--line);
   border-radius:var(--radius-sm);
-  background:var(--card);
+  background:var(--bg);
   color:var(--txt);
   font-size:13.5px;
-  font-family:inherit;
   outline:none;
   transition:border-color .12s ease, box-shadow .12s ease;
-  box-sizing:border-box;
 }
 .ask-custom-input:hover{ border-color:var(--line-strong); }
 .ask-custom-input:focus{
   border-color:var(--blue);
   box-shadow:0 0 0 2px var(--blue-bg);
 }
-
-.ask-wizard-nav{
-  display:flex; align-items:center; gap:10px;
-  margin-top:10px;
-}
-.ask-wizard-err{
-  flex:1 1 auto;
-  font-size:11.5px;
-  color:#c43d3d;
-  min-height:14px;
-}
-.ask-nav-btn{
-  padding:7px 14px;
-  border:1px solid var(--line);
+.ask-submit-row{ margin-top:8px; }
+.ask-submit-btn{
+  padding:7px 16px;
+  border:1px solid var(--blue);
   border-radius:var(--radius-sm);
-  background:var(--card);
-  color:var(--txt-2);
-  font-size:12.5px; font-weight:500;
+  background:var(--blue);
+  color:var(--on-accent);
+  font-size:13px; font-weight:600;
   cursor:pointer;
-  font-family:inherit;
-  transition:border-color .12s ease, background .12s ease, color .12s ease;
+  transition:filter .12s ease;
 }
-.ask-nav-btn:hover:not(:disabled){
-  border-color:var(--blue); color:var(--blue);
-  background:var(--blue-soft);
-}
-.ask-nav-btn:disabled{
+.ask-submit-btn:hover:not(:disabled){ filter:brightness(1.06); }
+.ask-submit-btn:disabled{
   opacity:.4; cursor:not-allowed;
 }
-.ask-nav-btn.is-primary{
-  background:var(--blue); color:var(--on-accent);
-  border-color:var(--blue);
-}
-.ask-nav-btn.is-primary:hover:not(:disabled){
-  filter:brightness(1.06);
-  background:var(--blue); color:var(--on-accent);
-}
-
-/* 向导 already-answered（提交后）禁用整张卡 */
-.ask-user-wizard.is-answered{ opacity:.7; }
-.ask-user-wizard.is-answered .ask-custom-input{ cursor:not-allowed; }
-.ask-user-wizard.is-answered .ask-nav-btn{ cursor:not-allowed; opacity:.4; }
+.ask-user-card.is-answered .ask-custom-input{ cursor:not-allowed; }
+.ask-user-card.is-answered .ask-submit-btn{ cursor:not-allowed; opacity:.4; }
 
 /* —— 消息计时 badge —— */
 .task-elapsed{

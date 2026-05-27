@@ -287,17 +287,6 @@ const I18N = {
     'upload.dropHint': '松开以上传文件',
     'lightbox.closeTitle': '关闭',
     'fold.thinking': '思考', 'fold.tool': '工具调用', 'fold.toolResult': '工具结果', 'fold.llm': 'LLM Running', 'fold.turn': '第 {n} 轮',
-    'ask.hint': '点选项快速回答，或在卡片填写框中输入自定义内容',
-    'ask.wizardTitleOne': 'Agent 向你提问',
-    'ask.wizardTitle': 'Agent 要问你 {n} 个问题',
-    'ask.wizardStep': '问题 {i} / {n}',
-    'ask.customPlaceholder': '其他（自己输入）',
-    'ask.prev': '← 上一题',
-    'ask.next': '下一题 →',
-    'ask.submit': '提交全部 ↵',
-    'ask.required': '本题尚未回答',
-    'ask.answered': '已提交回答',
-    'ask.summaryLabel': '回答 {i}',
     'timing.elapsed': '已运行 {t}',
     'model.auto': '自动选择',
     'model.menuLabel': '选择模型',
@@ -333,6 +322,12 @@ const I18N = {
     'presetPrompt.hive': '启动 Goal Hive 模式：按 hive SOP 拉起多个 worker 协同完成我接下来的目标。',
     'presetPrompt.review': '进入监察者模式：对刚才的产出严格挑刺、逐项复核并报告问题。',
     'presetPrompt.mine': '抓取本周的 git 提交并写一份周报。',
+    'ask.title': '请选择一个回答',
+    'ask.titleNoOpts': 'Agent 向你提问',
+    'ask.hint': '点选项快速回答，或在下方输入自定义内容',
+    'ask.hintNoOpts': '在下方输入回答，Enter 或点确认提交',
+    'ask.confirm': '确认 ↵',
+    'ask.customPlaceholder': '或输入自定义回答…',
   },
   en: {
     'app.title': 'GenericAgent Desktop',
@@ -404,17 +399,6 @@ const I18N = {
     'upload.dropHint': 'Drop to upload files',
     'lightbox.closeTitle': 'Close',
     'fold.thinking': 'Thinking', 'fold.tool': 'Tool call', 'fold.toolResult': 'Tool result', 'fold.llm': 'LLM Running', 'fold.turn': 'Turn {n}',
-    'ask.hint': 'Click an option, or type a custom answer in the card input',
-    'ask.wizardTitleOne': 'Agent is asking',
-    'ask.wizardTitle': 'Agent has {n} questions for you',
-    'ask.wizardStep': 'Question {i} / {n}',
-    'ask.customPlaceholder': 'Other (type your own)',
-    'ask.prev': '← Prev',
-    'ask.next': 'Next →',
-    'ask.submit': 'Submit all ↵',
-    'ask.required': 'This question is unanswered',
-    'ask.answered': 'Answers submitted',
-    'ask.summaryLabel': 'Answer {i}',
     'timing.elapsed': 'Elapsed {t}',
     'model.auto': 'Auto',
     'model.menuLabel': 'Select model',
@@ -450,6 +434,12 @@ const I18N = {
     'presetPrompt.hive': 'Start Goal Hive mode: per the hive SOP, spawn multiple workers to collaboratively achieve the goal I describe next.',
     'presetPrompt.review': 'Enter reviewer mode: strictly scrutinize the previous output, review item by item and report issues.',
     'presetPrompt.mine': 'Collect this week\'s git commits and write a weekly report.',
+    'ask.title': 'Pick an answer',
+    'ask.titleNoOpts': 'Agent is asking',
+    'ask.hint': 'Click an option, or type a custom answer below',
+    'ask.hintNoOpts': 'Type your answer below, then Enter or Confirm',
+    'ask.confirm': 'Confirm ↵',
+    'ask.customPlaceholder': 'Or type a custom answer…',
   },
 };
 const LANGS = ['zh', 'en'];
@@ -822,15 +812,14 @@ function renderAssistant(text) {
   }
   // 2) 块级折叠：占位符使用 HTML 注释，避免与正文 F\d+ 冲突
   const folds = [];
-  const stash = (label, body, cls) => { folds.push({ label, body, cls: cls || '' }); return `\n\n§§FOLD:${folds.length - 1}§§\n\n`; };
-  // ask_user 卡片：与折叠块同样占位，但单独存储以便走专用渲染分支
   const asks = [];
+  const stash = (label, body, cls) => { folds.push({ label, body, cls: cls || '' }); return `\n\n§§FOLD:${folds.length - 1}§§\n\n`; };
   const stashAsk = (data) => { asks.push(data); return `\n\n§§ASK:${asks.length - 1}§§\n\n`; };
   const foldBlocks = (body) => {
     let s = body;
     // thinking: 兼容 <thinking> XML 与 <details>...</details>（未来扩展）
     s = s.replace(/<thinking>[\s\S]*?<\/thinking>/gi, m => stash(t('fold.thinking'), m.replace(/<\/?thinking>/gi, ''), 'fold-thinking'));
-    // ask_user 工具：特殊渲染为 Claude Code 风格的多选卡片（必须在通用工具规则之前匹配）
+    // ask_user：渲染为提问卡片（必须在通用工具规则之前匹配）
     s = s.replace(/🛠️ Tool: `ask_user`[^\n]*\n````text\n([\s\S]*?)\n````/g,
                   (m, json) => {
                     const data = parseAskUserJson(json);
@@ -890,15 +879,11 @@ function renderAssistant(text) {
     });
 }
 
-/* agent_loop.get_pretty_json 会把字符串里的 \n 转义还原成真实换行（见 agent_loop.py:40）。
- * 这会破坏标准 JSON。这里走一遍宽松解析：把字符串字面值里的真实换行/制表符重新转义后再 JSON.parse。 */
 function parseAskUserJson(raw) {
   if (raw == null) return null;
   const txt = String(raw).trim();
   if (!txt) return null;
-  // 1) 标准 JSON 先试一次（数据无嵌入换行时直接命中）
   try { return JSON.parse(txt); } catch (_) {}
-  // 2) 宽松解析：仅对字符串内部的不可见控制字符做转义
   try {
     let out = '';
     let inStr = false;
@@ -912,9 +897,8 @@ function parseAskUserJson(raw) {
         if (c === '\n') out += '\\n';
         else if (c === '\r') out += '\\r';
         else if (c === '\t') out += '\\t';
-        else if (c.charCodeAt(0) < 0x20) {
-          out += '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0');
-        } else out += c;
+        else if (c.charCodeAt(0) < 0x20) out += '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0');
+        else out += c;
       } else out += c;
     }
     return JSON.parse(out);
@@ -922,85 +906,85 @@ function parseAskUserJson(raw) {
   return null;
 }
 
-function normalizeAskUserItem(q) {
-  if (typeof q === 'string') return { question: q.trim(), options: [] };
-  const opts = (q && (q.options || q.candidates)) || [];
-  return {
-    question: String(q && q.question || '').trim(),
-    options: Array.isArray(opts)
-      ? opts.map(x => String(x == null ? '' : x)).filter(x => x.trim())
-      : [],
-  };
-}
-
 function normalizeAskUserData(data) {
   const raw = data || {};
-  if (!Array.isArray(raw.questions) || !raw.questions.length) return null;
-  const questions = raw.questions.map(normalizeAskUserItem).filter(x => x.question);
-  return questions.length ? questions : null;
+  const question = String(raw.question || '').trim();
+  if (!question) return null;
+  const cs = raw.candidates || [];
+  const candidates = Array.isArray(cs)
+    ? cs.map(x => String(x == null ? '' : x)).filter(x => x.trim())
+    : [];
+  return { question, candidates };
 }
 
-function renderAskUserCard(data) {
-  const questions = normalizeAskUserData(data);
-  if (!questions) return '';
-  return renderAskUserWizard(questions);
-}
-
-/* ═══════════════ ask_user 向导卡片 ═══════════════ */
 const ASK_ICON_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
 const ASK_CHEV_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
 
-function renderAskUserWizard(questions) {
-  const n = questions.length;
-  const payload = JSON.stringify(questions);
-  const slidesHtml = questions.map((q, i) => {
-    const qText = String(q && q.question || '').trim();
-    const qHtml = qText ? renderMarkdown(qText) : '';
-    const cs = Array.isArray(q && q.options)
-      ? q.options.map(x => String(x == null ? '' : x)).filter(x => x.trim())
-      : [];
-    const optsHtml = cs.length
-      ? `<div class="ask-options" role="listbox">${cs.map((c, j) =>
-          `<button class="ask-option" data-q="${i}" data-ans="${escapeHtml(c)}" type="button" role="option" tabindex="0">
-            <span class="ask-option-key">${j + 1}</span>
-            <span class="ask-option-label">${escapeHtml(c)}</span>
-            <span class="ask-option-arrow" aria-hidden="true">${ASK_CHEV_SVG}</span>
-          </button>`).join('')}</div>`
-      : '';
-    return `<div class="ask-slide" data-step="${i}"${i === 0 ? '' : ' hidden'}>
-      ${n > 1 ? `<div class="ask-step-meta">${escapeHtml(t('ask.wizardStep').replace('{i}', i + 1).replace('{n}', n))}</div>` : ''}
-      ${qHtml ? `<div class="ask-user-body md">${qHtml}</div>` : ''}
-      ${optsHtml}
-      <div class="ask-custom-row">
-        <input type="text" class="ask-custom-input" data-q="${i}" placeholder="${escapeHtml(t('ask.customPlaceholder'))}" autocomplete="off" />
-      </div>
-    </div>`;
-  }).join('');
-  const dotsHtml = n > 1
-    ? questions.map((_, i) =>
-        `<span class="ask-dot${i === 0 ? ' is-current' : ''}" data-step="${i}"></span>`).join('')
+function escapeAttr(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;');
+}
+
+function renderAskUserCard(data) {
+  const item = normalizeAskUserData(data);
+  if (!item) return '';
+  const qHtml = renderMarkdown(item.question);
+  const optsHtml = item.candidates.length
+    ? `<div class="ask-options" role="listbox">${item.candidates.map((c, j) =>
+        `<button class="ask-option" data-ans="${escapeAttr(c)}" type="button" role="option" tabindex="0">
+          <span class="ask-option-key">${j + 1}</span>
+          <span class="ask-option-label">${escapeHtml(c)}</span>
+          <span class="ask-option-arrow" aria-hidden="true">${ASK_CHEV_SVG}</span>
+        </button>`).join('')}</div>`
     : '';
-  const titleText = n === 1 ? t('ask.wizardTitleOne') : t('ask.wizardTitle').replace('{n}', n);
-  return `<div class="ask-user-card ask-user-wizard" data-ask-user="1" data-wizard="1" data-total="${n}" data-questions='${escapeAttrJson(payload)}'>
+  const titleText = item.candidates.length ? t('ask.title') : t('ask.titleNoOpts');
+  const hintText = item.candidates.length ? t('ask.hint') : t('ask.hintNoOpts');
+  return `<div class="ask-user-card" data-ask-user="1">
     <div class="ask-user-head">
       <span class="ask-user-icon" aria-hidden="true">${ASK_ICON_SVG}</span>
       <span class="ask-user-title">${escapeHtml(titleText)}</span>
-      ${dotsHtml ? `<span class="ask-wizard-dots" aria-hidden="true">${dotsHtml}</span>` : ''}
     </div>
-    <div class="ask-slides">${slidesHtml}</div>
-    <div class="ask-wizard-nav">
-      ${n > 1 ? `<button class="ask-nav-btn ask-prev" type="button" disabled>${escapeHtml(t('ask.prev'))}</button>` : ''}
-      <span class="ask-wizard-err" role="alert" aria-live="polite"></span>
-      <button class="ask-nav-btn ask-next is-primary" type="button">${escapeHtml(n > 1 ? t('ask.next') : t('ask.submit'))}</button>
+    ${qHtml ? `<div class="ask-user-body md">${qHtml}</div>` : ''}
+    ${optsHtml}
+    <div class="ask-custom-row">
+      <input type="text" class="ask-custom-input" placeholder="${escapeHtml(t('ask.customPlaceholder'))}" autocomplete="off" />
     </div>
-    <div class="ask-user-hint">${escapeHtml(t('ask.hint'))}</div>
+    <div class="ask-submit-row">
+      <button class="ask-submit-btn" type="button">${escapeHtml(t('ask.confirm'))}</button>
+    </div>
+    <div class="ask-user-hint">${escapeHtml(hintText)}</div>
   </div>`;
 }
 
-// 仅做最小转义：把单引号转成 &#39;，因为 data-questions='...' 用单引号包裹
-function escapeAttrJson(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/</g, '&lt;');
+function syncAskComposerLock() {
+  const pending = document.querySelector('.ask-user-card:not(.is-answered)');
+  setComposerLocked(!!pending);
 }
+
+function finalizeAskUserCards(scope) {
+  const root = scope || document;
+  const cards = [...root.querySelectorAll('.ask-user-card')];
+  if (!cards.length) { syncAskComposerLock(); return; }
+  const sess = activeSess();
+  const msgs = sess?.messages || [];
+  let lastAskIdx = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'assistant' && /🛠️\s*Tool:\s*`ask_user`/m.test(msgs[i].content || '')) {
+      lastAskIdx = i;
+      break;
+    }
+  }
+  const replied = lastAskIdx >= 0 && msgs.slice(lastAskIdx + 1).some(m => m.role === 'user');
+  cards.forEach((card, i) => {
+    if (i < cards.length - 1 || replied) {
+      card.classList.add('is-answered');
+      card.querySelectorAll('.ask-option, .ask-custom-input, .ask-submit-btn').forEach(el => {
+        if ('disabled' in el) el.disabled = true;
+      });
+    }
+  });
+  syncAskComposerLock();
+}
+
 /* ═══════════════ 渲染后增强 (PR移植) ═══════════════ */
 /* ───────────── 统一复制 SVG Icon ───────────── */
 const SVG_COPY_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
@@ -1040,12 +1024,7 @@ function postRenderEnhance(containerEl) {
     el.style.position = 'relative';
     el.appendChild(btn);
   });
-  syncAskComposerLock();
-}
-
-function syncAskComposerLock() {
-  const pending = document.querySelector('.ask-user-card:not(.is-answered)');
-  setComposerLocked(!!pending);
+  finalizeAskUserCards(containerEl);
 }
 
 
@@ -1234,6 +1213,7 @@ function msgNode(msg) {
 function renderAllMessages(sess) {
   const box = ensureMsgs(); box.innerHTML = '';
   for (const m of sess.messages) box.appendChild(msgNode(m));
+  finalizeAskUserCards(box);
   // badge 恢复在 pollSession finally 中执行（此时 messages 已通过异步加载填充）
   refreshEmptyState(sess); scrollBottom(true);
 }
@@ -1703,8 +1683,7 @@ async function interruptBeforeSend(sess) {
 }
 
 /* ═══════════════ 发送 / 取消 ═══════════════ */
-// opts: { promptOverride?: string }  当 promptOverride 提供时，agent 收到的是它，
-// 而显示在聊天历史里的仍是 text。用于 ask_user 选项点击等需要附带隐式提示的场景。
+// opts: { promptOverride?: string } — promptOverride 提供给 agent，聊天历史仍显示 text
 async function sendPrompt(text, opts) {
   text = String(text || '').trim();
   if (!text) return false;
@@ -1779,6 +1758,39 @@ async function cancelPrompt() {
   } catch (e) { showError(t('err.stop') + ': ' + (e.message || e)); return false; }
 }
 
+function collectAskAnswer(card) {
+  if (!card) return '';
+  const inp = card.querySelector('.ask-custom-input');
+  const typed = inp ? String(inp.value || '').trim() : '';
+  if (typed) return typed;
+  const chosen = card.querySelector('.ask-option.is-chosen');
+  if (chosen) return String(chosen.dataset.ans || '').trim();
+  return '';
+}
+
+async function submitAskUserAnswer(card) {
+  if (_submitInFlight || !card || card.classList.contains('is-answered')) return;
+  const ans = collectAskAnswer(card);
+  if (!ans) {
+    const inp = card.querySelector('.ask-custom-input');
+    if (inp) inp.focus();
+    return;
+  }
+  card.classList.add('is-answered');
+  card.querySelectorAll('.ask-option, .ask-custom-input, .ask-submit-btn').forEach(el => {
+    if ('disabled' in el) el.disabled = true;
+  });
+  const promptOverride = `[ask_user 回复]\n${ans}\n\n[SYSTEM] 用户已回答，请按原计划继续。`;
+  _submitInFlight = true;
+  setComposerLocked(true);
+  try {
+    await sendPrompt(ans, { promptOverride });
+  } finally {
+    _submitInFlight = false;
+    syncAskComposerLock();
+  }
+}
+
 /* ═══════════════ 输入区 / slash / 预设 ═══════════════ */
 async function submitInput() {
   if (_submitInFlight) return;
@@ -1810,233 +1822,6 @@ sendBtn.addEventListener('click', (e) => {
   submitInput();
 });
 inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submitInput(); } });
-
-/* ═══════════════ ask_user 卡片交互 ═══════════════ */
-function wizardGetState(card) {
-  const total = Number(card.dataset.total || '0');
-  const step = Number(card.dataset.step || '0');
-  let answers;
-  try { answers = JSON.parse(card.dataset.answers || '[]'); }
-  catch { answers = []; }
-  while (answers.length < total) answers.push(null);
-  return { total, step, answers };
-}
-function wizardSetState(card, st) {
-  card.dataset.step = String(st.step);
-  card.dataset.answers = JSON.stringify(st.answers);
-}
-function wizardRefresh(card) {
-  const { total, step, answers } = wizardGetState(card);
-  // slides
-  card.querySelectorAll('.ask-slide').forEach(s => {
-    const si = Number(s.dataset.step);
-    s.hidden = (si !== step);
-  });
-  // dots
-  card.querySelectorAll('.ask-dot').forEach(d => {
-    const di = Number(d.dataset.step);
-    d.classList.toggle('is-current', di === step);
-    d.classList.toggle('is-answered', answers[di] != null && answers[di] !== '');
-  });
-  // 高亮被选中的选项 + 同步 custom input
-  card.querySelectorAll('.ask-slide').forEach(s => {
-    const si = Number(s.dataset.step);
-    const ans = answers[si];
-    s.querySelectorAll('.ask-option').forEach(b => {
-      const isChosen = ans != null && b.dataset.ans === ans;
-      b.classList.toggle('is-chosen', isChosen);
-    });
-    const inp = s.querySelector('.ask-custom-input');
-    if (inp) {
-      const isOptionAns = ans != null && Array.from(s.querySelectorAll('.ask-option')).some(b => b.dataset.ans === ans);
-      inp.value = (ans != null && !isOptionAns) ? ans : '';
-    }
-  });
-  // nav
-  const prevBtn = card.querySelector('.ask-prev');
-  const nextBtn = card.querySelector('.ask-next');
-  const errEl = card.querySelector('.ask-wizard-err');
-  if (prevBtn) prevBtn.disabled = (step === 0);
-  if (nextBtn) nextBtn.textContent = (step === total - 1) ? t('ask.submit') : t('ask.next');
-  if (errEl) errEl.textContent = '';
-}
-function wizardCollectCurrentAnswer(card) {
-  const { step } = wizardGetState(card);
-  const slide = card.querySelector(`.ask-slide[data-step="${step}"]`);
-  if (!slide) return '';
-  const chosenBtn = slide.querySelector('.ask-option.is-chosen');
-  const inp = slide.querySelector('.ask-custom-input');
-  const typed = inp ? String(inp.value || '').trim() : '';
-  // 自定义输入优先级高于选项 — 让用户改主意更方便
-  if (typed) return typed;
-  if (chosenBtn) return String(chosenBtn.dataset.ans || '').trim();
-  return '';
-}
-async function wizardSubmitAll(card) {
-  if (_submitInFlight) return;
-  const st = wizardGetState(card);
-  // 收尾：把最后一步的当前输入塞回 answers
-  const last = wizardCollectCurrentAnswer(card);
-  st.answers[st.step] = last;
-  wizardSetState(card, st);
-  // 校验：所有题都要有答案
-  const missingIdx = st.answers.findIndex(a => a == null || String(a).trim() === '');
-  if (missingIdx >= 0) {
-    // 跳到第一道空白题
-    st.step = missingIdx;
-    wizardSetState(card, st);
-    wizardRefresh(card);
-    const err = card.querySelector('.ask-wizard-err');
-    if (err) err.textContent = t('ask.required');
-    return;
-  }
-  // 取题干用于拼提示
-  let qs = [];
-  try { qs = JSON.parse(card.dataset.questions || '[]'); } catch {}
-  const displayLines = st.answers.map((a, i) => `${t('ask.summaryLabel').replace('{i}', i + 1)}: ${a}`);
-  const display = displayLines.join('\n');
-  const promptLines = st.answers.map((a, i) => {
-    const qText = (qs[i] && qs[i].question) ? String(qs[i].question).replace(/\s+/g, ' ').trim() : `Q${i + 1}`;
-    return `[Q${i + 1}] ${qText}\n[A${i + 1}] ${a}`;
-  });
-  const promptOverride = `[ask_user 批量回复]\n${promptLines.join('\n\n')}\n\n[SYSTEM] 用户已回答完所有问题，请按原计划继续。`;
-  // 锁卡片 UI
-  card.classList.add('is-answered');
-  card.querySelectorAll('.ask-option, .ask-custom-input, .ask-nav-btn').forEach(el => {
-    if ('disabled' in el) el.disabled = true;
-    el.setAttribute('aria-disabled', 'true');
-  });
-  _submitInFlight = true;
-  setComposerLocked(true);
-  try {
-    await sendPrompt(display, { promptOverride });
-  } finally {
-    _submitInFlight = false;
-    syncAskComposerLock();
-  }
-}
-function wizardGoTo(card, target) {
-  const st = wizardGetState(card);
-  if (target < 0 || target >= st.total) return;
-  // 保存当前页答案 — 仅当能从 DOM 抓到非空值时才覆盖，避免清掉已暂存的答案
-  const current = wizardCollectCurrentAnswer(card);
-  if (current) st.answers[st.step] = current;
-  st.step = target;
-  wizardSetState(card, st);
-  wizardRefresh(card);
-}
-
-/* 事件委托 */
-document.addEventListener('click', (e) => {
-  // 选项按钮
-  const optBtn = e.target.closest('.ask-option');
-  if (optBtn) {
-    const card = optBtn.closest('.ask-user-card');
-    if (!card || card.classList.contains('is-answered') || card.dataset.wizard !== '1') return;
-    const ans = optBtn.dataset.ans || '';
-    if (!ans) return;
-    const st = wizardGetState(card);
-    st.answers[st.step] = ans;
-    const slide = card.querySelector(`.ask-slide[data-step="${st.step}"]`);
-    const inp = slide && slide.querySelector('.ask-custom-input');
-    if (inp) inp.value = '';
-    if (st.step < st.total - 1) {
-      st.step += 1;
-      wizardSetState(card, st);
-      wizardRefresh(card);
-    } else {
-      wizardSetState(card, st);
-      wizardRefresh(card);
-      wizardSubmitAll(card);
-    }
-    return;
-  }
-  // 向导导航
-  const prev = e.target.closest('.ask-prev');
-  if (prev) {
-    const card = prev.closest('.ask-user-card');
-    if (card) wizardGoTo(card, wizardGetState(card).step - 1);
-    return;
-  }
-  const next = e.target.closest('.ask-next');
-  if (next) {
-    const card = next.closest('.ask-user-card');
-    if (!card) return;
-    const st = wizardGetState(card);
-    // 把当前页答案先保存
-    st.answers[st.step] = wizardCollectCurrentAnswer(card);
-    wizardSetState(card, st);
-    if (st.step === st.total - 1) {
-      wizardSubmitAll(card);
-    } else {
-      // 校验当前题：若空，提示
-      if (!st.answers[st.step]) {
-        const err = card.querySelector('.ask-wizard-err');
-        if (err) err.textContent = t('ask.required');
-        return;
-      }
-      wizardGoTo(card, st.step + 1);
-    }
-    return;
-  }
-  // 进度点跳转（允许向已答过的步骤跳）
-  const dot = e.target.closest('.ask-dot');
-  if (dot) {
-    const card = dot.closest('.ask-user-card');
-    if (card) wizardGoTo(card, Number(dot.dataset.step || '0'));
-    return;
-  }
-});
-
-/* 自定义输入：实时同步到答案；Enter 触发下一题/提交 */
-document.addEventListener('input', (e) => {
-  const inp = e.target.closest && e.target.closest('.ask-custom-input');
-  if (!inp) return;
-  const card = inp.closest('.ask-user-card');
-  if (!card || card.classList.contains('is-answered') || card.dataset.wizard !== '1') return;
-  const st = wizardGetState(card);
-  const slide = inp.closest('.ask-slide');
-  const si = slide ? Number(slide.dataset.step) : st.step;
-  const v = String(inp.value || '');
-  st.answers[si] = v.trim() || null;
-  if (slide && v.trim()) {
-    slide.querySelectorAll('.ask-option.is-chosen').forEach(b => b.classList.remove('is-chosen'));
-  }
-  wizardSetState(card, st);
-  card.querySelectorAll('.ask-dot').forEach(d => {
-    const di = Number(d.dataset.step);
-    d.classList.toggle('is-answered', st.answers[di] != null && st.answers[di] !== '');
-  });
-});
-document.addEventListener('keydown', (e) => {
-  const inp = e.target.closest && e.target.closest('.ask-custom-input');
-  if (inp && e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-    e.preventDefault();
-    const card = inp.closest('.ask-user-card');
-    if (!card || card.classList.contains('is-answered')) return;
-    const nextBtn = card.querySelector('.ask-next');
-    if (nextBtn) nextBtn.click();
-    return;
-  }
-  // 全局 1–9 数字键快捷选项（仅当焦点不在文本框且主输入框为空时；优先批量向导的当前页）
-  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
-  if (!/^[1-9]$/.test(e.key)) return;
-  if (document.activeElement === inputEl && inputEl.value) return;
-  const tag = (document.activeElement && document.activeElement.tagName) || '';
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return; // 在任何文本框里按数字不触发
-  const cards = document.querySelectorAll('.ask-user-card:not(.is-answered)');
-  if (!cards.length) return;
-  const card = cards[cards.length - 1];
-  if (card.dataset.wizard !== '1') return;
-  const st = wizardGetState(card);
-  const slide = card.querySelector(`.ask-slide[data-step="${st.step}"]`);
-  const opts = slide ? slide.querySelectorAll('.ask-option') : [];
-  const idx = Number(e.key) - 1;
-  if (idx >= 0 && idx < opts.length) {
-    e.preventDefault();
-    opts[idx].click();
-  }
-});
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
@@ -2996,6 +2781,59 @@ if (msgArea) {
     }
   });
 }
+
+document.addEventListener('click', (e) => {
+  const optBtn = e.target.closest('.ask-option');
+  if (optBtn) {
+    const card = optBtn.closest('.ask-user-card');
+    if (!card || card.classList.contains('is-answered')) return;
+    card.querySelectorAll('.ask-option.is-chosen').forEach(b => b.classList.remove('is-chosen'));
+    optBtn.classList.add('is-chosen');
+    const inp = card.querySelector('.ask-custom-input');
+    if (inp) inp.value = '';
+    submitAskUserAnswer(card);
+    return;
+  }
+  const submitBtn = e.target.closest('.ask-submit-btn');
+  if (submitBtn) {
+    const card = submitBtn.closest('.ask-user-card');
+    if (card && !card.classList.contains('is-answered')) submitAskUserAnswer(card);
+  }
+});
+
+document.addEventListener('input', (e) => {
+  const inp = e.target.closest('.ask-custom-input');
+  if (!inp) return;
+  const card = inp.closest('.ask-user-card');
+  if (!card || card.classList.contains('is-answered')) return;
+  if (inp.value.trim()) {
+    card.querySelectorAll('.ask-option.is-chosen').forEach(b => b.classList.remove('is-chosen'));
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  const inp = e.target.closest('.ask-custom-input');
+  if (inp && e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    const card = inp.closest('.ask-user-card');
+    if (card && !card.classList.contains('is-answered')) submitAskUserAnswer(card);
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+  if (!/^[1-9]$/.test(e.key)) return;
+  if (document.activeElement === inputEl && inputEl.value) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  const cards = document.querySelectorAll('.ask-user-card:not(.is-answered)');
+  if (!cards.length) return;
+  const card = cards[cards.length - 1];
+  const opts = card.querySelectorAll('.ask-option');
+  const idx = Number(e.key) - 1;
+  if (idx >= 0 && idx < opts.length) {
+    e.preventDefault();
+    opts[idx].click();
+  }
+});
 
 function uploadRawUrl(path, download) {
   return `http://${location.hostname}:14168/upload/raw?path=${encodeURIComponent(path || '')}${download ? '&download=1' : ''}`;
