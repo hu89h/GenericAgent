@@ -862,6 +862,12 @@ function renderMarkdown(text) {
     const protected_ = protectLatex(String(text || ''));
     let html = sanitizeMarkdown(marked.parse(protected_));
     html = restoreLatex(html);
+    // TUI 风格代码块：包装 pre>code 为 .code-block 容器 + 语言头
+    html = html.replace(/<pre><code\b(?:\s+class="language-([^"]*)")?[^>]*>([\s\S]*?)<\/code><\/pre>/g,
+      (_, lang, body) => {
+        const label = lang || 'code';
+        return `<div class="code-block"><div class="code-block-head"><span class="code-block-lang">${escapeHtml(label)}</span><button class="code-block-copy" aria-label="Copy code">\u29C9</button></div><pre><code class="language-${escapeHtml(label)}">${body}</code></pre></div>`;
+      });
     return html;
   } catch (_) { return escapeHtml(text); }
 }
@@ -1134,9 +1140,10 @@ const SVG_CHECK_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="no
 
 function postRenderEnhance(containerEl) {
   if (!containerEl) return;
-  // 代码高亮 + 复制按钮
+  // 代码高亮 + 复制按钮（.code-block 容器已自带头部复制按钮，跳过）
   containerEl.querySelectorAll('pre code').forEach(block => {
     if (typeof hljs !== 'undefined') hljs.highlightElement(block);
+    if (block.closest('.code-block')) return; // TUI 风格容器已有复制按钮
     if (!block.parentElement.querySelector('.code-copy-btn')) {
       const btn = document.createElement('button');
       btn.className = 'code-copy-btn'; btn.innerHTML = SVG_COPY_ICON;
@@ -1149,6 +1156,19 @@ function postRenderEnhance(containerEl) {
       block.parentElement.style.position = 'relative';
       block.parentElement.appendChild(btn);
     }
+  });
+  // TUI 代码块头部复制按钮绑定
+  containerEl.querySelectorAll('.code-block-copy').forEach(btn => {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = '1';
+    btn.onclick = () => {
+      const code = btn.closest('.code-block').querySelector('code');
+      if (!code) return;
+      navigator.clipboard.writeText(code.textContent.trim()).then(() => {
+        btn.textContent = '\u2713';
+        setTimeout(() => { btn.textContent = '\u29C9'; }, 1500);
+      });
+    };
   });
   // KaTeX 复制按钮
   containerEl.querySelectorAll('.katex-block').forEach(el => {

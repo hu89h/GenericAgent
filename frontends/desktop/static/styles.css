@@ -605,7 +605,24 @@ html[data-appearance="dark"] .swatch[data-theme="8"].sel::after{
 .bubble.err{ background:var(--danger-bg); color:var(--danger-text); white-space:normal; }
 .bubble.sys{ background:transparent; color:var(--muted); font-size:12px; padding:4px 8px; }
 .bubble.md p{ margin:0 0 8px; } .bubble.md p:last-child{ margin:0; }
+/* ---- TUI 风格代码块 ---- */
+.code-block{ border:1px solid var(--line); border-radius:var(--radius-sm); overflow:hidden; margin:8px 0; }
+.code-block-head{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:4px 12px; background:var(--field-bg); border-bottom:1px solid var(--line);
+  font-family:var(--font-config-mono); font-size:.75em; color:var(--muted);
+}
+.code-block-lang{ text-transform:uppercase; letter-spacing:.5px; font-weight:600; }
+.code-block-copy{
+  background:none; border:none; color:var(--muted); cursor:pointer;
+  font-size:1.1em; padding:2px 4px; border-radius:3px; line-height:1;
+  transition:color .15s, background .15s;
+}
+.code-block-copy:hover{ color:var(--txt); background:var(--hover-dim); }
+.code-block pre{ margin:0; border:none; border-radius:0; }
 .bubble.md pre{ background:var(--field-bg); border:1px solid var(--line); border-radius:4px; padding:10px 12px; overflow:auto; font-size:.86em; }
+.bubble.md .code-block pre{ background:var(--field-bg); border:none; border-radius:0; padding:12px 14px; overflow:auto; font-size:.86em; margin:0; }
+.bubble.md .code-block{ border:1px solid var(--line); }
 .bubble.md :not(pre) > code{ background:var(--field-bg); border-radius:4px; padding:1px 5px; font-size:.86em; }
 .bubble.md a{ color:var(--accent); }
 .bubble.md ul,.bubble.md ol{ margin:0 0 8px; padding-left:20px; }
