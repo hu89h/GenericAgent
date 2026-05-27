@@ -1,0 +1,24 @@
+# GADesktop 开发笔记本
+
+## 当前基线
+- 分支: main (synced upstream/main e0d05f1)
+- 入口: frontends/desktop_bridge.py --port 14168
+- 前端文件: frontends/desktop/static/{index.html, styles.css, app.js}
+
+## 代码关联 (Code Memory)
+- `.bubble.md` (styles.css L604): 模型回复(assistant)的气泡样式，被 app.js 中 renderMsg 动态添加
+- `.bubble` (styles.css L599): 所有消息气泡的基础样式
+- `.msg.assistant` (styles.css L597): assistant 消息行布局
+
+## 变更记录
+
+### 2026-05-28: 去掉模型回复灰色气泡
+- **改动**: styles.css L604 `.bubble.md` background 从 `var(--line-soft)` → `transparent`
+- **原因**: 用户认为灰色气泡不需要，模型回复直接无背景展示
+- **影响范围**: 仅影响 assistant 消息的 markdown 渲染气泡外观
+- **验证**: CSS规则已确认生效 (background: transparent)
+
+## 设计原则
+- 不硬编码颜色/文本，使用 CSS 变量
+- 高内聚低耦合，尽量单文件修改
+- 在 app.js / index.html / styles.css 中开发

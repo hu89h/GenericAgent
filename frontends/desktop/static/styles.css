@@ -601,7 +601,7 @@ html[data-appearance="dark"] .swatch[data-theme="8"].sel::after{
   line-height:1.6; white-space:pre-wrap; word-break:break-word;
   background:var(--accent-bg); color:var(--txt-strong);
 }
-.bubble.md{ white-space:normal; background:var(--line-soft); color:var(--txt); max-width:100%; width:100%; border-radius:4px; }
+.bubble.md{ white-space:normal; background:transparent; color:var(--txt); max-width:100%; width:100%; border-radius:4px; }
 .bubble.err{ background:var(--danger-bg); color:var(--danger-text); white-space:normal; }
 .bubble.sys{ background:transparent; color:var(--muted); font-size:12px; padding:4px 8px; }
 .bubble.md p{ margin:0 0 8px; } .bubble.md p:last-child{ margin:0; }
