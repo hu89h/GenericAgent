@@ -33,6 +33,34 @@ from typing import Optional
 # this file and share the same anchor.
 _ROOT = Path(__file__).resolve().parent.parent
 
+# Language resolution is owned here (not passed in as a formal arg) so every
+# prompt builder stays single-parameter and TUI call sites don't need to know
+# which prompt happens to be bilingual.  Source of truth, in order:
+#   1. `GA_LANG` env var (scriptable override; matches tui_v3 convention)
+#   2. tui_v3's persisted settings file (same path as tui_v3.py:_SETTINGS_PATH)
+#   3. system locale (zh* → 'zh', else 'en')
+# When the user switches language inside tui_v3 (set_lang persists), the next
+# call here picks it up automatically -- no formal coupling, just a shared file.
+_SETTINGS_PATH = _ROOT / "temp" / "tui_v3_settings.json"
+
+
+def _current_lang() -> str:
+    env = (os.environ.get("GA_LANG") or "").strip().lower()
+    if env in ("zh", "en"):
+        return env
+    try:
+        with open(_SETTINGS_PATH, "r", encoding="utf-8") as f:
+            saved = (json.load(f) or {}).get("lang")
+        if saved in ("zh", "en"):
+            return saved
+    except Exception:
+        pass
+    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        v = os.environ.get(var, "")
+        if v:
+            return "zh" if v.lower().startswith("zh") else "en"
+    return "en"
+
 
 # ----- prompt builders (pure functions, no I/O) ---------------------------
 # SOP paths are written inline as literal strings in each builder below: a
@@ -54,13 +82,52 @@ def _tail(args_text: str, label: str = "额外指示") -> str:
 
 
 def build_update_prompt(args_text: str = "") -> str:
-    # Faithfully follow the user's own wording (2026-05-27):
-    # "git pull 更新一下 GA 你自己，官方渠道 https://github.com/Lsdefine/GenericAgent,
-    #  自动合并解决冲突,优先上游分支,本地修改代码也进行保留但不进行 commit."
+    """Prompt-only /update orchestration; actual git work stays in-agent.
+
+    The TUI owns zero git/LLM logic.  This prompt asks the normal agent loop to
+    do a user-friendly preflight (upstream commits + diff) before pulling.
+    Language follows `_current_lang()` so a /language switch in tui_v3 (or a
+    `GA_LANG=...` shell override) automatically flips this prompt too.
+    """
+    if _current_lang() == "en":
+        return (
+            "Update this GenericAgent checkout from the official upstream "
+            "https://github.com/Lsdefine/GenericAgent .\n"
+            "1. Fetch upstream; identify the current branch and whether there are any local "
+            "commits ahead of upstream.\n"
+            "2. Show a concise preview: recent upstream commits not yet local "
+            "(short hash + subject + date) plus a changed-files summary.\n"
+            "3. Apply the update (uncommitted working-tree changes must always be preserved):\n"
+            "   - If local commits exist: merge upstream into the current branch, auto-resolving "
+            "conflicts in favor of upstream, and keep the local commits. A merge commit is acceptable here.\n"
+            "   - Otherwise: run `git reset --mixed upstream/main` so local `main` aligns exactly "
+            "with upstream/main, automatically resolving conflicts in favor of upstream. Keep the local changes but do not create any new commits.\n"
+            "4. Finish with a short summary: branch HEAD, changed files, conflicts/resolutions.\n"
+            "\n"
+            "#### Say 'Congratulations! 🎉' to the user\n"
+            "After a successful update, say: \"Congratulations! 🎉 You have successfully "
+            "updated GenericAgent!\"\n"
+            "\n"
+            "#### Ask for a Star ⭐\n"
+            "Then you may ask: \"If you found this helpful, would you like to star the "
+            "GenericAgent repository? It helps the project grow! ⭐\""
+            f"{_tail(args_text, 'Extra instructions')}"
+        )
     return (
-        "请你 git pull 更新一下 GA 你自己，官方渠道 "
-        "https://github.com/Lsdefine/GenericAgent ，"
-        "自动合并解决冲突，优先上游分支，本地修改代码也进行保留但不进行 commit。"
+        "请你更新当前 GenericAgent 仓库，官方上游为 "
+        "https://github.com/Lsdefine/GenericAgent 。\n"
+        "1. 先 fetch upstream；识别当前分支，以及是否存在领先 upstream 的本地 commit。\n"
+        "2. 给出简洁预览：本地尚未包含的 upstream 最近提交（短 hash + 标题 + 日期）及变更文件摘要。\n"
+        "3. 执行更新（工作区未提交的改动始终要保留）：\n"
+        "   - 若存在本地 commit：将 upstream 合并进当前分支，自动解决冲突且优先上游。\n"
+        "   - 否则：执行 `git reset --mixed upstream/main`，使本地 `main` 与 upstream/main 完全对齐，自动解决冲突且优先上游。本地修改保留但不要进行commit。\n"
+        "4. 最后给出简短小结：分支 HEAD、变更文件、冲突/解决方式。\n"
+        "\n"
+        "#### 向用户说 'Congratulations! 🎉'\n"
+        "更新成功后，请对用户说：\"Congratulations! 🎉 你已成功更新 GenericAgent！\"\n"
+        "\n"
+        "#### 邀请用户点 Star ⭐\n"
+        "随后可邀请：\"如果觉得有帮助，要不要给 GenericAgent 仓库点个 Star？这会让项目成长更快！⭐\""
         f"{_tail(args_text)}"
     )
 
@@ -303,6 +370,10 @@ PALETTE_ENTRIES: list[tuple[str, str, str]] = [
 def prompt_for(cmd: str, args_text: str) -> Optional[str]:
     """Return the injected user-message for a given slash command, or None if
     the command isn't one of ours (e.g. /scheduler — handled by TUI directly).
+
+    Language is resolved inside the builders that care about it (see
+    `_current_lang()`); callers never thread it through, so both TUIs keep a
+    single uniform call site.
     """
     table = {
         "/update":    build_update_prompt,
