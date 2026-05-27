@@ -1127,6 +1127,8 @@ function syncAskUserUi() {
 
 /* ═══════════════ 渲染后增强 (PR移植) ═══════════════ */
 /* ───────────── 统一复制 SVG Icon ───────────── */
+// Phosphor 图标助手：把 window.gaIcon(name) 包一层，给动态渲染的 UI 用，与静态 [data-ga-icon] 保持一致
+const GA_ICON = (name, className = '') => (typeof window.gaIcon === 'function' ? window.gaIcon(name, className) : '');
 const SVG_COPY_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 const SVG_CHECK_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
@@ -1204,8 +1206,11 @@ async function loadSessions() {
         pinned: s.pinned ?? false, lastActiveTs: s.updatedAt || s.createdAt
       });
     }
-    if (data.activeSessionId && state.sessions.has(data.activeSessionId)) state.activeId = data.activeSessionId;
-    else if (state.sessions.size) state.activeId = state.sessions.keys().next().value;
+    // 刷新后固定恢复「上次正在看的会话」（前端持久化的 ga_active），而不是 bridge 的
+    // activeSessionId（=最近更新的会话，会随后台会话变动而跳来跳去）。没有有效的已存
+    // 会话则置空 → 显示「新会话」空态，由用户自己点选。
+    const savedActive = localStorage.getItem('ga_active');
+    state.activeId = (savedActive && state.sessions.has(savedActive)) ? savedActive : null;
   } catch (_) {}
 }
 
@@ -1588,12 +1593,12 @@ function renderSessionList() {
     const item = document.createElement('div');
     item.className = 'conv-item' + (currentPage === 'chat' && sess.id === state.activeId ? ' active' : '') + (busy ? '' : ' idle');
     item.dataset.id = sess.id;
-    const pinSvg = sess.pinned ? `<svg class="ci-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3-1-6z"/></svg>` : '';
+    const pinSvg = sess.pinned ? GA_ICON('pushPinSimple', 'ci-pin') : '';
     item.innerHTML =
       `<span class="ci-dot"></span><div class="ci-main">` +
       `<div class="ci-title">${pinSvg}${escapeHtml(sess.title || t('conv.defaultTitle'))}</div>` +
       `<div class="ci-meta">${busy ? t('status.running') : t('status.idle')}</div></div>` +
-      `<button class="ci-more" title="${escapeHtml(t('common.more'))}"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg></button>`;
+      `<button class="ci-more" title="${escapeHtml(t('common.more'))}">${GA_ICON('dotsThreeVertical')}</button>`;
     convListEl.appendChild(item);
   }
 }
@@ -1621,6 +1626,7 @@ async function newSession() {
 }
 function setActiveSession(id) {
   state.activeId = id;
+  if (id) localStorage.setItem('ga_active', id);  // 持久化当前会话，刷新后固定恢复它
   const sess = state.sessions.get(id);
   if (!sess) return;
   if (msgsEl) msgsEl.innerHTML = '';
@@ -1642,7 +1648,7 @@ async function closeSession(id) {
   if (state.activeId === id) {
     const next = (sortedSessions()[0] || {}).id || null;  // 切到列表最靠上的会话
     if (next) setActiveSession(next);
-    else { state.activeId = null; if (msgsEl) msgsEl.innerHTML = ''; refreshEmptyState(null); refreshStatusLabel(); }
+    else { state.activeId = null; localStorage.removeItem('ga_active'); if (msgsEl) msgsEl.innerHTML = ''; refreshEmptyState(null); refreshStatusLabel(); }
   }
   saveSessions();
   renderSessionList();
@@ -1908,6 +1914,7 @@ async function sendPrompt(text) {
         sess.id = sess.bridgeSessionId;
         state.sessions.set(sess.id, sess);
         state.activeId = sess.id;
+        localStorage.setItem('ga_active', sess.id);  // 会话 id 因 bridge 重建而变更，同步持久化
       }
     }
     const res = await window.ga.rpc('session/prompt', { sessionId: sid, prompt: composedPrompt, display: text, llmNo: state.llmNo,
@@ -2031,8 +2038,8 @@ async function selectModel(id, name) {
   renderSettingsModels();
   await persistUiPrefs();
 }
-const MODEL_ACT_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
-const MODEL_ACT_DEL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+const MODEL_ACT_EDIT = GA_ICON('pencilSimple');
+const MODEL_ACT_DEL = GA_ICON('trash');
 let editingModelId = null;
 
 function setModelApikeyMode(isAdd) {
@@ -2866,7 +2873,7 @@ const BUILTIN_PRESETS = [
   { key: 'mine',    titleKey: 'preset.mine.t',    descKey: 'preset.mine.d',    promptKey: 'presetPrompt.mine',
     iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' },
 ];
-const ADD_ICON_SVG = '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+const ADD_ICON_SVG = GA_ICON('plus', 'fc-ic');
 
 state.customPresets = [];
 state.hiddenBuiltins = new Set();
@@ -3095,7 +3102,7 @@ function isPreviewableByName(name) {
 }
 
 /* ═══════════════ 消息通道（复用 gaServiceStore + WS 同步） ═══════════════ */
-const CHAN_ICON = '<svg class="lr-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+const CHAN_ICON = GA_ICON('chatTeardropText', 'lr-ic');
 const CHAN_FILE_LABELS = {
   'qqapp.py': 'ch.qq',
   'wechatapp.py': 'ch.wechat',
@@ -3569,7 +3576,7 @@ window.ga.startBridge && window.ga.startBridge();
     cardMenu.className = 'ctx-menu';
     cardMenu.style.left = x + 'px';
     cardMenu.style.top = y + 'px';
-    cardMenu.innerHTML = `<div class="ctx-item danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>${esc(t('ctx.del'))}</div>`;
+    cardMenu.innerHTML = `<div class="ctx-item danger">${GA_ICON('trash')}${esc(t('ctx.del'))}</div>`;
     cardMenu.querySelector('.ctx-item').onclick = (e) => {
       e.stopPropagation();
       fetch(`http://${location.hostname}:8900/subagent/${sid}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'kill' }) });
@@ -3585,7 +3592,7 @@ window.ga.startBridge && window.ga.startBridge();
     closeWorkerDrawer();
     drawerEl = document.createElement('div');
     drawerEl.className = 'collab-drawer-wrap';
-    drawerEl.innerHTML = `<div class="collab-drawer-backdrop"></div><aside class="collab-drawer"><div class="collab-drawer-head"><span class="collab-drawer-title">${esc(w.title)}</span><button class="modal-x collab-drawer-close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div><div class="collab-drawer-body">${md(w.fullReply || t('collab.summaryWait'))}</div></aside>`;
+    drawerEl.innerHTML = `<div class="collab-drawer-backdrop"></div><aside class="collab-drawer"><div class="collab-drawer-head"><span class="collab-drawer-title">${esc(w.title)}</span><button class="modal-x collab-drawer-close">${GA_ICON('x')}</button></div><div class="collab-drawer-body">${md(w.fullReply || t('collab.summaryWait'))}</div></aside>`;
     drawerEl.querySelector('.collab-drawer-backdrop').onclick = closeWorkerDrawer;
     drawerEl.querySelector('.collab-drawer-close').onclick = closeWorkerDrawer;
     document.body.appendChild(drawerEl);
