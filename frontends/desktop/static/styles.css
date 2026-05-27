@@ -800,8 +800,8 @@ html[data-boot-has-sessions] .chat-start{ display:none !important; }
 /* 原子附件 chip（像 @人，光标进不去、退格整块删）*/
 .ph-chip{
   display:inline-flex; align-items:center; vertical-align:baseline;
-  margin:0 2px; padding:1px 8px; border:1px solid var(--line); border-radius:10px;
-  background:var(--field-bg,var(--card)); color:var(--txt-2);
+  margin:0 2px; padding:1px 8px; border-radius:6px;
+  background:color-mix(in srgb, var(--blue) 16%, transparent); color:var(--blue);
   font-size:.9em; white-space:nowrap; user-select:none; cursor:default;
 }
 .composer-bot{ display:flex; align-items:center; justify-content:space-between; margin-top:8px; }

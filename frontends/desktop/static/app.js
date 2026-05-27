@@ -2052,7 +2052,7 @@ function insertPlaceholderInComposer(file) {
   chip.setAttribute('contenteditable', 'false');
   chip.dataset.sid = String(file.sid);
   chip.dataset.kind = file.isImage ? 'image' : 'file';
-  chip.textContent = (file.isImage ? '🖼 ' : '📎 ') + (file.name || 'file');
+  chip.textContent = file.name || 'file';
   inputEl.focus();
   const sel = window.getSelection();
   let range;
