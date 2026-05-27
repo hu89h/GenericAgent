@@ -1506,7 +1506,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   margin:8px 0 4px;
   border:1px solid var(--line);
   border-left:3px solid var(--accent);
-  border-radius:var(--radius);
+  border-radius:0;
   background:color-mix(in srgb, var(--accent-bg) 55%, var(--card));
   padding:10px 12px;
 }
