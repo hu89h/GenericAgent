@@ -221,9 +221,10 @@ const I18N = {
     'app.title': 'GenericAgent 桌面版',
     'brand.sub': '桌面终端',
     'nav.chat': '聊天', 'nav.channels': '消息通道', 'nav.status': '状态面板',
-    'nav.collab': '协作动态', 'nav.token': 'Token 统计',
+    'nav.collab': 'Agent 指挥', 'nav.token': 'Token 统计',
     'foot.settings': '配置', 'foot.ver': 'GenericAgent · 桌面版',
     'chat.startTitle': '开始对话', 'chat.startSub': '直接输入，或点预设功能一键启动',
+    'preset.butler.t': 'Conductor', 'preset.butler.d': '复杂任务自动拆活，进度在 Conductor 查看',
     'preset.goal.t': 'Goal 模式', 'preset.goal.d': '设定目标，自主完成',
     'preset.explore.t': '自主探索', 'preset.explore.d': '自动浏览并周期汇总',
     'preset.hive.t': 'Hive 协作', 'preset.hive.d': '多 worker 协同攻坚',
@@ -258,7 +259,41 @@ const I18N = {
     'confirm.modelDelete': '确定删除该模型配置？',
     'page.channels.title': '消息通道', 'page.channels.sub': '后台 IM 进程：列表、启停与日志（同 hub.pyw）',
     'page.status.title': '状态面板', 'page.status.sub': 'hub.pyw 管理的后台进程/服务，集中查看与启停',
-    'page.collab.title': '协作动态', 'page.collab.sub': 'subagent / Hive worker 的实时状态与产出',
+    'page.collab.title': 'Conductor', 'page.collab.sub': '交代目标，自动拆活与跟进',
+    'collab.progressTitle': '分工进度',
+    'collab.progressEmpty': '还没有任务在执行。告诉 Conductor 你的目标后，这里会显示拆分后的处理进度。',
+    'collab.chatTitle': '与 Conductor 对话',
+    'collab.placeholder': '描述你想完成的目标，Enter 发送…',
+    'collab.guideTitle': '把要完成的事告诉 Conductor',
+    'collab.guideWhen': '适合需要多步处理、要花一些时间才能完成的目标。日常聊天和快问快答，请用左侧「聊天」。',
+    'collab.guideStep1t': '描述目标',
+    'collab.guideStep1d': '在聊天框里写下你想做的事，发给 Conductor',
+    'collab.guideStep2t': '自动拆解',
+    'collab.guideStep2d': 'Conductor 自动拆解、分配任务，实时监督和调度',
+    'collab.guideStep3t': '交付摘要',
+    'collab.guideStep3d': 'Conductor 根据执行状态，呈上任务简报',
+    'collab.guideStep4t': '随时调整',
+    'collab.guideStep4d': '随时补充要求或细节，Conductor 都会处理',
+    'collab.chipProgress': '现在进展如何？',
+    'collab.chipPause': '先暂停当前任务',
+    'collab.chipSummary': '总结一下目前的结果',
+    'collab.showProgressTitle': '查看任务执行进度（窄屏）',
+    'collab.progressStats': '{running} 进行中 · {done} 已完成 · {issue} 需关注',
+    'collab.typing': 'Conductor 正在处理',
+    'collab.offline': '无法连接 Conductor（8900）。请确认服务已启动且本地已穿透 8900 端口。',
+    'collab.retry': '重试',
+    'collab.reconnect': '连接断开，正在重连… 已保留上次任务进度。',
+    'collab.reconnectIn': '{n} 秒后重试',
+    'collab.sticky': '{n} 个任务进行中',
+    'collab.stRunning': '执行中', 'collab.stReported': '已回报', 'collab.stPaused': '已暂停',
+    'collab.stFailed': '遇到问题', 'collab.stTerminated': '已终止',
+    'collab.summaryRunning': '正在处理中…', 'collab.summaryWait': '等待回报',
+    'collab.taskFallback': '任务 {n}',
+    'collab.timeJust': '刚刚',
+    'collab.timeSec': '{n} 秒前',
+    'collab.timeMin': '{n} 分钟前',
+    'collab.timeHr': '{n} 小时前',
+    'collab.timeDay': '{n} 天前',
     'page.token.title': 'Token 统计', 'page.token.sub': '每会话与累计的 token 用量及估算成本',
     'status.connecting': '连接中…', 'status.ready': '就绪', 'status.running': '运行中',
     'status.disconnected': '未连接', 'status.stopped': '已停止', 'status.idle': '空闲',
@@ -327,9 +362,10 @@ const I18N = {
     'app.title': 'GenericAgent Desktop',
     'brand.sub': 'Desktop terminal',
     'nav.chat': 'Chat', 'nav.channels': 'Channels', 'nav.status': 'Status',
-    'nav.collab': 'Collaboration', 'nav.token': 'Token usage',
+    'nav.collab': 'Conductor', 'nav.token': 'Token usage',
     'foot.settings': 'Settings', 'foot.ver': 'GenericAgent · Desktop',
     'chat.startTitle': 'Start a conversation', 'chat.startSub': 'Type a message, or pick a preset',
+    'preset.butler.t': 'Conductor', 'preset.butler.d': 'Delegate complex tasks; track progress in Conductor',
     'preset.goal.t': 'Goal mode', 'preset.goal.d': 'Set a goal, run autonomously',
     'preset.explore.t': 'Auto explore', 'preset.explore.d': 'Browse & summarize periodically',
     'preset.hive.t': 'Hive', 'preset.hive.d': 'Multi-worker collaboration',
@@ -364,7 +400,41 @@ const I18N = {
     'confirm.modelDelete': 'Delete this model profile?',
     'page.channels.title': 'Channels', 'page.channels.sub': 'Background IM processes: list, start/stop, logs (hub.pyw style)',
     'page.status.title': 'Status', 'page.status.sub': 'Background processes/services managed by hub.pyw',
-    'page.collab.title': 'Collaboration', 'page.collab.sub': 'Live state & output of subagents / Hive workers',
+    'page.collab.title': 'Conductor', 'page.collab.sub': 'Describe a goal — split, delegate, and follow up',
+    'collab.progressTitle': 'Progress',
+    'collab.progressEmpty': 'No tasks running yet. After you describe a goal to Conductor, split tasks will appear here.',
+    'collab.chatTitle': 'Chat with Conductor',
+    'collab.placeholder': 'Describe your goal, Enter to send…',
+    'collab.guideTitle': 'Tell Conductor what you want done',
+    'collab.guideWhen': 'Best for multi-step goals that take a while. For everyday chat and quick questions, use Chat in the sidebar.',
+    'collab.guideStep1t': 'Describe your goal',
+    'collab.guideStep1d': 'Write what you want done in the chat box and send it to Conductor',
+    'collab.guideStep2t': 'Auto breakdown',
+    'collab.guideStep2d': 'Conductor breaks down, assigns, monitors, and coordinates',
+    'collab.guideStep3t': 'Summary',
+    'collab.guideStep3d': 'Conductor delivers a briefing based on execution status',
+    'collab.guideStep4t': 'Adjust anytime',
+    'collab.guideStep4d': 'Add requirements or details anytime — Conductor handles them',
+    'collab.chipProgress': 'How is it going?',
+    'collab.chipPause': 'Pause current tasks',
+    'collab.chipSummary': 'Summarize progress so far',
+    'collab.showProgressTitle': 'View task progress (narrow screens)',
+    'collab.progressStats': '{running} running · {done} done · {issue} need attention',
+    'collab.typing': 'Conductor is working',
+    'collab.offline': 'Cannot reach Conductor (8900). Start the service and forward port 8900.',
+    'collab.retry': 'Retry',
+    'collab.reconnect': 'Disconnected — reconnecting… Your last progress is kept.',
+    'collab.reconnectIn': 'Retry in {n}s',
+    'collab.sticky': '{n} task(s) running',
+    'collab.stRunning': 'Running', 'collab.stReported': 'Reported', 'collab.stPaused': 'Paused',
+    'collab.stFailed': 'Issue', 'collab.stTerminated': 'Ended',
+    'collab.summaryRunning': 'Working…', 'collab.summaryWait': 'Awaiting report',
+    'collab.taskFallback': 'Task {n}',
+    'collab.timeJust': 'just now',
+    'collab.timeSec': '{n}s ago',
+    'collab.timeMin': '{n}m ago',
+    'collab.timeHr': '{n}h ago',
+    'collab.timeDay': '{n}d ago',
     'page.token.title': 'Token usage', 'page.token.sub': 'Per-session and total token usage & estimated cost',
     'status.connecting': 'Connecting…', 'status.ready': 'Ready', 'status.running': 'Running',
     'status.disconnected': 'Disconnected', 'status.stopped': 'Stopped', 'status.idle': 'Idle',
@@ -499,6 +569,14 @@ async function bridgeFetch(path, opts = {}) {
   return data;
 }
 function t(key) { return (I18N[lang] && I18N[lang][key]) || (I18N.zh[key]) || key; }
+window.gaT = t;
+document.addEventListener('collab:running-count', e => {
+  const b = document.getElementById('collab-badge');
+  if (!b) return;
+  const n = e.detail?.count || 0;
+  b.hidden = !n;
+  b.textContent = n ? (n > 9 ? '9+' : String(n)) : '';
+});
 function optionalPh(key) {
   const sep = (lang === 'en') ? ', ' : '，';
   return `${t('common.optional')}${sep}${t(key)}`;
@@ -513,6 +591,7 @@ function applyI18n() {
   });
   document.querySelectorAll('[data-i18n-title]').forEach(el => { el.setAttribute('title', t(el.dataset.i18nTitle)); });
   renderLangList();
+  window.collabRetranslate?.();
 }
 // 语言对应国旗 SVG(en 用美国旗,按要求)
 const FLAGS = {
@@ -665,12 +744,22 @@ function applyAppearance(nextApp, nextPlain, { persist } = { persist: true }) {
 /* ═══════════════ 侧边栏导航 ═══════════════ */
 const nav = document.getElementById('nav');
 const pages = document.querySelectorAll('#pages .page');
+let currentPage = 'chat';
+function gaGoPage(key) {
+  const item = nav?.querySelector(`.nav-item[data-page="${key}"]`);
+  if (!item) return;
+  currentPage = key;
+  nav.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n === item));
+  pages.forEach(p => p.classList.toggle('active', p.dataset.page === key));
+  renderSessionList();
+  window.gaSetActiveFileComposer?.(key === 'collab' ? 'collab' : 'chat');
+  if (key === 'collab') window.collabInit?.();
+}
+window.gaGoPage = gaGoPage;
 nav.addEventListener('click', (e) => {
   const item = e.target.closest('.nav-item');
   if (!item) return;
-  const key = item.dataset.page;
-  nav.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n === item));
-  pages.forEach(p => p.classList.toggle('active', p.dataset.page === key));
+  gaGoPage(item.dataset.page);
 });
 
 /* ═══════════════ 弹窗开关 ═══════════════ */
@@ -1313,7 +1402,7 @@ function renderSessionList() {
     const r = state.runtime.get(sess.id);
     const busy = !!(r && r.busy);
     const item = document.createElement('div');
-    item.className = 'conv-item' + (sess.id === state.activeId ? ' active' : '') + (busy ? '' : ' idle');
+    item.className = 'conv-item' + (currentPage === 'chat' && sess.id === state.activeId ? ' active' : '') + (busy ? '' : ' idle');
     item.dataset.id = sess.id;
     const pinSvg = sess.pinned ? `<svg class="ci-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3-1-6z"/></svg>` : '';
     item.innerHTML =
@@ -1485,8 +1574,9 @@ async function pollSession(sess) {
 function removeUsedPendingFiles(usedFiles) {
   if (!usedFiles.length) return;
   const usedSids = new Set(usedFiles.map(f => f.sid));
+  const touched = new Set(usedFiles.map(f => fileCtx(f)));
   state.pendingFiles = state.pendingFiles.filter(f => !usedSids.has(f.sid));
-  renderThumbStrip();
+  touched.forEach(ctx => renderThumbStrip(ctx));
 }
 
 function clearDraft(sess) {
@@ -1702,6 +1792,8 @@ document.querySelectorAll('.feature-grid').forEach(grid => {
       return;
     }
     if (!key) { inputEl.focus(); closeModals(); return; }
+    const bp = BUILTIN_PRESETS.find(p => p.key === key);
+    if (bp?.navigate) { closeModals(); gaGoPage(bp.navigate); window.collabFocus?.(); return; }
     const prompt = I18N[lang]['presetPrompt.' + key] || I18N.zh['presetPrompt.' + key];
     closeModals();
     if (prompt) sendPrompt(prompt);
@@ -2010,6 +2102,72 @@ const imgInput = document.getElementById('img-input');
 const thumbStrip = document.getElementById('thumb-strip');
 const uploadBtn = document.getElementById('upload-btn');
 const chatPanel = document.querySelector('main.main');
+let activeFileComposer = 'chat';
+
+function fileCtx(f) { return f.ctx || 'chat'; }
+function filesForCtx(ctx) { return state.pendingFiles.filter(f => fileCtx(f) === ctx); }
+
+function composerCfg(ctx = activeFileComposer) {
+  if (ctx === 'collab') {
+    return {
+      input: document.getElementById('collab-input'),
+      strip: document.getElementById('collab-thumb-strip'),
+      uploadBtn: document.getElementById('collab-upload-btn'),
+      imgInput: document.getElementById('collab-img-input'),
+      dropZone: document.querySelector('.collab-chat'),
+    };
+  }
+  return { input: inputEl, strip: thumbStrip, uploadBtn, imgInput, dropZone: chatPanel };
+}
+
+function renderThumbStrip(ctx = activeFileComposer) {
+  const cfg = composerCfg(ctx);
+  if (!cfg.strip) return;
+  const files = filesForCtx(ctx);
+  if (files.length === 0) {
+    cfg.strip.innerHTML = '';
+    cfg.strip.hidden = true;
+    return;
+  }
+  cfg.strip.innerHTML = files.map(f => {
+    if (f.isImage && f.dataUrl) {
+      return `<div class="thumb" data-sid="${f.sid}"><img src="${f.dataUrl}"><button class="x" data-sid="${f.sid}" data-i18n-title="upload.removeTitle" title="">×</button></div>`;
+    }
+    const name = f.name || 'file';
+    const label = name.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    const sub = fileSubLabel(name).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    const path = (f.path || '').replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+    const dataName = name.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+    return `<div class="file-chip pending" data-sid="${f.sid}" data-path="${path}" data-name="${dataName}"><span class="fc-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span><span class="fc-meta"><span class="fc-name">${label}</span><span class="fc-sub">${sub}</span></span><button class="x" data-sid="${f.sid}" data-i18n-title="upload.removeTitle" title="">×</button></div>`;
+  }).join('');
+  cfg.strip.hidden = false;
+  applyI18n();
+}
+
+function insertPlaceholderInComposer(marker, ctx = activeFileComposer) {
+  const input = composerCfg(ctx).input;
+  if (!input) return;
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? input.value.length;
+  const before = input.value.slice(0, start);
+  const after = input.value.slice(end);
+  const needSpace = before && !/\s$/.test(before);
+  const insertion = (needSpace ? ' ' : '') + marker + ' ';
+  input.value = before + insertion + after;
+  const caret = (before + insertion).length;
+  input.setSelectionRange(caret, caret);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.focus();
+}
+
+function removePlaceholderFromComposer(file) {
+  const input = composerCfg(fileCtx(file)).input;
+  if (!input) return;
+  const marker = placeholderFor(file);
+  const re = new RegExp('\\s?' + marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s?', '');
+  input.value = input.value.replace(re, ' ').replace(/  +/g, ' ').trim();
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
 
 function isImageFile(f) {
   return (f && (f.type || '').startsWith('image/')) || IMG_EXT_RE.test(f?.name || '');
@@ -2017,51 +2175,6 @@ function isImageFile(f) {
 
 function placeholderFor(file) {
   return file.isImage ? `[Image #${file.sid}]` : `[File #${file.sid}]`;
-}
-
-function renderThumbStrip() {
-  if (!thumbStrip) return;
-  if (state.pendingFiles.length === 0) {
-    thumbStrip.innerHTML = '';
-    thumbStrip.hidden = true;
-    return;
-  }
-  thumbStrip.innerHTML = state.pendingFiles.map(f => {
-    if (f.isImage && f.dataUrl) {
-      return `<div class="thumb" data-sid="${f.sid}"><img src="${f.dataUrl}"><button class="x" data-sid="${f.sid}" data-i18n-title="upload.removeTitle" title="">×</button></div>`;
-    }
-    const name = f.name || 'file';
-    const label = name.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-    const sub = fileSubLabel(name).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-    const path = (f.path || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-    const dataName = name.replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-    return `<div class="file-chip pending" data-sid="${f.sid}" data-path="${path}" data-name="${dataName}"><span class="fc-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span><span class="fc-meta"><span class="fc-name">${label}</span><span class="fc-sub">${sub}</span></span><button class="x" data-sid="${f.sid}" data-i18n-title="upload.removeTitle" title="">×</button></div>`;
-  }).join('');
-  thumbStrip.hidden = false;
-  applyI18n();
-}
-
-function insertPlaceholderInComposer(marker) {
-  if (!inputEl) return;
-  const start = inputEl.selectionStart ?? inputEl.value.length;
-  const end = inputEl.selectionEnd ?? inputEl.value.length;
-  const before = inputEl.value.slice(0, start);
-  const after = inputEl.value.slice(end);
-  const needSpace = before && !/\s$/.test(before);
-  const insertion = (needSpace ? ' ' : '') + marker + ' ';
-  inputEl.value = before + insertion + after;
-  const caret = (before + insertion).length;
-  inputEl.setSelectionRange(caret, caret);
-  inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-  inputEl.focus();
-}
-
-function removePlaceholderFromComposer(file) {
-  if (!inputEl) return;
-  const marker = placeholderFor(file);
-  const re = new RegExp('\\s?' + marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s?', '');
-  inputEl.value = inputEl.value.replace(re, ' ').replace(/  +/g, ' ').trim();
-  inputEl.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 function expandFilePlaceholders(text) {
@@ -2109,11 +2222,16 @@ async function addFiles(fileList) {
     if (skipped) showChanToast(t('upload.tooLarge'), '', 'err');
     return;
   }
-  // group uploads under the active session (create one if there's none yet)
-  let upSess = activeSess();
-  if (!upSess) { await newSession(); upSess = activeSess(); }
-  if (upSess && !upSess.bridgeSessionId) { try { await ensureBridgeSession(upSess); } catch (_) {} }
-  const uploadSid = (upSess && upSess.bridgeSessionId) || '';
+  const ctx = activeFileComposer;
+  let uploadSid = '';
+  if (ctx === 'collab') {
+    uploadSid = 'collab';
+  } else {
+    let upSess = activeSess();
+    if (!upSess) { await newSession(); upSess = activeSess(); }
+    if (upSess && !upSess.bridgeSessionId) { try { await ensureBridgeSession(upSess); } catch (_) {} }
+    uploadSid = (upSess && upSess.bridgeSessionId) || '';
+  }
   for (const f of accepted) {
     try {
       const dataUrl = await new Promise((resolve, reject) => {
@@ -2129,10 +2247,11 @@ async function addFiles(fileList) {
       const entry = {
         sid, name: f.name || 'file', isImage, path,
         dataUrl: isImage ? dataUrl : '',
+        ctx,
       };
       state.pendingFiles.push(entry);
-      insertPlaceholderInComposer(placeholderFor(entry));
-      renderThumbStrip();
+      insertPlaceholderInComposer(placeholderFor(entry), ctx);
+      renderThumbStrip(ctx);
     } catch (e) {
       showChanToast(t('upload.failed'), e.message || String(e), 'err');
     }
@@ -2140,26 +2259,16 @@ async function addFiles(fileList) {
   if (skipped) showChanToast(t('upload.tooLarge'), '', 'err');
 }
 
-if (uploadBtn && imgInput) uploadBtn.addEventListener('click', (e) => {
-  e.preventDefault();
-  imgInput.click();
-});
-
-if (imgInput) imgInput.addEventListener('change', () => {
-  addFiles(imgInput.files);
-  imgInput.value = '';
-});
-
-if (thumbStrip) thumbStrip.addEventListener('click', (e) => {
+function handleThumbStripClick(e, ctx) {
   const x = e.target.closest('.x');
   if (x) {
     const sid = Number(x.dataset.sid);
-    const idx = state.pendingFiles.findIndex(f => f.sid === sid);
+    const idx = state.pendingFiles.findIndex(f => f.sid === sid && fileCtx(f) === ctx);
     if (idx >= 0) {
       const removed = state.pendingFiles[idx];
       state.pendingFiles.splice(idx, 1);
       removePlaceholderFromComposer(removed);
-      renderThumbStrip();
+      renderThumbStrip(ctx);
       if (removed.path) {
         fetch(`http://${location.hostname}:14168/upload`, {
           method: 'DELETE',
@@ -2179,51 +2288,25 @@ if (thumbStrip) thumbStrip.addEventListener('click', (e) => {
   }
   const img = e.target.closest('img');
   if (img && img.src) openLightbox(img.src);
-});
-
-/* ─── drag & drop on chat panel ─── */
-if (chatPanel) {
-  let dragDepth = 0;
-  const hasFiles = (e) => {
-    const types = e.dataTransfer && e.dataTransfer.types;
-    if (!types) return false;
-    for (let i = 0; i < types.length; i += 1) {
-      if (types[i] === 'Files') return true;
-    }
-    return false;
-  };
-  // Prevent the browser from opening dropped files outside chatPanel.
-  window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
-  window.addEventListener('drop',     (e) => { if (hasFiles(e)) e.preventDefault(); });
-  chatPanel.addEventListener('dragenter', (e) => {
-    if (!hasFiles(e)) return;
-    e.preventDefault();
-    dragDepth += 1;
-    chatPanel.classList.add('dragover');
-    chatPanel.dataset.dropHint = t('upload.dropHint');
-  });
-  chatPanel.addEventListener('dragover', (e) => {
-    if (!hasFiles(e)) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-  });
-  chatPanel.addEventListener('dragleave', (e) => {
-    if (!hasFiles(e)) return;
-    dragDepth = Math.max(0, dragDepth - 1);
-    if (dragDepth === 0) chatPanel.classList.remove('dragover');
-  });
-  chatPanel.addEventListener('drop', (e) => {
-    if (!hasFiles(e)) return;
-    e.preventDefault();
-    dragDepth = 0;
-    chatPanel.classList.remove('dragover');
-    addFiles(e.dataTransfer.files);
-  });
 }
 
-/* ─── paste file/image into composer ─── */
-if (inputEl) {
-  inputEl.addEventListener('paste', (e) => {
+function bindComposerUpload(ctx) {
+  const cfg = composerCfg(ctx);
+  if (!cfg.uploadBtn || cfg.uploadBtn.dataset.bound) return;
+  cfg.uploadBtn.dataset.bound = '1';
+  cfg.uploadBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    activeFileComposer = ctx;
+    cfg.imgInput?.click();
+  });
+  cfg.imgInput?.addEventListener('change', () => {
+    activeFileComposer = ctx;
+    addFiles(cfg.imgInput.files);
+    cfg.imgInput.value = '';
+  });
+  cfg.strip?.addEventListener('click', (e) => handleThumbStripClick(e, ctx));
+  cfg.input?.addEventListener('paste', (e) => {
+    activeFileComposer = ctx;
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
     const files = [];
@@ -2237,6 +2320,66 @@ if (inputEl) {
     e.preventDefault();
     addFiles(files);
   });
+  const zone = cfg.dropZone;
+  if (!zone || zone.dataset.dropBound) return;
+  zone.dataset.dropBound = '1';
+  let dragDepth = 0;
+  const hasFiles = (e) => {
+    const types = e.dataTransfer && e.dataTransfer.types;
+    if (!types) return false;
+    for (let i = 0; i < types.length; i += 1) {
+      if (types[i] === 'Files') return true;
+    }
+    return false;
+  };
+  zone.addEventListener('dragenter', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    activeFileComposer = ctx;
+    dragDepth += 1;
+    zone.classList.add('dragover');
+    zone.dataset.dropHint = t('upload.dropHint');
+  });
+  zone.addEventListener('dragover', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    activeFileComposer = ctx;
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  zone.addEventListener('dragleave', (e) => {
+    if (!hasFiles(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) zone.classList.remove('dragover');
+  });
+  zone.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth = 0;
+    zone.classList.remove('dragover');
+    activeFileComposer = ctx;
+    addFiles(e.dataTransfer.files);
+  });
+}
+
+bindComposerUpload('chat');
+bindComposerUpload('collab');
+
+Object.assign(window, {
+  gaSetActiveFileComposer: ctx => { activeFileComposer = ctx === 'collab' ? 'collab' : 'chat'; },
+  gaExpandFilePlaceholders: expandFilePlaceholders,
+  gaCollectUsedFiles: collectUsedFiles,
+  gaClearUsedPendingFiles: text => removeUsedPendingFiles(collectUsedFiles(text)),
+  gaFileSubLabel: fileSubLabel,
+});
+
+if (chatPanel) {
+  const blockFileDrop = e => {
+    const types = e.dataTransfer?.types;
+    if (!types) return;
+    for (let i = 0; i < types.length; i += 1) if (types[i] === 'Files') { e.preventDefault(); return; }
+  };
+  window.addEventListener('dragover', blockFileDrop);
+  window.addEventListener('drop', blockFileDrop);
 }
 
 /* ═══════════════ bridge 事件 ═══════════════ */
@@ -2423,6 +2566,8 @@ const CP_KEY = 'ga_custom_presets';
 const HB_KEY = 'ga_hidden_builtins';
 
 const BUILTIN_PRESETS = [
+  { key: 'butler', titleKey: 'preset.butler.t', descKey: 'preset.butler.d', navigate: 'collab',
+    iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>' },
   { key: 'goal',    titleKey: 'preset.goal.t',    descKey: 'preset.goal.d',    promptKey: 'presetPrompt.goal',
     iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/></svg>' },
   { key: 'explore', titleKey: 'preset.explore.t', descKey: 'preset.explore.d', promptKey: 'presetPrompt.explore',
@@ -3016,4 +3161,371 @@ if (state.activeId) setActiveSession(state.activeId);
 else refreshEmptyState(null);
 runLabel.textContent = t('status.connecting');
 window.ga.startBridge && window.ga.startBridge();
+})();
+
+/* Conductor 页 — 直连 Conductor WS，不走 bridge session */
+(function () {
+  'use strict';
+  const wsUrl = () => `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.hostname}:8900/ws`;
+  const FAIL_MAX = 5, RECON_BASE = 1200, RECON_MAX = 30000;
+  const $ = id => document.getElementById(id);
+  const t = k => (window.gaT && window.gaT(k)) || k;
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const md = s => { try { return typeof marked !== 'undefined' ? marked.parse(s || '') : esc(s); } catch { return esc(s); } };
+  const stripAttach = text => String(text || '').replace(/\[(Image|File)\s+#\d+\]\s*/g, '').trim();
+  const FC_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+  const ST_ICONS = {
+    running: '<span class="collab-st-ic collab-st-ic--spin" aria-hidden="true"></span>',
+    reported: '<span class="collab-st-ic collab-st-ic--ok" aria-hidden="true">✓</span>',
+    paused: '<span class="collab-st-ic collab-st-ic--pause" aria-hidden="true">⏸</span>',
+    failed: '<span class="collab-st-ic collab-st-ic--warn" aria-hidden="true">!</span>',
+    terminated: '<span class="collab-st-ic collab-st-ic--off" aria-hidden="true">×</span>',
+  };
+  const ST_KEYS = { running: 'collab.stRunning', reported: 'collab.stReported', paused: 'collab.stPaused', failed: 'collab.stFailed', terminated: 'collab.stTerminated' };
+  const CHIP_KEYS = ['collab.chipProgress', 'collab.chipPause', 'collab.chipSummary'];
+
+  const S = {
+    everConnected: false, reconnecting: false, serviceAvailable: false,
+    messages: [], workers: [], runningCount: 0,
+    conductorTyping: false, failCount: 0,
+    historyReady: false, reconnectAt: 0, progressOpen: false,
+  };
+  let ws, connectTimer, reconnectTick, titleSeq = 0, wsGen = 0, localSeq = 0;
+  const titleSeen = new Map();
+
+  let draftEl = null;
+
+  const scrollMsgs = () => { const a = $('collab-msgs'); if (a) a.scrollTop = a.scrollHeight; };
+  const showDraft = () => S.conductorTyping && S.serviceAvailable && S.historyReady && S.messages.length > 0;
+
+  function clearDraft() {
+    if (draftEl) { draftEl.remove(); draftEl = null; }
+  }
+
+  function syncDraft() {
+    const list = $('collab-msg-list');
+    if (!list || list.hidden || !showDraft()) return clearDraft();
+    if (!draftEl) draftEl = document.createElement('div');
+    draftEl.className = 'msg system collab-msg-enter';
+    draftEl.setAttribute('aria-label', t('collab.typing'));
+    draftEl.innerHTML = '<div class="bubble sys"><span class="collab-wait-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>';
+    list.appendChild(draftEl);
+    requestAnimationFrame(scrollMsgs);
+  }
+
+  function relTime(ts) {
+    if (!ts) return '';
+    const ms = typeof ts === 'number' ? (ts > 1e12 ? ts : ts * 1000) : Date.parse(ts);
+    if (!ms || Number.isNaN(ms)) return '';
+    const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+    if (sec < 10) return t('collab.timeJust');
+    if (sec < 60) return t('collab.timeSec').replace('{n}', sec);
+    const min = Math.floor(sec / 60);
+    if (min < 60) return t('collab.timeMin').replace('{n}', min);
+    const hr = Math.floor(min / 60);
+    return hr < 24 ? t('collab.timeHr').replace('{n}', hr) : t('collab.timeDay').replace('{n}', Math.floor(hr / 24));
+  }
+
+  function mapStatus(status, reply) {
+    const r = (reply || '').trim();
+    if (status === 'running') return 'running';
+    if (status === 'failed') return 'failed';
+    if (status === 'aborted') return 'terminated';
+    if (status === 'stopped') return r ? 'reported' : 'paused';
+    return 'paused';
+  }
+
+  function normalizeWorker(raw) {
+    if (!titleSeen.has(raw.id)) titleSeen.set(raw.id, ++titleSeq);
+    const ui = mapStatus(raw.status, raw.reply);
+    let title = String(raw.prompt ?? '').replace(/^[\s请帮我麻烦]+/u, '').trim();
+    if (!title) title = t('collab.taskFallback').replace('{n}', titleSeen.get(raw.id));
+    else {
+      title = (title.split(/[\n。！？.!?]/)[0] || '').trim();
+      if (title.length > 18) title = title.slice(0, 18) + '…';
+    }
+    const reply = String(raw.reply || '').replace(/\s+/g, ' ').trim();
+    let summary = reply ? (reply.length > 80 ? reply.slice(0, 80) + '…' : reply) : t(ui === 'running' ? 'collab.summaryRunning' : 'collab.summaryWait');
+    return { id: raw.id, title, status: ui, summary, fullReply: raw.reply || '', updatedAt: raw.updated_at };
+  }
+
+  function syncProgressToggle() {
+    const btn = $('collab-progress-toggle'), body = $('collab-body');
+    if (!btn || !body) return;
+    const split = body.classList.contains('collab-body--split');
+    btn.hidden = !split;
+    body.classList.toggle('collab-progress-open', split && S.progressOpen);
+  }
+
+  function setConnUi() {
+    const off = $('collab-offline'), recon = $('collab-reconnect'), inp = $('collab-input'), btn = $('collab-send');
+    const avail = S.serviceAvailable;
+    const trying = !avail && !S.everConnected && S.failCount < FAIL_MAX;
+    if (off) off.hidden = avail || S.reconnecting || trying;
+    if (recon) {
+      recon.hidden = !S.reconnecting;
+      recon.textContent = S.reconnecting && S.reconnectAt > Date.now()
+        ? t('collab.reconnect') + ' ' + t('collab.reconnectIn').replace('{n}', Math.ceil((S.reconnectAt - Date.now()) / 1000))
+        : t('collab.reconnect');
+    }
+    if (inp) inp.disabled = !avail;
+    if (btn) btn.disabled = !avail;
+    syncDraft();
+    syncProgressToggle();
+  }
+
+  let cardMenu = null;
+  function hideCardMenu() { if (cardMenu) { cardMenu.remove(); cardMenu = null; } }
+  function showCardMenu(x, y, sid) {
+    hideCardMenu();
+    cardMenu = document.createElement('div');
+    cardMenu.className = 'ctx-menu';
+    cardMenu.style.left = x + 'px';
+    cardMenu.style.top = y + 'px';
+    cardMenu.innerHTML = '<div class="ctx-item danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>删除</div>';
+    cardMenu.querySelector('.ctx-item').onmousedown = (e) => {
+      e.stopPropagation();
+      fetch(`http://${location.hostname}:8900/subagent/${sid}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'kill' }) });
+      hideCardMenu();
+    };
+    document.body.appendChild(cardMenu);
+    setTimeout(() => document.addEventListener('mousedown', hideCardMenu, { once: true }), 0);
+  }
+
+  let drawerEl = null;
+  function closeWorkerDrawer() { if (drawerEl) { drawerEl.remove(); drawerEl = null; } }
+  function openWorkerDrawer(w) {
+    closeWorkerDrawer();
+    drawerEl = document.createElement('div');
+    drawerEl.className = 'collab-drawer-wrap';
+    drawerEl.innerHTML = `<div class="collab-drawer-backdrop"></div><aside class="collab-drawer"><div class="collab-drawer-head"><span class="collab-drawer-title">${esc(w.title)}</span><button class="modal-x collab-drawer-close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div><div class="collab-drawer-body">${md(w.fullReply || t('collab.summaryWait'))}</div></aside>`;
+    drawerEl.querySelector('.collab-drawer-backdrop').onclick = closeWorkerDrawer;
+    drawerEl.querySelector('.collab-drawer-close').onclick = closeWorkerDrawer;
+    document.body.appendChild(drawerEl);
+  }
+
+  function renderWorkers() {
+    const box = $('collab-workers'), empty = $('collab-progress-empty');
+    if (!box) return;
+    if (empty) empty.hidden = S.workers.length > 0;
+    box.innerHTML = S.workers.map(w => `
+      <article class="collab-card collab-card--${w.status}" data-sid="${esc(w.id)}">
+        <div class="collab-card-st">${ST_ICONS[w.status] || ''}<span class="collab-dot"></span>${esc(t(ST_KEYS[w.status] || 'collab.stPaused'))}${w.updatedAt ? `<span class="collab-card-time">${esc(relTime(w.updatedAt))}</span>` : ''}</div>
+        <div class="collab-card-title">${esc(w.title)}</div>
+        <div class="collab-card-sum">${esc(w.summary)}</div>
+      </article>`).join('');
+    box.querySelectorAll('.collab-card').forEach(el => {
+      el.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        showCardMenu(e.clientX, e.clientY, el.dataset.sid);
+      });
+      el.addEventListener('click', () => {
+        const w = S.workers.find(w => w.id === el.dataset.sid);
+        if (w) openWorkerDrawer(w);
+      });
+    });
+    const running = S.workers.filter(w => w.status === 'running').length;
+    S.runningCount = running;
+    document.dispatchEvent(new CustomEvent('collab:running-count', { detail: { count: running } }));
+    const sticky = $('collab-sticky');
+    if (sticky) { sticky.hidden = !running; sticky.textContent = t('collab.sticky').replace('{n}', running); }
+    const stats = $('collab-progress-stats');
+    if (stats) {
+      const has = S.workers.length > 0;
+      stats.hidden = !has;
+      if (has) stats.textContent = t('collab.progressStats')
+        .replace('{running}', running)
+        .replace('{done}', S.workers.filter(w => w.status === 'reported').length)
+        .replace('{issue}', S.workers.filter(w => w.status === 'failed' || w.status === 'terminated').length);
+    }
+  }
+
+  function renderUserMsg(item) {
+    const sub = n => (window.gaFileSubLabel && window.gaFileSubLabel(n)) || n;
+    const imgs = (item.images || []).map(im => `<img src="${esc(im.dataUrl || '')}" alt="">`).join('');
+    const files = (item.files || []).map(f => {
+      const name = f.name || 'file';
+      return `<div class="file-chip" data-path="${esc(f.path || '')}" data-name="${esc(name)}"><span class="fc-icon">${FC_SVG}</span><span class="fc-meta"><span class="fc-name">${esc(name)}</span><span class="fc-sub">${esc(sub(name))}</span></span></div>`;
+    }).join('');
+    const clean = stripAttach(item.msg);
+    const text = clean ? `<div class="bubble">${esc(clean).replace(/\n/g, '<br>')}</div>` : '';
+    return `<div class="msg user collab-msg-enter"><div class="user-stack">${files ? `<div class="user-files">${files}</div>` : ''}${imgs ? `<div class="user-imgs">${imgs}</div>` : ''}${text}</div></div>`;
+  }
+
+  function renderMsg(item) {
+    if (item.role === 'user') return renderUserMsg(item);
+    if (item.role === 'conductor') return `<div class="msg assistant collab-msg-enter"><div class="bubble md">${md(item.msg)}</div></div>`;
+    return `<div class="msg system collab-msg-enter"><div class="bubble sys">${esc(item.msg)}</div></div>`;
+  }
+
+  function syncLayout() {
+    const body = $('collab-body');
+    if (!body) return;
+    body.classList.toggle('collab-body--split', S.historyReady && S.messages.length > 0);
+    syncProgressToggle();
+  }
+
+  function syncMessages() {
+    const area = $('collab-msgs'), welcome = $('collab-welcome'), list = $('collab-msg-list'), head = $('collab-chat-head');
+    if (!area || !list) return;
+    if (!S.historyReady) {
+      area.classList.remove('has-msgs');
+      if (welcome) welcome.hidden = true;
+      if (head) head.hidden = true;
+      list.hidden = true;
+      return syncLayout();
+    }
+    const has = S.messages.length > 0;
+    area.classList.toggle('has-msgs', has);
+    if (welcome) welcome.hidden = has;
+    if (head) head.hidden = !has;
+    list.hidden = !has;
+    list.innerHTML = S.messages.map(renderMsg).join('');
+    syncDraft();
+    scrollMsgs();
+    syncLayout();
+  }
+
+  function pushMsg(item) {
+    if (item.id && S.messages.some(m => m.id === item.id)) return;
+    if (item.role === 'user') {
+      const plain = stripAttach(item.msg);
+      for (let i = S.messages.length - 1; i >= 0; i--) {
+        const m = S.messages[i];
+        if (m._local && m.role === 'user' && (stripAttach(m.msg) === plain || m.msg === item.msg)) {
+          S.messages.splice(i, 1);
+          break;
+        }
+      }
+    }
+    S.messages.push(item);
+    if (item.role === 'conductor') S.conductorTyping = false;
+    syncMessages();
+    setConnUi();
+  }
+
+  function setWorkers(rawList) {
+    S.workers = (rawList || []).map(normalizeWorker);
+    renderWorkers();
+    syncLayout();
+  }
+
+  function onWsData(data, gen) {
+    if (gen !== wsGen) return;
+    if (data.type === 'hello') {
+      S.historyReady = true;
+      S.messages = (data.chat || []).map(raw => ({ id: raw.id, role: raw.role || 'system', msg: raw.msg || '', ts: raw.ts, read: raw.read }));
+      setWorkers(data.subagents || []);
+      syncMessages();
+      setConnUi();
+    } else if (data.type === 'subagents') setWorkers(data.items || []);
+    else if (data.type === 'chat') pushMsg({ id: data.item.id, role: data.item.role || 'system', msg: data.item.msg || '', ts: data.item.ts, read: data.item.read });
+  }
+
+  function resetWs() {
+    wsGen++;
+    if (!ws) return;
+    const old = ws;
+    ws = null;
+    old.onopen = old.onclose = old.onerror = old.onmessage = null;
+    try { old.close(); } catch {}
+  }
+
+  function scheduleReconnect() {
+    clearTimeout(connectTimer);
+    clearInterval(reconnectTick);
+    if (!S.everConnected && S.failCount >= FAIL_MAX) {
+      S.reconnecting = false;
+      return setConnUi();
+    }
+    const delay = Math.min(RECON_MAX, RECON_BASE * Math.pow(2, Math.max(0, S.failCount - 1)));
+    S.reconnectAt = Date.now() + delay;
+    S.reconnecting = S.everConnected;
+    setConnUi();
+    reconnectTick = setInterval(() => { if (!S.reconnecting) clearInterval(reconnectTick); else setConnUi(); }, 500);
+    connectTimer = setTimeout(connect, delay);
+  }
+
+  function connect() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    clearTimeout(connectTimer);
+    clearInterval(reconnectTick);
+    const gen = ++wsGen;
+    setConnUi();
+    let sock;
+    try { sock = new WebSocket(wsUrl()); } catch (e) {
+      if (gen !== wsGen) return;
+      S.failCount++;
+      return scheduleReconnect();
+    }
+    ws = sock;
+    sock.onopen = () => {
+      if (gen !== wsGen) return;
+      S.everConnected = true;
+      S.serviceAvailable = true;
+      S.reconnecting = false;
+      S.failCount = 0;
+      setConnUi();
+    };
+    sock.onclose = (ev) => {
+      if (gen !== wsGen) return;
+      S.serviceAvailable = false;
+      if (S.everConnected) S.reconnecting = true;
+      else S.failCount++;
+      setConnUi();
+      scheduleReconnect();
+    };
+    sock.onerror = () => {};
+    sock.onmessage = ev => {
+      if (gen !== wsGen) return;
+      try { onWsData(JSON.parse(ev.data), gen); } catch {}
+    };
+  }
+
+  function sendText(rawText) {
+    const text = (rawText || '').trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return false;
+    const expand = window.gaExpandFilePlaceholders || (s => s);
+    const collect = window.gaCollectUsedFiles || (() => []);
+    const clearUsed = window.gaClearUsedPendingFiles || (() => {});
+    const used = collect(text);
+    const images = [], files = [];
+    for (const f of used) (f.isImage ? images : files).push(f.isImage ? { path: f.path, dataUrl: f.dataUrl } : { path: f.path, name: f.name });
+    S.messages.push({ id: `_local_${++localSeq}`, _local: true, role: 'user', msg: text, ts: Date.now() / 1000, images, files });
+    S.conductorTyping = true;
+    syncMessages();
+    ws.send(JSON.stringify({ msg: expand(text) }));
+    clearUsed(text);
+    const inp = $('collab-input');
+    if (inp && inp.value.trim() === text) inp.value = '';
+    setConnUi();
+    return true;
+  }
+
+  function buildChips() {
+    const box = $('collab-chips');
+    if (box) box.innerHTML = CHIP_KEYS.map(k => `<button type="button" class="chip sm collab-chip" data-text-key="${k}">${esc(t(k))}</button>`).join('');
+  }
+
+  $('collab-send')?.addEventListener('click', () => sendText($('collab-input')?.value || ''));
+  $('collab-retry')?.addEventListener('click', () => { S.failCount = 0; S.reconnecting = false; resetWs(); connect(); });
+  $('collab-input')?.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(e.target.value); } });
+  $('collab-chips')?.addEventListener('click', e => { const k = e.target.closest('.collab-chip')?.dataset.textKey; if (k) sendText(t(k)); });
+  $('collab-progress-toggle')?.addEventListener('click', () => { S.progressOpen = !S.progressOpen; syncProgressToggle(); });
+  document.querySelector('[data-page="collab"]')?.addEventListener('click', e => {
+    if (!S.progressOpen || e.target.closest('.collab-progress') || e.target.closest('#collab-progress-toggle')) return;
+    S.progressOpen = false;
+    syncProgressToggle();
+  });
+
+  window.collabInit = () => {
+    window.gaSetActiveFileComposer?.('collab');
+    buildChips();
+    syncMessages();
+    setConnUi();
+    renderWorkers();
+    connect();
+  };
+  window.collabFocus = () => $('collab-input')?.focus();
+  window.collabRetranslate = () => { buildChips(); renderWorkers(); syncMessages(); setConnUi(); };
 })();
