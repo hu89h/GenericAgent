@@ -3569,6 +3569,8 @@ class GenericAgentTUI(App[None]):
 
     def _cmd_stop(self, args, raw):
         sess = self.current
+        last_user_text = next((m.content for m in reversed(sess.messages)
+                               if m.role == "user"), None)
         try:
             sess.agent.abort()
             if sess.status == "running":
@@ -3577,6 +3579,22 @@ class GenericAgentTUI(App[None]):
             self._system(f"Stop sent to #{sess.agent_id}.")
         except Exception as e:
             self._system(f"Stop failed: {e}")
+        # Refill the input box with the interrupted user text so edit-and-
+        # resend is one keystroke away. Only when the box is empty (don't
+        # clobber a half-typed follow-up). Agent history is untouched — a
+        # resend duplicates the turn in LLM context; `/rewind 1` is the
+        # manual escape.
+        if last_user_text:
+            try:
+                inp = self.query_one("#input", InputArea)
+                if not inp.text:
+                    inp.text = last_user_text
+                    inp.move_cursor((inp.document.line_count - 1,
+                                     len(last_user_text.split("\n")[-1])))
+                    inp.focus()
+                    self._resize_input(inp)
+            except Exception:
+                pass
         self._refresh_all()
 
     def _cmd_reload_keys(self, args, raw):
@@ -3792,9 +3810,21 @@ class GenericAgentTUI(App[None]):
             self._plan_mtime.pop(sess.agent_id, None)
             for h in continue_extract(path):
                 sess.messages.append(ChatMessage(role=h["role"], content=h["content"]))
-            # Baseline past restored history so the scanner ignores the prior
-            # session's plan.md; only re-shows on a fresh enter_plan_mode.
-            sess.plan_scan_baseline = len(sess.messages)
+            # baseline=0 lets the scanner see prior plan_X/plan.md refs so an
+            # unfinished plan resumes after /continue. Only when the restored
+            # plan.md is already all-done do we push baseline past history to
+            # suppress the stale ✓ card.
+            sess.plan_scan_baseline = 0
+            import plan_state
+            pp = plan_state.resolve_path(sess.agent, messages=sess.messages)
+            if pp and os.path.isfile(pp):
+                try:
+                    with open(pp, encoding="utf-8", errors="replace") as f:
+                        items = plan_state.extract(f.read())
+                    if items and plan_state.is_complete(items):
+                        sess.plan_scan_baseline = len(sess.messages)
+                except OSError:
+                    pass
             try:
                 import session_names
                 nm = session_names.name_for(path)
