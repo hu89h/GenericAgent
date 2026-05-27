@@ -1487,6 +1487,11 @@ _MARK = _ACCENT + '❯' + _RST             # prompt mark — the single accent
 _SHELL_ACCENT = '\x1b[38;5;205m'         # hot pink for border / prompt mark
 _SHELL_BG = '\x1b[48;2;65;60;65m'        # 65,60,65 charcoal-magenta (per spec)
 _SHELL_MARK = _SHELL_ACCENT + '!' + _RST
+# Full-row tile for committed shell rows (echo + each output line), so the
+# pair reads as one block in scrollback, matching cc-style.  Slightly
+# warmer than _TILE_U (55,55,55) so the two row kinds are distinguishable
+# when interleaved.  Black-terminal only — light themes get the bare band.
+_TILE_SHELL = '\x1b[48;2;65;60;65m\x1b[38;2;230;230;230m'
 _BG_TOK = {str(n) for n in list(range(40, 48)) + [49] + list(range(100, 108))}
 _SGR_RE = re.compile(r'\x1b\[([0-9;]*)m')
 _CSI_ERASE_RE = re.compile(r'\x1b\[[0-9;?]*[JK]')
@@ -3076,8 +3081,12 @@ class SB:
         territory, not a magic prompt."""
         if not cmd:
             return
-        # Echo the command line as committed scrollback (hot-pink prompt).
-        self.commit([_SHELL_ACCENT + '! ' + _RST + cmd])
+        w = _term()[0]
+        # Echo the command line as a full-width charcoal tile (cc-style):
+        # pink `!` prompt embedded; `_tile` re-asserts the bg around every
+        # internal _RST so the pink fg coexists with the band.
+        head = _SHELL_ACCENT + '! ' + _RST + cmd
+        self.commit([_tile(' ' + head, _TILE_SHELL, w)])
         import subprocess
         out = ''
         rc = 0
@@ -3095,9 +3104,12 @@ class SB:
         body = (out.rstrip('\n') or _t('shell.empty')).split('\n')
         rows: list[str] = []
         for i, ln in enumerate(body):
-            prefix = _DIM + '  └ ' + _RST if i == 0 else _DIM + '    ' + _RST
-            rows.append(prefix + ln)
-        rows.append('')
+            # `└ ` only on the first line so multi-line output reads as a
+            # continuation block, not a sequence of separate hits.
+            prefix = '  └ ' if i == 0 else '    '
+            rows.append(_tile(' ' + prefix + ln, _TILE_SHELL, w))
+        rows.append('')   # bare blank gap separates the shell pair from
+                          #  the next chat block — no band on the gap row
         self.commit(rows)
         # Persist the exchange so the agent sees it on its next turn.
         # Splitting on `is_running` avoids racing the agent thread:
