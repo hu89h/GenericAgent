@@ -23,11 +23,69 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import subprocess
 import time
 from pathlib import Path
 from typing import Optional
+
+
+_USER_SHELL: tuple[list[str], str] | None = None
+
+
+def detect_user_shell() -> tuple[list[str], str]:
+    """Return `([executable, ...flags_for_-c], display_name)` for the user's
+    interactive shell.  Cached after first call.
+
+    `!cmd` in tui_v2 / tui_v3 invokes this so commands like `ls`, pipes,
+    globs, and shell builtins behave the way the user expects in whatever
+    shell launched the app — matching Claude Code / Codex CLI semantics.
+
+    Resolution order:
+      1. `$SHELL` if it points to an existing file (Unix, Git Bash, WSL)
+      2. Windows only: Git Bash at the canonical install paths
+      3. `bash` anywhere on PATH (WSL bash, Cygwin, MSYS2, etc.)
+      4. Windows only: `pwsh` then `powershell.exe` on PATH
+      5. Unix `/bin/sh` / Windows `%COMSPEC%` (cmd.exe) — last resort
+    """
+    global _USER_SHELL
+    if _USER_SHELL is not None:
+        return _USER_SHELL
+
+    s = os.environ.get("SHELL")
+    if s and os.path.exists(s):
+        name = os.path.basename(s)
+        if name.lower().endswith(".exe"):
+            name = name[:-4]
+        _USER_SHELL = ([s, "-c"], name)
+        return _USER_SHELL
+
+    if sys.platform == "win32":
+        for p in (
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ):
+            if os.path.exists(p):
+                _USER_SHELL = ([p, "-c"], "bash")
+                return _USER_SHELL
+        bash = shutil.which("bash")
+        if bash:
+            _USER_SHELL = ([bash, "-c"], "bash")
+            return _USER_SHELL
+        for name in ("pwsh", "powershell"):
+            p = shutil.which(name)
+            if p:
+                # -NoProfile keeps each `!cmd` snappy + reproducible.
+                _USER_SHELL = ([p, "-NoProfile", "-Command"], name)
+                return _USER_SHELL
+        cmd = os.environ.get("COMSPEC", "cmd.exe")
+        _USER_SHELL = ([cmd, "/d", "/s", "/c"], "cmd")
+        return _USER_SHELL
+
+    _USER_SHELL = (["/bin/sh", "-c"], "sh")
+    return _USER_SHELL
+
 
 
 # Repo root = parent of frontends/.  Avoid hard-coding; both TUIs live next to

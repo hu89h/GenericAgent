@@ -368,7 +368,7 @@ _I18N: dict[str, dict[str, str]] = {
         'shell.timeout':        '[shell: timeout {sec}s]',
         'shell.error':          '[shell error: {err}]',
         'shell.empty':          '(no output)',
-        'shell.history':        '[!shell] {cmd}\n```\n{out}\n```\n(exit {rc})',
+        'shell.history':        '[!shell {sh}] {cmd}\n```\n{out}\n```\n(exit {rc})',
 
         # /resume
         'cmd.resume.desc':      'list recent sessions and pick one to recover',
@@ -612,7 +612,7 @@ _I18N: dict[str, dict[str, str]] = {
         'shell.timeout':        '[shell：{sec}s 超时]',
         'shell.error':          '[shell 错误：{err}]',
         'shell.empty':          '（无输出）',
-        'shell.history':        '[!shell] {cmd}\n```\n{out}\n```\n（退出码 {rc}）',
+        'shell.history':        '[!shell {sh}] {cmd}\n```\n{out}\n```\n（退出码 {rc}）',
 
         # /resume
         'cmd.resume.desc':      '列出最近会话并恢复其中一个',
@@ -3091,11 +3091,13 @@ class SB:
         head = _SHELL_ACCENT + '! ' + _RST + cmd
         self.commit([_tile(' ' + head, _TILE_SHELL, w)])
         import subprocess
+        from frontends.slash_cmds import detect_user_shell
+        shell_argv, shell_name = detect_user_shell()
         out = ''
         rc = 0
         try:
             r = subprocess.run(
-                cmd, shell=True, capture_output=True,
+                shell_argv + [cmd], capture_output=True,
                 timeout=30, encoding='utf-8', errors='replace',
             )
             out = (r.stdout or '') + (r.stderr or '')
@@ -3123,7 +3125,7 @@ class SB:
         #   idle    → direct append to backend.history is safe — there's
         #             no concurrent reader.
         try:
-            txt = _t('shell.history', cmd=cmd, out=out.rstrip(), rc=rc)
+            txt = _t('shell.history', sh=shell_name, cmd=cmd, out=out.rstrip(), rc=rc)
             if (self._bridge is not None
                     and getattr(self._bridge.agent, 'is_running', False)):
                 self._bridge.inject_intervene(txt)

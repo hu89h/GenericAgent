@@ -4447,12 +4447,10 @@ class GenericAgentTUI(App[None]):
         self._reset_terminal_title()
 
     def _run_shell(self, cmd: str) -> None:
-        """`!cmd` magic: run `cmd` in the host shell, echo command + output
-        into the current session's scrollback, and append a `[!shell]` pair
-        to backend.history so the agent can reference it on the next turn.
-
-        Output capture is utf-8 / replace; 30 s timeout — anything longer
-        belongs in /conductor or a proper tool call, not a one-liner."""
+        """`!cmd` magic: run `cmd` in the user's shell (Git Bash / pwsh /
+        sh — see `detect_user_shell`), echo command + output into the
+        current session's scrollback, and append a `[!shell]` pair to
+        backend.history so the agent sees it on the next turn."""
         if not cmd:
             return
         sess = self.current
@@ -4460,10 +4458,12 @@ class GenericAgentTUI(App[None]):
                                          f"! {cmd}",
                                          kind="system"))
         import subprocess
+        from frontends.slash_cmds import detect_user_shell
+        shell_argv, shell_name = detect_user_shell()
         out = ''; rc = 0
         try:
             r = subprocess.run(
-                cmd, shell=True, capture_output=True,
+                shell_argv + [cmd], capture_output=True,
                 timeout=30, encoding='utf-8', errors='replace',
             )
             out = (r.stdout or '') + (r.stderr or '')
@@ -4478,12 +4478,11 @@ class GenericAgentTUI(App[None]):
         sess.messages.append(ChatMessage("system", formatted, kind="system"))
         if sess.agent_id == self.current_id:
             self._refresh_messages()
-        # Splice the exchange into LLM history.
         try:
             be = getattr(sess.agent, 'llmclient', None)
             be = getattr(be, 'backend', None) if be is not None else None
             if be is not None and hasattr(be, 'history'):
-                txt = f"[!shell] {cmd}\n```\n{out.rstrip()}\n```\n(exit {rc})"
+                txt = f"[!shell {shell_name}] {cmd}\n```\n{out.rstrip()}\n```\n(exit {rc})"
                 be.history.append({"role": "user",
                                    "content": [{"type": "text", "text": txt}]})
         except Exception:
