@@ -102,6 +102,8 @@ _TIPS = {
         "Tip: /scheduler is live — untick a running row to stop it; tick again to relaunch.",
         "Tip: Ctrl+S stashes your draft input — it's waiting for you next time you open a picker.",
         "Tip: /scheduler lists reflect tasks and starts them via `/scheduler start a,b,c`.",
+        "Tip: prefix `!` runs the rest as a host shell command — output is folded into LLM history.",
+        "Tip: /resume lists recent sessions you can pick from to restore prior context.",
     ],
     'zh': [
         "Tip: 按 / 唤起命令面板 —— 方向键选择，Enter 落入输入框。",
@@ -119,6 +121,8 @@ _TIPS = {
         "Tip: /update 是双分支 upstream 同步 —— 先 diff 预演，再分别快进。",
         "Tip: /scheduler 里再点一下已勾选的任务可以 stop —— 取消勾选 = 停止。",
         "Tip: Ctrl+S 把当前输入 stash 起来，下次 / 打开 picker 时还在。",
+        "Tip: 以 `!` 开头直接跑 shell —— 命令与输出都会进入 LLM 历史，agent 可以引用。",
+        "Tip: /resume 列出最近会话，可挑选一个恢复之前的上下文。",
     ],
 }
 
@@ -146,6 +150,14 @@ _I18N: dict[str, dict[str, str]] = {
         'help.export':          '  /export [sub]        Export last reply: clip / file [name] / all',
         'help.stop':            '  /stop                Abort current task',
         'help.language':        '  /language [code]     View / switch interface language',
+        'help.update':          '  /update [note]       Preview upstream commits & diff, then pull (no commit)',
+        'help.autorun':         '  /autorun [seed]      Enter autonomous-operation mode',
+        'help.morphling':       '  /morphling [target]  Distill / absorb an external skill',
+        'help.goal':            '  /goal [goal]         Enter Goal mode (asks for budget / worker cap)',
+        'help.hive':            '  /hive [target]       Enter Hive multi-worker mode',
+        'help.conductor':       '  /conductor [task]    Hand task to conductor.py for multi-subagent run',
+        'help.scheduler':       '  /scheduler           Multi-pick reflect tasks / view cron',
+        'help.emoji':           '  /emoji [style]       Pick the spinner pet face (picker / direct switch)',
         'help.quit':            '  /quit                Quit',
         'help.esc':             '  Esc                  Cancel ask · clear draft · stop task (no exit)',
         'help.cc':              '  Ctrl+C × 2           Quit (when idle; only aborts the task while running)',
@@ -193,7 +205,9 @@ _I18N: dict[str, dict[str, str]] = {
         'cmd.hive.desc':        'enter Hive multi-worker mode',
         'cmd.conductor.arg':    '[task]',
         'cmd.conductor.desc':   'hand task to frontends/conductor.py for multi-subagent orchestration',
-        'cmd.scheduler.desc':   'multi-pick reflect tasks / show cron',
+        'cmd.scheduler.desc':   'multi-pick start/stop reflect tasks (cron is driven by reflect/scheduler.py)',
+        'cmd.emoji.arg':        '[style]',
+        'cmd.emoji.desc':       'pick the spinner pet face — opens picker; arg switches directly',
 
         # status line (one-liner above input box)
         'status.asking':        '◉ waiting · Esc cancel',
@@ -296,9 +310,19 @@ _I18N: dict[str, dict[str, str]] = {
         # llm picker
         'llm.title':            'Switch LLM',
 
+        # emoji picker (pet style)
+        'emoji.title':          'Pick spinner pet style',
+        'emoji.switched':       'pet style → `{style}`',
+        'emoji.unknown':        'unknown style `{choice}` — valid: {valid}',
+        'emoji.row.current':    '● {name:<8} {sample}',
+        'emoji.row.other':      '  {name:<8} {sample}',
+        'emoji.row.off':        '(hide pet)',
+
         # /scheduler picker (multi-pick reflect tasks / frontends)
         'scheduler.pick.title':   'Pick services — checked = running (untick to stop)',
         'scheduler.pick.hint':    'Space toggle · ↑↓ move · Enter next · Esc cancel · or /scheduler start a,b,c',
+        'scheduler.cron.active':  'cron: {n} task(s) in sche_tasks/*.json · active (reflect/scheduler.py running)',
+        'scheduler.cron.inactive': 'cron: {n} task(s) in sche_tasks/*.json · inactive (start reflect/scheduler.py to schedule)',
         'scheduler.empty':        '(no startable services: both reflect/*.py and frontends/*app*.py are empty)',
         'scheduler.no_pick':      '(no service picked)',
         'scheduler.no_change':    '(no change vs running set)',
@@ -333,6 +357,23 @@ _I18N: dict[str, dict[str, str]] = {
 
         # answer prefix when committing user reply to ask_user
         'msg.answer_prefix':    '[ans] {text}',
+
+        # pending input preview (queued while agent is busy)
+        'pending.head_running':  'queued {n} (agent busy) · ↑ amend · Esc clear',
+        'pending.head_cooldown': 'queued {n} · sending in {sec:.1f}s · ↑ amend · Esc cancel',
+        'pending.cleared':       'cleared {n} pending message(s)',
+        'pending.queued_marker': '[queued] {text}',
+
+        # shell-mode magic (`!` prefix)
+        'shell.hint':           '! for shell mode',
+        'shell.timeout':        '[shell: timeout {sec}s]',
+        'shell.error':          '[shell error: {err}]',
+        'shell.empty':          '(no output)',
+        'shell.history':        '[!shell] {cmd}\n```\n{out}\n```\n(exit {rc})',
+
+        # /resume
+        'cmd.resume.desc':      'list recent sessions and pick one to recover',
+        'help.resume':          '  /resume              List recent sessions and recover one',
     },
 
     'zh': {
@@ -354,6 +395,14 @@ _I18N: dict[str, dict[str, str]] = {
         'help.export':          '  /export [sub]        导出最后回复：clip / file [name] / all',
         'help.stop':            '  /stop                中止当前任务',
         'help.language':        '  /language [code]     查看 / 切换界面语言',
+        'help.update':          '  /update [备注]       预览 upstream 提交与 diff，再 git pull（不 commit）',
+        'help.autorun':         '  /autorun [seed]      进入 autonomous_operation 自主模式',
+        'help.morphling':       '  /morphling [target]  启用 Morphling 蒸馏 / 吞噬外部技能',
+        'help.goal':            '  /goal [goal]         进入 Goal 模式（需 condition 约束）',
+        'help.hive':            '  /hive [target]       进入 Hive 多 worker 协作模式',
+        'help.conductor':       '  /conductor [task]    交给 conductor.py 做多 subagent 编排',
+        'help.scheduler':       '  /scheduler           多选启动 reflect 任务 / 查看 cron',
+        'help.emoji':           '  /emoji [style]       切换 spinner 宠物样式（picker / 直接传参）',
         'help.quit':            '  /quit                退出',
         'help.esc':             '  Esc                  撤回提问 · 清草稿 · 停任务（不退出）',
         'help.cc':              '  Ctrl+C × 2           退出（空闲时；运行中只 abort 任务）',
@@ -401,7 +450,9 @@ _I18N: dict[str, dict[str, str]] = {
         'cmd.hive.desc':        '进入 Hive 多 worker 协作模式',
         'cmd.conductor.arg':    '[任务]',
         'cmd.conductor.desc':   '调用 frontends/conductor.py 做多 subagent 编排',
-        'cmd.scheduler.desc':   '多选启动 reflect 任务 / 查看 cron',
+        'cmd.scheduler.desc':   '多选启动/停止 reflect 任务（cron 由 reflect/scheduler.py 驱动）',
+        'cmd.emoji.arg':        '[样式]',
+        'cmd.emoji.desc':       '切换 spinner 宠物表情 — 打开 picker；带参数则直接切换',
 
         # status line
         'status.asking':        '◉ 待答 · Esc 撤回提问',
@@ -504,9 +555,19 @@ _I18N: dict[str, dict[str, str]] = {
         # llm picker
         'llm.title':            '切换 LLM',
 
+        # emoji picker
+        'emoji.title':          '选择 spinner 宠物样式',
+        'emoji.switched':       '宠物样式 → `{style}`',
+        'emoji.unknown':        '未知样式 `{choice}` — 可选：{valid}',
+        'emoji.row.current':    '● {name:<8} {sample}',
+        'emoji.row.other':      '  {name:<8} {sample}',
+        'emoji.row.off':        '（隐藏 pet）',
+
         # /scheduler picker (multi-pick reflect tasks / frontends)
         'scheduler.pick.title':   '挑选要启动的服务（已勾选 = 运行中，取消勾选即停止）',
         'scheduler.pick.hint':    'Space 勾选 · ↑↓ 移动 · Enter 下一步 · Esc 取消 · 或 /scheduler start a,b,c',
+        'scheduler.cron.active':  'cron：sche_tasks/*.json 共 {n} 个任务 · 已激活（reflect/scheduler.py 在运行）',
+        'scheduler.cron.inactive': 'cron：sche_tasks/*.json 共 {n} 个任务 · 未激活（启动 reflect/scheduler.py 才会调度）',
         'scheduler.empty':        '（没有可启动的服务：reflect/*.py 与 frontends/*app*.py 均为空）',
         'scheduler.no_pick':      '（未选择任何服务）',
         'scheduler.no_change':    '（与当前运行集合相比无变化）',
@@ -541,6 +602,23 @@ _I18N: dict[str, dict[str, str]] = {
 
         # answer prefix
         'msg.answer_prefix':    '[答] {text}',
+
+        # pending input preview
+        'pending.head_running':  '已排队 {n} 条（agent 忙）· ↑ 回看修改 · Esc 清空',
+        'pending.head_cooldown': '已排队 {n} 条 · {sec:.1f}s 后发送 · ↑ 回看修改 · Esc 取消',
+        'pending.cleared':       '已清空 {n} 条待发送消息',
+        'pending.queued_marker': '[排队] {text}',
+
+        # shell-mode magic (`!` prefix)
+        'shell.hint':           '! 进入 shell 模式',
+        'shell.timeout':        '[shell：{sec}s 超时]',
+        'shell.error':          '[shell 错误：{err}]',
+        'shell.empty':          '（无输出）',
+        'shell.history':        '[!shell] {cmd}\n```\n{out}\n```\n（退出码 {rc}）',
+
+        # /resume
+        'cmd.resume.desc':      '列出最近会话并恢复其中一个',
+        'help.resume':          '  /resume              列出最近会话并恢复其中一个',
     },
 }
 
@@ -1004,7 +1082,11 @@ _ANSI_MODE_SET_RE = re.compile(r'\x1b[=>][0-9]*')
 # Keep SGR (color) codes, strip everything else
 _ANSI_SGR_RE = re.compile(r'\x1b\[[0-9;]*m')
 
-_TURN_MARKER_RE = re.compile(r'\*\*LLM Running \(Turn (\d+)\).*?\*\*')
+# agent_loop.py emits `**LLM Running (Turn N) ...**` by default but switches
+# to the short `**Turn N ...**` when `handler.parent.task_dir` is set
+# (agent_loop.py:52).  TUI v3 sets task_dir to enable the _intervene
+# injection hook, which silently activates the short form — match both.
+_TURN_MARKER_RE = re.compile(r'\*\*(?:LLM Running \()?Turn (\d+)\)?[^\n]*?\*\*')
 _META_TAG_RE = re.compile(r'<(?:thinking|summary|tool_use|file_content)>.*?</(?:thinking|summary|tool_use|file_content)>', re.DOTALL)
 _TOOL_USE_BLOCK_RE = re.compile(r'```json\s*\{[^}]*"tool_name"[^}]*\}\s*```', re.DOTALL)
 _TOOL_USE_TAG_RE = re.compile(r'<tool_use>\s*\{.*?"tool_name"\s*:\s*"([^"]+)".*?\}\s*</tool_use>', re.DOTALL)
@@ -1017,7 +1099,9 @@ _ASK_USER_RE = re.compile(r'"tool_name"\s*:\s*"ask_user".*?"question"\s*:\s*"([^
 # `<summary>` regex uses a negative lookahead so two adjacent summaries don't
 # merge; the title cleaner strips fenced code + thinking before extraction.
 _FENCE4_STASH_RE = re.compile(r'^`{4,}.*?^`{4,}\n?', re.DOTALL | re.MULTILINE)
-_TURN_SPLIT_FOLD_RE = re.compile(r'(\*\*LLM Running \(Turn \d+\) \.\.\.\*\*)')
+# Same as _TURN_MARKER_RE but capturing the WHOLE match for str.split() to
+# keep the marker as a separator token in the result list.
+_TURN_SPLIT_FOLD_RE = re.compile(r'(\*\*(?:LLM Running \()?Turn \d+\)? \.\.\.\*\*)')
 _SUMMARY_PERTURN_RE = re.compile(r'<summary>\s*((?:(?!<summary>).)*?)\s*</summary>', re.DOTALL)
 _TITLE_CLEAN_RE = re.compile(r'`{3,}.*?`{3,}|<thinking>.*?</thinking>', re.DOTALL)
 _TITLE_ARGS_TAIL_RE = re.compile(r',?\s*args:.*$')
@@ -1229,6 +1313,14 @@ class AgentBridge:
             self.agent.llmclient = self.agent.llmclients[llm_no % len(self.agent.llmclients)]
         self.agent.inc_out = True
         self.agent.verbose = True
+        # Give the agent a `task_dir` so the per-turn `_intervene` file hook
+        # in ga.turn_end_callback (ga.py:576) can fire — that's how we
+        # smuggle pending user messages into the next LLM call while a
+        # turn is still in flight.  Dedicated PID-scoped dir so concurrent
+        # TUI v3 processes don't step on each other's intervene files.
+        self.agent.task_dir = os.path.join(_ROOT, 'temp', f'_tui_v3_{os.getpid()}')
+        try: os.makedirs(self.agent.task_dir, exist_ok=True)
+        except Exception: pass
         self.ask_user_queue: queue.Queue[AskUserEvent] = queue.Queue()
         self._install_hook()
         self._healthy = True
@@ -1238,6 +1330,43 @@ class AgentBridge:
             self._init_error = _t('err.no_llm')
         self._runner = threading.Thread(target=self._run_safe, daemon=True, name=f'ga-tui-agent')
         self._runner.start()
+
+    def inject_intervene(self, text: str) -> bool:
+        """Write `text` to `<task_dir>/_intervene`.  ga.turn_end_callback
+        consumes the file at the next turn boundary and APPENDS the content
+        to next_prompt as `[MASTER] ...`, so the agent sees it as part of
+        the upcoming user message without breaking the current turn.
+
+        Returns False if the agent isn't actually mid-turn (idle) — caller
+        should fall back to put_task in that case.
+
+        Append-mode write so that if the agent's `consume_file` reads and
+        deletes the file between our existence check and write, our text
+        lands in a freshly-created file (and fires the NEXT turn) instead
+        of duplicating already-consumed content from a read-modify-write
+        TOCTOU window.  The `\\n\\n` separator only goes in when the file
+        already has content right before we open it — race-narrow but
+        idempotent because the worst case is a leading blank line."""
+        td = getattr(self.agent, 'task_dir', None)
+        if not td or not getattr(self.agent, 'is_running', False):
+            return False
+        try:
+            os.makedirs(td, exist_ok=True)
+        except Exception:
+            return False
+        fp = os.path.join(td, '_intervene')
+        try:
+            sep = ''
+            try:
+                if os.path.getsize(fp) > 0:
+                    sep = '\n\n'
+            except OSError:
+                pass   # file gone — fresh create on append, sep stays empty
+            with open(fp, 'a', encoding='utf-8') as f:
+                f.write(sep + text)
+            return True
+        except Exception:
+            return False
 
     def _run_safe(self):
         try:
@@ -1353,16 +1482,36 @@ _INK_U = '\x1b[38;5;234m'                # user ink — kept for legacy callers
 # 256 inverse (which renders muddy on Win Terminal dark themes) to truecolor.
 _TILE_U = '\x1b[48;2;55;55;55m\x1b[38;2;230;230;230m'
 _MARK = _ACCENT + '❯' + _RST             # prompt mark — the single accent
+# Shell-mode (`!` magic prefix) accents — vivid pink so it stands out from
+# the normal accent purple without clashing with the heat-counter reds.
+_SHELL_ACCENT = '\x1b[38;5;205m'         # hot pink for border / prompt mark
+_SHELL_BG = '\x1b[48;2;65;60;65m'        # 65,60,65 charcoal-magenta (per spec)
+_SHELL_MARK = _SHELL_ACCENT + '!' + _RST
+# Full-row tile for committed shell rows (echo + each output line), so the
+# pair reads as one block in scrollback, matching cc-style.  Slightly
+# warmer than _TILE_U (55,55,55) so the two row kinds are distinguishable
+# when interleaved.  Black-terminal only — light themes get the bare band.
+_TILE_SHELL = '\x1b[48;2;65;60;65m\x1b[38;2;230;230;230m'
 _BG_TOK = {str(n) for n in list(range(40, 48)) + [49] + list(range(100, 108))}
 _SGR_RE = re.compile(r'\x1b\[([0-9;]*)m')
 _CSI_ERASE_RE = re.compile(r'\x1b\[[0-9;?]*[JK]')
 _SGR_TOKEN_RE = re.compile(r'\x1b\[[0-9;]*m')
 
 
-def _tile(s: str, style: str) -> str:
-    # re-assert style after every reset so muted-markdown \x1b[0m can't punch
-    # a hole in the block; \x1b[K fills to the edge (CJK-safe full-width tile).
-    return style + s.replace(_RST, _RST + style) + '\x1b[K' + _RST
+def _tile(s: str, style: str, width: int | None = None) -> str:
+    # Re-assert style after every reset so muted-markdown \x1b[0m can't punch
+    # a hole in the block.  When `width` is provided we pad with explicit
+    # bg-active spaces — prompt-toolkit's cell renderer doesn't honour
+    # \x1b[K (erase-to-EOL) inside its own buffer, so PTK-bound scrollback
+    # would otherwise leave the row gap exposed.  Fall back to \x1b[K for
+    # legacy callers writing straight to the terminal (no PTK), where the
+    # erase command still fills correctly.
+    body = style + s.replace(_RST, _RST + style)
+    if width is None:
+        return body + '\x1b[K' + _RST
+    visible = _SGR_TOKEN_RE.sub('', s)
+    pad = max(0, width - cell_len(visible))
+    return body + ' ' * pad + _RST
 
 
 def _border(left: str, right: str, width: int, style: str = _BORDER) -> str:
@@ -1399,8 +1548,8 @@ _IMG_PH_RE = re.compile(r'\[Image #(\d+)\]')
 _PLACEHOLDER_RES = (_PASTE_PH_RE, _IMG_PH_RE, _FILE_PH_RE)
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.ico'}
 _TURN_MK_RE = re.compile(
-    r'\*\*LLM Running \(Turn \d+\)[^\n]*\*\*'   # native live-format marker
-    r'|^[ \t]*Turn \d+\s*\.{3,}[ \t]*$',         # plain subagent form on its own line
+    r'\*\*(?:LLM Running \()?Turn \d+\)?[^\n]*\*\*'  # native + task-mode short form
+    r'|^[ \t]*Turn \d+\s*\.{3,}[ \t]*$',             # plain subagent form on its own line
     re.M)
 _TOOL_RE = re.compile(
     r'🛠️ Tool: `([^`]+)`[^\n]*\n'                    # 1 = name
@@ -1408,7 +1557,9 @@ _TOOL_RE = re.compile(
     r'(?:'
     r'(`{5,})[^\n]*\n(.*?)\n\4[ \t]*\n*'              # 4 = result fence (5-bt), 5 = body
     r'|'                                              # ─ OR ─
-    r'(.*?)(?=^🛠️ Tool: `|^\*\*LLM Running|^<summary>|\Z)'  # 6 = live exec trace
+    # Trail-end sentinel: either form of the `**Turn N ...**` marker, or a
+    # bare `Turn N ...` on its own line, or the next tool / summary tag.
+    r'(.*?)(?=^🛠️ Tool: `|^\*\*(?:LLM Running \()?Turn \d+|^Turn \d+ \.\.\.$|^<summary>|\Z)'  # 6 = live exec trace
     r')',
     re.DOTALL | re.MULTILINE)
 # Prompted-style tool wrappers GA models emit AS TEXT in saved logs (no
@@ -1449,6 +1600,15 @@ def _tool_status(result: str, trailing: str) -> str:
         return 'error'
     if re.match(r'^(?:Error[:\s]|Exception[:\s]|Traceback|❌|⛔)', s.lstrip(), re.I):
         return 'error'
+    # ga.do_ask_user yields a 'Waiting for your answer ...' marker BEFORE the
+    # user has actually answered (it's the "I'm blocking on input" signal).
+    # The plain s.strip() truthy check below would otherwise light the chip
+    # ✓ ok the instant that marker appears — making the user think the tool
+    # has finished while the input prompt is, in reality, still waiting.
+    # Mark it pending (· …) until something else (the answer, a real status
+    # line) lands in the result.
+    if 'Waiting for your answer' in s and '✅' not in s and '成功' not in s:
+        return '?'
     if '✅' in s or '成功' in s or s.strip():
         return 'ok'
     return '?'
@@ -1640,6 +1800,8 @@ def _cmds() -> list[tuple[str, str, str]]:
         ('/export',   _t('cmd.export.arg'),     _t('cmd.export.desc')),
         ('/stop',     '',                       _t('cmd.stop.desc')),
         ('/language', _t('cmd.language.arg'),   _t('cmd.language.desc')),
+        ('/emoji',    _t('cmd.emoji.arg'),      _t('cmd.emoji.desc')),
+        ('/resume',   '',                       _t('cmd.resume.desc')),
         ('/quit',     '',                       _t('cmd.quit.desc')),
     ]
 
@@ -1675,18 +1837,50 @@ _PETS_UNICODE = (
 # width, making `(>_<)` look "fat" and shoving the heat counter sideways.
 # `/emoji ascii` switches to bracketed glyphs that stay single-width on
 # every terminal.  `/emoji off` hides the pet entirely.
-_PETS_ASCII = (
-    ('[:)] ', '[:)] ', '[:)] ', '[:|] '),
-    ('[:|] ', '[;|] ', '[:|] ', '[|:] '),
-    ('[-_-]', '[-_-]', '[---]', '[-_-]'),
-    ('[>_<]', '[@_@]', '[>_<]', '[T_T]'),
+# Cat head — calm tier uses • (sleepy/cute look), `o` reserved for the
+# focused tier, `-` for the sleepy tier so each row's mood reads
+# distinctly.  Each tier's 4 frames share a width within the tier.
+_PETS_CAT = (
+    ('=^•.•^=', '=^•.•^=', '=^-.-^=', '=^•.•^='),
+    ('=^o.o^=', '=^o.-^=', '=^o.o^=', '=^-.o^='),
+    ('=^-.-^=', '=^-.-^=', '=^v.v^=', '=^-.-^='),
+    ('=^>.<^=', '=^@.@^=', '=^>.<^=', '=^T.T^='),
 )
-_PET_STYLES = {'unicode': _PETS_UNICODE, 'ascii': _PETS_ASCII}
-_pet_style = 'unicode'   # mutated by /emoji <style>; module global (single-process TUI)
+# Bracketed dot-eye — same mood arc; `•` for calm, `o` for focused.
+_PETS_DOT = (
+    ('[•.•]', '[•.•]', '[-.-]', '[•.•]'),
+    ('[o.o]', '[o.-]', '[o.o]', '[-.o]'),
+    ('[-.-]', '[-.-]', '[v.v]', '[-.-]'),
+    ('[>.<]', '[@.@]', '[>.<]', '[T.T]'),
+)
+# Bear face — restored to the classic ʕ•ᴥ•ʔ for the calm tier (user
+# preference; see screenshot 025734).  Mood escalates the same way as the
+# other styles: calm → focused → sleepy → stressed.  Bullets are kept to
+# the calm/focused tier where mixing them with `-` would jitter; tier 2
+# and 3 stay dash-/bracket-internal so the heat counter never shifts.
+_PETS_BEAR = (
+    ('ʕ•ᴥ•ʔ', 'ʕ-ᴥ-ʔ', 'ʕ•ᴥ•ʔ', 'ʕ•ᴥ-ʔ'),
+    ('ʕoᴥoʔ', 'ʕoᴥ-ʔ', 'ʕoᴥoʔ', 'ʕ-ᴥoʔ'),
+    ('ʕ-ᴥ-ʔ', 'ʕ-ᴥ-ʔ', 'ʕ~ᴥ~ʔ', 'ʕ-ᴥ-ʔ'),
+    ('ʕ>ᴥ<ʔ', 'ʕ@ᴥ@ʔ', 'ʕ>ᴥ<ʔ', 'ʕTᴥTʔ'),
+)
+_PET_STYLES = {
+    'bear':    _PETS_BEAR,
+    'cat':     _PETS_CAT,
+    'dot':     _PETS_DOT,
+    'unicode': _PETS_UNICODE,
+}
+# `off` is rendered specially (empty string) — kept out of _PET_STYLES so the
+# picker can iterate real styles, then surface the hide-pet row separately.
+_PET_HIDDEN = 'off'
+_pet_style = 'bear'   # default per user request; mutated by /emoji <style>
 
 
 def _pet(el: float, frame: int) -> str:
-    if _pet_style == 'off':
+    # `frame` ticks at the spinner rate (0.1s).  Pet emotes feel frantic if
+    # they swap every tick, so callers divide the spin counter (currently /5)
+    # to land a ~0.5s pet-frame cadence while the spinner glyph stays snappy.
+    if _pet_style == _PET_HIDDEN:
         return ''
     tier = 0 if el < 20 else 1 if el < 60 else 2 if el < 180 else 3
     pool = _PET_STYLES.get(_pet_style, _PETS_UNICODE)[tier]
@@ -1705,12 +1899,17 @@ _last_term_title: str = ''
 
 
 def _set_term_title(text: str) -> None:
+    # PTK app run redirects sys.stdout to sb_agent.log (see
+    # _run_prompt_toolkit), so sys.stdout.write here would write OSC 0
+    # into the log file instead of the terminal — title silently
+    # frozen at the very first pre-PTK call.  Write straight to fd 1
+    # via os.write, same approach as _w().
     global _last_term_title
     if text == _last_term_title:
         return
     _last_term_title = text
     try:
-        sys.stdout.write('\x1b]0;' + text + '\x07'); sys.stdout.flush()
+        os.write(1, ('\x1b]0;' + text + '\x07').encode('utf-8', 'replace'))
     except OSError:
         pass   # detached stdout / non-tty — let-it-crash § 14 (best-effort)
 
@@ -2056,6 +2255,17 @@ class SB:
         self._asking: AskUserEvent | None = None
         self._quit = False
         self._cc_t = 0.0                # last bare-Ctrl+C time (arm-to-quit window)
+        self._last_esc_t = 0.0          # last bare-Esc time (Esc Esc → /clear)
+        # Pending user inputs queued while the agent was busy (codex-style).
+        # Drained as ONE combined prompt 5 s after the LAST pending arrived
+        # (cooldown resets on each new queue entry).  During the cooldown
+        # the user can Esc-cancel or Up-amend.  When the timer lapses we
+        # try mid-turn injection via `_intervene` first (agent picks it up
+        # at the next turn boundary); fall back to put_task if the agent
+        # is idle.
+        self._pending: list[str] = []
+        self._pending_drain_t: float = 0.0
+        self._pending_cooldown: float = 5.0
         self._epend = b''               # held trailing ESC (split-read disambiguation)
         self._undo: list[tuple[str, int]] = []   # buffer-edit history for Ctrl+Z
         self._redo: list[tuple[str, int]] = []   # cleared on any new edit
@@ -2297,32 +2507,39 @@ class SB:
         return out
 
     @staticmethod
-    def _boxln(plain: str, colored: str, w: int) -> str:
+    def _boxln(plain: str, colored: str, w: int, border: str = _BORDER) -> str:
         if w < 4:
             return _clip_cells(plain, max(1, w))
         inner = max(0, w - 4)
         plain_fit = _clip_cells(plain, inner)
         colored_fit = _clip_ansi_cells(colored, inner)
         pad = max(0, inner - cell_len(plain_fit))   # cell_len → CJK-safe alignment
-        return _BORDER + '│ ' + _RST + colored_fit + ' ' * pad + _BORDER + ' │' + _RST
+        return border + '│ ' + _RST + colored_fit + ' ' * pad + border + ' │' + _RST
 
-    def _segs(self, iw: int) -> list[tuple[int, str]]:
-        """Flatten buf into visual rows: (abs char start in buf, chunk text).
-        One source of truth for both caret math and ←→↑↓ navigation."""
+    def _segs(self, iw: int, text: str | None = None) -> list[tuple[int, str]]:
+        """Flatten `text` (defaults to self.buf) into visual rows: (abs char
+        start, chunk text).  One source of truth for both caret math and
+        ←→↑↓ navigation.  Pass `text` explicitly when rendering a virtual
+        body (e.g. shell-mode hides the leading `!`); pair it with the
+        matching `pos` in `_seg_at`."""
+        src = self.buf if text is None else text
         segs, p = [], 0
-        for line in self.buf.split('\n'):
+        for line in src.split('\n'):
             for ch in _wrap_cells(line, iw) or ['']:
                 segs.append((p, ch)); p += len(ch)
             p += 1                              # the '\n' separator
         return segs
 
-    def _seg_at(self, segs: list[tuple[int, str]]) -> tuple[int, int]:
-        """(visual row index, char offset within its chunk) for self.pos."""
+    def _seg_at(self, segs: list[tuple[int, str]], pos: int | None = None) -> tuple[int, int]:
+        """(visual row index, char offset within its chunk) for `pos`
+        (defaults to self.pos).  Caller passes a virtual `pos` when segs
+        were built from a virtual `text`."""
+        p = self.pos if pos is None else pos
         for i, (st, ch) in enumerate(segs):
             end = st + len(ch)
             eol = i + 1 == len(segs) or segs[i + 1][0] != end   # \n gap ⇒ row ends here
-            if st <= self.pos and (self.pos < end or (self.pos == end and eol)):
-                return i, self.pos - st
+            if st <= p and (p < end or (p == end and eol)):
+                return i, p - st
         return len(segs) - 1, len(segs[-1][1])
 
     def _cur_v(self, d: int) -> None:
@@ -2365,7 +2582,8 @@ class SB:
 
     def _show_menu(self, title: str, options: list[str], on_submit,
                    hint: str | None = None, on_cancel=None,
-                   multi_select: bool = False) -> None:
+                   multi_select: bool = False,
+                   pre_checked: set[int] | None = None) -> None:
         """Open a modal arrow-key menu in place of the input box.
 
         The menu takes over the live region; ↑↓ move the highlight, Enter
@@ -2376,7 +2594,14 @@ class SB:
         `multi_select=True` switches to checkbox mode: Space toggles the
         highlighted row, the per-row prefix becomes `[x]/[ ]`, and Enter
         delivers a sorted `list[int]` of all checked indices (may be empty
-        if the user submits with nothing ticked)."""
+        if the user submits with nothing ticked).
+
+        `pre_checked` seeds the multi-select tick state atomically.  Callers
+        used to set `self._menu_checked` AFTER `_show_menu` returned, which
+        worked logically but left a one-frame window where PTK could render
+        the menu with the wrong state — observed as /scheduler picker
+        rendering all unchecked even though `reflect/scheduler.py` was alive.
+        Passing the set up-front makes the open atomic."""
         if not options:
             return
         self._menu_active = True
@@ -2395,7 +2620,7 @@ class SB:
         self._menu_on_submit = on_submit
         self._menu_on_cancel = on_cancel
         self._menu_multi = bool(multi_select)
-        self._menu_checked = set()
+        self._menu_checked = set(pre_checked) if pre_checked else set()
         self._render_live()
 
     def _close_menu(self) -> None:
@@ -2505,7 +2730,10 @@ class SB:
         out: list[str] = []
         for i in range(start, end):
             n, a, d = ms[i]
-            row = f'  {n:<10}{a:<7} {d}'
+            # `<11` + literal space guarantees a visible gap between the
+            # 10-char names (/conductor, /morphling, /scheduler) and their
+            # `[arg]` placeholder — without it they render as `/conductor[task]`.
+            row = f'  {n:<11} {a:<8} {d}' if a else f'  {n:<11}          {d}'
             if i == self._palette_sel:
                 out.append(_ACCENT + _BOLD + _clip_cells(row, w) + _RST)
             else:
@@ -2564,6 +2792,16 @@ class SB:
         if self.buf:
             self._snap()                              # let Ctrl+Z restore the draft
             self.buf = ''; self.pos = 0; self._sel = None; return
+        if self._pending:                             # cancel queued user messages
+            # Esc on an empty input drops the whole pending queue — gives
+            # the user a single-key abort if they no-longer want what they
+            # typed during the run.  Echoed as a system line so the
+            # disappearance of the preview block isn't silent.
+            n = len(self._pending)
+            self._pending = []
+            self._pending_drain_t = 0.0
+            self.commit([_DIM + _t('pending.cleared', n=n) + _RST])
+            return
         if self._running and self._bridge:
             self._bridge.abort()
             self.commit([_DIM + _t('msg.abort_requested') + _RST]); return
@@ -2799,44 +3037,196 @@ class SB:
             out = [' ' * indent + ln for ln in out]
         return out
 
+    def _pending_card(self, w: int) -> list[str]:
+        """Compact preview of user inputs queued while the agent was busy.
+        Renders as a dim accent strip above the input box, no border —
+        keeps the visual weight light because the messages already echoed
+        as `[queued] ...` lines into scrollback when they were submitted.
+
+        Header tells the user what's happening (busy / cooling-down) and
+        the bindings (Up amends last entry, Esc clears the lot)."""
+        if not self._pending:
+            return []
+        n = len(self._pending)
+        cd = max(0.0, self._pending_drain_t - time.time())
+        if self._running:
+            head = _t('pending.head_running', n=n)
+        elif cd > 0:
+            head = _t('pending.head_cooldown', n=n, sec=cd)
+        else:
+            head = _t('pending.head_running', n=n)
+        rows = [_ACCENT + _BOLD + _clip_cells('  ↑ ' + head, w) + _RST]
+        # Inline preview — capped at three entries so the strip never eats
+        # more rows than the input box itself.
+        body_w = max(20, w - 8)
+        for i, msg in enumerate(self._pending[-3:], 1):
+            preview = msg.replace('\n', ' ').strip()
+            if cell_len(preview) > body_w:
+                preview = _clip_cells(preview, body_w - 1) + '…'
+            rows.append(_DIM + _clip_cells(f'    {i}. {preview}', w) + _RST)
+        if n > 3:
+            rows.append(_DIM + _clip_cells(f'    … +{n - 3} more', w) + _RST)
+        rows.append('')
+        return rows
+
+    def _run_shell(self, cmd: str) -> None:
+        """Execute `cmd` in the host shell and echo command + output into
+        scrollback as the `! cmd` / `└ output` pair seen in screenshot
+        034257.  Both halves get appended to the agent's LLM history
+        (single user-role entry with a `[!shell]` tag) so a follow-up
+        question like "what did I just run?" finds the context.
+
+        Output capture is utf-8 / replace so binary spew never crashes
+        the decoder.  30 s timeout — anything longer wants `/conductor`
+        territory, not a magic prompt."""
+        if not cmd:
+            return
+        w = _term()[0]
+        # Echo the command line as a full-width charcoal tile (cc-style):
+        # pink `!` prompt embedded; `_tile` re-asserts the bg around every
+        # internal _RST so the pink fg coexists with the band.
+        head = _SHELL_ACCENT + '! ' + _RST + cmd
+        self.commit([_tile(' ' + head, _TILE_SHELL, w)])
+        import subprocess
+        out = ''
+        rc = 0
+        try:
+            r = subprocess.run(
+                cmd, shell=True, capture_output=True,
+                timeout=30, encoding='utf-8', errors='replace',
+            )
+            out = (r.stdout or '') + (r.stderr or '')
+            rc = r.returncode
+        except subprocess.TimeoutExpired:
+            out = _t('shell.timeout', sec=30); rc = -1
+        except Exception as e:
+            out = _t('shell.error', err=f'{type(e).__name__}: {e}'); rc = -1
+        body = (out.rstrip('\n') or _t('shell.empty')).split('\n')
+        rows: list[str] = []
+        for i, ln in enumerate(body):
+            # Output rows stay on bare terminal bg — only the `! cmd` echo
+            # carries the charcoal band so the eye reads it as "this is
+            # the command, that's its output" (cc-style).  `└ ` only on
+            # the first line so multi-line output reads as a continuation.
+            prefix = _DIM + '  └ ' + _RST if i == 0 else _DIM + '    ' + _RST
+            rows.append(prefix + ln)
+        rows.append('')   # blank gap separates the shell pair from the next chat block
+        self.commit(rows)
+        # Persist the exchange so the agent sees it on its next turn.
+        # Splitting on `is_running` avoids racing the agent thread:
+        #   running → use the `_intervene` file hook (safe because the
+        #             agent only reads it at turn boundaries, never
+        #             while iterating `backend.history`).
+        #   idle    → direct append to backend.history is safe — there's
+        #             no concurrent reader.
+        try:
+            txt = _t('shell.history', cmd=cmd, out=out.rstrip(), rc=rc)
+            if (self._bridge is not None
+                    and getattr(self._bridge.agent, 'is_running', False)):
+                self._bridge.inject_intervene(txt)
+            else:
+                be = getattr(self._bridge.agent, 'llmclient', None) if self._bridge else None
+                be = getattr(be, 'backend', None) if be is not None else None
+                if be is not None and hasattr(be, 'history'):
+                    be.history.append({"role": "user",
+                                       "content": [{"type": "text", "text": txt}]})
+        except Exception:
+            pass
+
+    def _drain_pending(self) -> None:
+        """Flush queued user messages.  Two paths:
+
+        - Agent still mid-turn → write to `<task_dir>/_intervene`.  GA's
+          `turn_end_callback` (ga.py:576) consumes the file at the next
+          turn boundary and prepends `[MASTER] …` to the upcoming user
+          prompt, which means the new message lands inside the SAME run
+          (no new task started) — exactly what the user asked for.
+        - Agent idle → no intervene hook available; submit as a fresh task
+          so it just becomes the next turn.
+
+        Combined into one payload (not per-message) because users queue
+        clarifying lines for one logical follow-up; N separate turns would
+        force the agent into pointless handoffs.  Caller must hold
+        `self._lk`."""
+        if not self._pending or not self._bridge:
+            return
+        combined = '\n\n'.join(self._pending)
+        self._pending = []
+        self._pending_drain_t = 0.0
+        # Mid-turn injection first; falls back to a new task if the agent
+        # is no longer running (e.g., turn ended between arming the timer
+        # and the timer firing).
+        if not self._bridge.inject_intervene(combined):
+            self._submit(combined, [])
+
     def _input_box(self, w: int) -> list[str]:
         """A full-width bordered, padded input box (cc-style). Lives in the
         redraw region only — border glyphs never reach scrollback/copy. The
         caret (row/col) is derived from self.pos so ←→↑↓ edit in place. In
         ask-mode the answer is typed INSIDE the question card itself (one
         unified component) — short-circuit to _ask_card.  When a modal
-        menu (e.g. /llm picker) is active, _menu_card replaces the input box."""
+        menu (e.g. /llm picker) is active, _menu_card replaces the input box.
+
+        Shell mode: when the buffer starts with `!`, that `!` IS the
+        prompt mark — pink, same column as `❯`, followed by one space and
+        then the body.  The leading `!` is stripped from the rendered body
+        so it shows once (the duplicate-`!` bug fixed in screenshot
+        040031).  Selection / cursor math uses a virtual buf=buf[1:],
+        pos=max(0, pos-1) so ←→ navigation still tracks the user's
+        intuition (caret never goes before the prompt)."""
         if self._menu_active:
             return self._menu_card(w)
         if self._asking is not None:
             return self._ask_card(w)
+        shell_mode = self.buf.startswith('!')
+        if shell_mode:
+            border = _SHELL_ACCENT
+            accent = _SHELL_ACCENT
+            mark = '!'
+            body = self.buf[1:]
+            body_pos = max(0, self.pos - 1)
+        else:
+            border = _BORDER
+            accent = _ACCENT
+            mark = '❯'
+            body = self.buf
+            body_pos = self.pos
         if w < 8:
             iw = max(1, w - 2)
-            segs = self._segs(iw)
-            ci, coff = self._seg_at(segs)
+            segs = self._segs(iw, body)
+            ci, coff = self._seg_at(segs, body_pos)
             rows = []
             for i, (_st, ch) in enumerate(segs):
-                pre = '❯ ' if i == 0 and w >= 3 else '❯' if i == 0 else ''
+                pre = f'{mark} ' if i == 0 and w >= 3 else mark if i == 0 else ''
                 rows.append(_clip_cells(pre + ch, w))
-            ccol = min(max(1, w), cell_len(('❯ ' if ci == 0 and w >= 3 else '❯' if ci == 0 else '') + segs[ci][1][:coff]) + 1)
+            ccol = min(max(1, w), cell_len((f'{mark} ' if ci == 0 and w >= 3 else mark if ci == 0 else '') + segs[ci][1][:coff]) + 1)
             return rows or [''], ci, ccol
-        top = _border('╭', '╮', w)
-        bot = _border('╰', '╯', w)
-        segs = self._segs(max(1, w - 6))
-        ci, coff = self._seg_at(segs)
-        sel = self._sel_range()
+        top = _border('╭', '╮', w, border)
+        bot = _border('╰', '╯', w, border)
+        segs = self._segs(max(1, w - 6), body)
+        ci, coff = self._seg_at(segs, body_pos)
+        # Selection range is computed against the original buf; offset by
+        # 1 for shell mode so the highlight aligns with the displayed
+        # body slice rather than the underlying buf indices.
+        sel_raw = self._sel_range()
+        sel = None
+        if sel_raw is not None:
+            shift = 1 if shell_mode else 0
+            lo, hi = max(0, sel_raw[0] - shift), max(0, sel_raw[1] - shift)
+            if lo < hi:
+                sel = (lo, hi)
         rows = []
         for i, (st, ch) in enumerate(segs):
             first = i == 0
-            pre_p = '❯ ' if first else '  '
-            pre_c = (_ACCENT + '❯' + _RST + ' ') if first else '  '
+            pre_p = f'{mark} ' if first else '  '
+            pre_c = (accent + mark + _RST + ' ') if first else '  '
             disp = ch
             if sel:                              # reverse-video the selected slice
                 lo = max(sel[0] - st, 0); hi = min(sel[1] - st, len(ch))
                 if lo < hi:
                     disp = ch[:lo] + '\x1b[7m' + ch[lo:hi] + '\x1b[27m' + ch[hi:]
-            rows.append(self._boxln(pre_p + ch, pre_c + disp, w))
-        pre = '❯ ' if ci == 0 else '  '
+            rows.append(self._boxln(pre_p + ch, pre_c + disp, w, border))
+        pre = f'{mark} ' if ci == 0 else '  '
         crow, ccol = ci, cell_len(pre + segs[ci][1][:coff]) + 3
         box = [top] + rows + [bot]
         caret_row = crow + 1                      # +1 for the top border row
@@ -2854,7 +3244,9 @@ class SB:
         after: list[str] = []
         if self._running and self._asking is None:
             el = time.time() - self._t0_anchor
-            after.append(' ' + _heat(el) + _pet(el, self._spin) + _RST +
+            # `_spin // 5` slows the pet-frame swap to ~0.5s (the spinner
+            # glyph itself still cycles at 0.1s for the snappy "alive" feel).
+            after.append(' ' + _heat(el) + _pet(el, self._spin // 5) + _RST +
                          '  ' + _DIM + _gerund(el) + '…' + _RST)
         # Plan card sits above the btw card — it's longer-lived context and
         # belongs further from the input area than transient side-questions.
@@ -2867,6 +3259,12 @@ class SB:
         # modal menu owns the live region).
         if self._btws and not self._menu_active:
             after += self._btw_card(w)
+        # Pending-input preview sits just above the input box too — appears
+        # whenever there's a queued message (during run OR during the
+        # short post-turn cooldown).  Hidden when a modal menu is active
+        # so the picker keeps the whole live region for itself.
+        if self._pending and not self._menu_active:
+            after += self._pending_card(w)
         box_start = len(after)
         box, caret_row, caret_col = self._input_box(w)
         after += box
@@ -2880,6 +3278,10 @@ class SB:
                 # prompt so it stands out (v2 parity).  Uses the input box's
                 # accent color so the prompt reads as part of that component.
                 after.append(_BOLD + _ACCENT + _clip_cells('  ' + _t('status.cc_confirm'), w) + _RST)
+            elif self.buf.startswith('!') and self._asking is None and not self._menu_active:
+                # Shell-mode hint replaces the status line — same hot pink
+                # so the user reads input box + hint as one component.
+                after.append(_BOLD + _SHELL_ACCENT + _clip_cells('  ' + _t('shell.hint'), w) + _RST)
             elif self._running and self._asking is None:
                 lead = _heat(time.time() - self._t0_anchor) + _SPIN[self._spin % len(_SPIN)] + ' ' + _RST
                 after.append(lead + _DIM + _clip_cells(self._status_line(w), max(2, w - 2)) + _RST)
@@ -3176,7 +3578,7 @@ class SB:
         if b.kind == 'user':
             parts = b.source.split('\n')
             raw = [_MARK + ' ' + parts[0]] + [CONT + p for p in parts[1:]]
-            lines = [_tile(' ' + x, _TILE_U) for x in raw]
+            lines = [_tile(' ' + x, _TILE_U, w) for x in raw]
             lines.append('')
             return lines
         if b.kind == 'assistant':
@@ -3536,6 +3938,13 @@ class SB:
             self.hist = self.hist[-250:]
         if not self.hist or self.hist[-1] != raw:   # v2: skip consecutive dupes
             self.hist.append(raw)
+        if raw.startswith('!'):
+            # Shell-mode magic: run the rest as a host shell command, echo
+            # the command + output into scrollback, and append the pair to
+            # the agent's LLM history so the next real turn can reference
+            # it (per screenshot 034257 — agent recalls `echo hi`).
+            self._run_shell(raw[1:].strip())
+            return
         if raw.startswith('/'):
             # /btw owns its own live-region panel — keep the command itself
             # out of the main scrollback.
@@ -3543,13 +3952,25 @@ class SB:
             if cmd0 != 'btw':
                 self._commit_user(raw)
             self._cmd(raw); return
-        if self._running:
-            return
-        # Collect images whose `[Image #N]` placeholder is still in the draft,
-        # in placeholder order — a block-deleted placeholder drops its image.
+        # Expand placeholders FIRST so the agent receives the resolved text,
+        # not the [Image #N] / [Pasted #N] markers.  This matches the idle
+        # submit path below — keeping the form identical means a queued
+        # message and an immediate one feed the LLM the same bytes.
         imgs = [self._imgs[i] for i in
                 (int(m.group(1)) for m in _IMG_PH_RE.finditer(raw)) if i in self._imgs]
-        expanded = self._expand(raw)               # expand paste/file refs FIRST so
+        expanded = self._expand(raw)
+        if self._running:
+            # Queue rather than reject — frees the user from /stop just to
+            # tack on a follow-up.  The pending preview block above the
+            # input shows what's waiting; Up amends the last entry, Esc
+            # clears.  Each new entry resets the 5 s cooldown so a burst
+            # of quick edits coalesces into one inject.
+            self._pending.append(expanded)
+            self._pending_drain_t = time.time() + self._pending_cooldown
+            self._commit_user(_t('pending.queued_marker', text=expanded))
+            self._pstore.clear(); self._fstore.clear(); self._imgs.clear()
+            self._render_live()
+            return
         self._commit_user(expanded)                # scrollback shows exactly what
         self._submit(expanded, imgs)               # the agent receives, not the
         self._pstore.clear(); self._fstore.clear(); self._imgs.clear()   # drop placeholders
@@ -3789,6 +4210,11 @@ class SB:
                     self.commit(Block('assistant', text))   # markdown re-renders on resize
                 except queue.Empty:
                     self.commit([_t('msg.review_empty')])
+        elif name == 'resume':
+            # GA's _handle_slash_cmd (agentmain.py:124) replaces `/resume`
+            # with a session-recovery prompt before the LLM sees it.  We
+            # just forward the literal string — the agent expands it.
+            self._submit('/resume', [])
         elif name in ('update', 'autorun', 'morphling', 'goal', 'hive', 'conductor'):
             # slash_cmds bundle — build a long prompt and feed it back through
             # _submit so the agent sees an ordinary user turn.  Keeps the
@@ -3833,9 +4259,16 @@ class SB:
                                 if s['name'] in running}
                 options = []
                 for s in ordered:
+                    is_running = s['name'] in running
                     doc = f"  — {s['doc']}" if s['doc'] else ''
-                    tag = _t('scheduler.running_tag') if s['name'] in running else ''
-                    options.append(f"{s['name']}{tag}{doc}")
+                    tag = _t('scheduler.running_tag') if is_running else ''
+                    label = f"{s['name']}{tag}{doc}"
+                    if is_running:
+                        # Functional green so already-running rows pop out
+                        # of the picker grid even without the checkbox tick;
+                        # cell_len ignores ANSI so column math stays sane.
+                        label = _OK + label + _RST
+                    options.append(label)
 
                 # Two-step ask_user-style flow:
                 #   picker (pre-checked = running) → diff vs running
@@ -3898,18 +4331,27 @@ class SB:
                             multi_select=False,
                         )
 
+                    hint_text = _t('scheduler.pick.hint')
+                    try:
+                        cron_n = len(slash_cmds.list_scheduler_tasks())
+                    except Exception:
+                        cron_n = 0
+                    if cron_n:
+                        sch_running = 'reflect/scheduler.py' in running
+                        key = 'scheduler.cron.active' if sch_running else 'scheduler.cron.inactive'
+                        hint_text += '\n' + _t(key, n=cron_n)
+                    # Pre-check the running set (first open) or the in-progress
+                    # selection (re-open via "Edit selection" / Esc) — passed
+                    # to _show_menu so it lands atomically with the rest of
+                    # the menu state, not as a post-open override.
                     self._show_menu(
                         _t('scheduler.pick.title'),
                         options,
                         _pick_services,
-                        hint=_t('scheduler.pick.hint'),
+                        hint=hint_text,
                         multi_select=True,
+                        pre_checked=initial if initial else None,
                     )
-                    # Pre-check the running set (first open) or the in-progress
-                    # selection (re-open via "Edit selection" / Esc).
-                    if initial:
-                        self._menu_checked = set(initial)
-                        self._render_live()
 
                 _open_picker()
         elif name == 'llm':
@@ -4029,6 +4471,7 @@ class SB:
                          _t('help.btw'),
                          _t('help.review'),
                          _t('help.rewind'),
+                         _t('help.resume'),
                          _t('help.continue'),
                          _t('help.new'),
                          _t('help.rename'),
@@ -4038,6 +4481,14 @@ class SB:
                          _t('help.export'),
                          _t('help.stop'),
                          _t('help.language'),
+                         _t('help.emoji'),
+                         _t('help.update'),
+                         _t('help.autorun'),
+                         _t('help.morphling'),
+                         _t('help.goal'),
+                         _t('help.hive'),
+                         _t('help.conductor'),
+                         _t('help.scheduler'),
                          _t('help.quit'),
                          _t('help.esc'),
                          _t('help.cc'),
@@ -4064,23 +4515,53 @@ class SB:
             self._render_live()
 
     def _cmd_emoji(self, arg: str) -> None:
-        """`/emoji [unicode|ascii|off]` — switch the running-spinner pet face.
-
-        Win consoles render some CJK punctuation as double-width, making
-        glyphs like `(>_<)` look "fat" and shoving the heat counter
-        sideways.  `/emoji ascii` swaps in bracketed faces that stay
-        single-width everywhere; `/emoji off` hides the pet entirely.
-        Bare `/emoji` reports the current style and the valid choices.
+        """`/emoji` opens an arrow-key picker (parity with /llm); `/emoji
+        <style>` switches directly.  Styles are sourced from `_PET_STYLES`
+        so adding a new face dict automatically surfaces a new row.  `off`
+        is rendered as a separate trailing row that hides the pet entirely.
         """
         global _pet_style
         choice = (arg or '').strip().lower()
-        valid = ('unicode', 'ascii', 'off')
-        if choice not in valid:
-            self.commit([f'{_DIM}emoji style is `{_pet_style}` · '
-                         f'available: {", ".join(valid)}{_RST}'])
+        valid_keys = list(_PET_STYLES.keys()) + [_PET_HIDDEN]
+        if choice:
+            if choice not in valid_keys:
+                self.commit([f'{_DIM}'
+                             + _t('emoji.unknown', choice=choice,
+                                  valid=', '.join(valid_keys))
+                             + _RST])
+                return
+            _pet_style = choice
+            self.commit([f'{_DIM}' + _t('emoji.switched', style=choice) + _RST])
             return
-        _pet_style = choice
-        self.commit([f'{_DIM}emoji style → `{choice}`{_RST}'])
+        # No arg → /llm-style picker.  Sample = the first frame of tier 0
+        # so each row shows what the calm face looks like.
+        keys = list(_PET_STYLES.keys())
+        options: list[str] = []
+        current_idx = 0
+        for i, k in enumerate(keys):
+            sample = _PET_STYLES[k][0][0]
+            if k == _pet_style:
+                current_idx = i
+                options.append(_t('emoji.row.current', name=k, sample=sample))
+            else:
+                options.append(_t('emoji.row.other', name=k, sample=sample))
+        # Trailing "off" row hides the pet — appended last so the regular
+        # face styles cluster at the top of the menu.
+        off_label = (_t('emoji.row.current', name=_PET_HIDDEN, sample=_t('emoji.row.off'))
+                     if _pet_style == _PET_HIDDEN
+                     else _t('emoji.row.other', name=_PET_HIDDEN, sample=_t('emoji.row.off')))
+        options.append(off_label)
+        if _pet_style == _PET_HIDDEN:
+            current_idx = len(keys)
+        picks = keys + [_PET_HIDDEN]
+
+        def _pick(idx: int) -> None:
+            global _pet_style
+            _pet_style = picks[idx]
+            self.commit([f'{_DIM}' + _t('emoji.switched', style=picks[idx]) + _RST])
+
+        self._show_menu(_t('emoji.title'), options, _pick)
+        self._menu_sel = current_idx
 
     def _cmd_language(self, arg: str) -> None:
         """`/language` — arrow-key picker (like /llm); `/language <code>` — direct switch."""
@@ -4245,11 +4726,12 @@ class SB:
 
     def _term_title(self) -> str:
         """Compose terminal-window title — `⠇ <session> · GenericAgent`.
-        Spinner glyph appears only while an agent run is in flight."""
-        name = (self._session_name or '').strip()
+        Spinner glyph appears only while an agent run is in flight; an
+        unnamed session falls back to literal 'session' so the title
+        always carries the session segment (parity with tuiapp_v2)."""
+        name = (self._session_name or '').strip() or 'session'
         head = (_SPIN[self._spin % len(_SPIN)] + ' ') if self._running else ''
-        mid = (name + ' · ') if name else ''
-        return head + mid + 'GenericAgent'
+        return f'{head}{name} · GenericAgent'
 
     def _poll_ask(self, grace: float = 0.0) -> AskUserEvent | None:
         """Only pull a queued ask when none is currently being shown.
@@ -4285,11 +4767,18 @@ class SB:
                 # to the stream *just before* it pushes the AskUserEvent onto
                 # ask_user_queue.  When the agent then short-circuits with
                 # should_exit=True a DoneEvent can land here before the
-                # AskUserEvent.put() returns — so we wait generously when the
-                # marker is in the stream.  Plain replies keep the snappy
-                # 0.4s grace so cleanup stays tight.
-                grace = 2.0 if 'Waiting for your answer' in self._stream else 0.4
-                ae = self._poll_ask(grace=grace)  # ask hook may land around turn end
+                # AskUserEvent.put() returns.  The previous 2s grace was the
+                # right idea but too short under load (long sessions backed
+                # up the put), so the ae would be missed and the question
+                # silently dropped into scrollback — observed as 'input box
+                # never re-appears'.  When the marker is present, treat the
+                # ae as REQUIRED and wait longer; the hook is synchronous
+                # with agent thread exit so 10s is comfortably above the
+                # real arrival time.  Plain replies keep the snappy 0.4s.
+                if 'Waiting for your answer' in self._stream:
+                    ae = self._poll_ask(grace=10.0)
+                else:
+                    ae = self._poll_ask(grace=0.4)
                 with self._lk:
                     self._enter_ask(ae) if ae else self._finalize(ev.text)
                 break
@@ -4302,6 +4791,15 @@ class SB:
                 elif isinstance(ev, (SystemEvent, ErrorEvent)):
                     self._finalize(getattr(ev, 'text', None) or getattr(ev, 'message', '')); break
         self._running = False
+        # Note: pending-drain timer is armed on each user submit (resets
+        # every time they add another), not on turn end — that matches
+        # the "5 s cooldown since LAST keystroke" intent.  Maintenance
+        # loop fires _drain_pending when the deadline lapses regardless
+        # of running state.
+        # _ticker stops as soon as _running goes False so the title would
+        # freeze on the last spinner frame.  Repaint it now to drop the
+        # glyph and reveal a clean idle title.
+        _set_term_title(self._term_title())
         with self._lk:
             self._flow(final=True) if self._stream else self._render_live()
 
@@ -4387,9 +4885,13 @@ class SB:
         (no closing tag). Falls back to last `\\n\\n` paragraph boundary."""
         unsafe = []
         for m in re.finditer(r'🛠️ Tool:', stream):
-            if not re.search(r'(?:^|\n)(?:\*\*LLM Running|🛠️ Tool:)', stream[m.end():]):
+            # Closing sentinel for an in-flight tool block: next tool, next
+            # turn marker (either form), or next assistant frame.  Matches
+            # both `**LLM Running (Turn N) ...**` and the task-mode short
+            # `**Turn N ...**` so task_dir-enabled runs aren't mis-classified.
+            if not re.search(r'(?:^|\n)(?:\*\*(?:LLM Running \()?Turn \d+|🛠️ Tool:)', stream[m.end():]):
                 unsafe.append(m.start())
-        for m in re.finditer(r'\*\*LLM Running', stream):
+        for m in re.finditer(r'\*\*(?:LLM Running \()?Turn \d+', stream):
             if '**' not in stream[m.end():]:
                 unsafe.append(m.start())
         for tag in ('summary', 'thinking'):
@@ -4582,6 +5084,12 @@ class SB:
                     self._menu_submit(); continue
                 if o == 0x1b:                                # Esc
                     self._menu_cancel(); continue
+                if o == 0x02:                                # ← cancel (directional Esc)
+                    # The /scheduler confirm card spawns a menu with an
+                    # on_cancel that re-opens the picker — ← gives users
+                    # a one-handed rollback without reaching for Esc.
+                    # Menus with no on_cancel just dismiss.
+                    self._menu_cancel(); continue
                 # swallow everything else while the menu is up
                 continue
             # ── ask_user picker key intercept ───────────────────────────────
@@ -4638,6 +5146,16 @@ class SB:
             elif o == 0x10:                       # ↑ visual-row up (history at top)
                 if self._palette_visible():
                     self._palette_sel = max(0, self._palette_sel - 1)
+                elif self._pending and not self.buf:
+                    # Empty input + pending → pop the most-recent queued
+                    # message back into the composer for amendment.  Re-
+                    # submitting it appends at the tail again; Esc clears
+                    # the whole queue.  Order preserved (LIFO recall).
+                    self.buf = self._pending.pop()
+                    self.pos = len(self.buf)
+                    if not self._pending:
+                        self._pending_drain_t = 0.0
+                    self._render_live()
                 else:
                     self._sel = None; self._cur_v(-1)
             elif o == 0x13:                       # Ctrl+S stash/restore draft
@@ -4671,7 +5189,7 @@ class SB:
                 r = self._sel_range()
                 if r:
                     clip.copy(self.buf[r[0]:r[1]]); self._kill_sel()
-            elif o == 0x1b:                       # Esc — universal back
+            elif o == 0x1b:                       # Esc — universal back (Esc Esc handled in _handle_key)
                 self._esc_back()
             elif o == 0x09:                       # Tab — slash-command completion
                 self._tab()
@@ -4823,10 +5341,23 @@ class SB:
                 # b'\x1b' here is unambiguously Esc.  Handle it directly instead
                 # of routing through _keys, whose raw-terminal escape-delay
                 # hold (~30ms) would otherwise lag every menu/ask cancel.
+                #
+                # Esc Esc within 800 ms → /rewind (user-requested binding).
+                # The first Esc still runs _esc_back (cancel ask / clear
+                # draft / abort task), so this only fires when the user
+                # presses twice quickly — never surprises a single press.
                 if data == b'\x1b':
-                    with self._lk:
-                        self._esc_back()
-                        self._render_live()
+                    now = time.time()
+                    if now - self._last_esc_t < 0.8:
+                        self._last_esc_t = 0.0
+                        with self._lk:
+                            self._cmd('/rewind')
+                            self._render_live()
+                    else:
+                        self._last_esc_t = now
+                        with self._lk:
+                            self._esc_back()
+                            self._render_live()
                     event.app.invalidate()
                     continue
                 if data and not self._feed(data):
@@ -4887,6 +5418,18 @@ class SB:
                     # Ctrl+C armed: keep re-rendering so the status line
                     # restores itself once the 1s window lapses (the extra
                     # 0.1s margin guarantees one render past expiry).
+                    dirty = True
+                if (self._pending and self._pending_drain_t > 0
+                        and self._asking is None):
+                    # Cooldown countdown — repaint so the "{sec:.1f}s" tick
+                    # is visible.  When the deadline lapses, drain:
+                    # if the agent is still mid-turn, _drain_pending writes
+                    # to _intervene and ga.turn_end_callback picks it up
+                    # at the next boundary; if idle, drain submits as a
+                    # new task.
+                    if time.time() >= self._pending_drain_t:
+                        with self._lk:
+                            self._drain_pending()
                     dirty = True
                 if self._epend or (self._rb and not self._bp):
                     with self._lk:

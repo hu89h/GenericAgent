@@ -343,18 +343,20 @@ def start_service(name: str) -> tuple[bool, str]:
 def _match_service(cmdline: list[str], svc: dict) -> bool:
     """Does this OS process belong to `svc`?  Match on the trailing script
     arg (`reflect/foo.py` for reflect tasks, `frontends/bar.py` for apps),
-    which is invariant across `python` vs `pythonw` vs venv shims."""
+    which is invariant across `python` vs `pythonw` vs venv shims.
+
+    Reflect detection used to require BOTH `agentmain.py` AND the reflect
+    path in cmdline.  That rejected tasks launched directly (`python
+    reflect/scheduler.py`) by launch.pyw, dev scripts, or by an earlier
+    TUI run that used a different launcher — they showed unticked in
+    /scheduler even when alive.  Path-only match handles both styles; the
+    Python-process pre-filter in `running_services` keeps false positives
+    (greps, editors with the file open) from sneaking in."""
     if not cmdline:
         return False
     rel = svc["name"]  # 'reflect/foo.py' | 'frontends/bar.py'
-    if svc["kind"] == "reflect":
-        # agentmain.py --reflect reflect/foo.py
-        has_main = any("agentmain.py" in (a or "") for a in cmdline)
-        has_rel = any(rel.replace("/", os.sep) in (a or "") or rel in (a or "")
-                      for a in cmdline)
-        return has_main and has_rel
-    # frontend: either `python frontends/foo.py` or `python -m streamlit run frontends/stapp.py …`
-    return any(rel.replace("/", os.sep) in (a or "") or rel in (a or "")
+    rel_norm = rel.replace("/", os.sep)
+    return any(rel_norm in (a or "") or rel in (a or "")
                for a in cmdline)
 
 
@@ -503,7 +505,8 @@ PALETTE_ENTRIES: list[tuple[str, str, str]] = [
     ("/goal",      "[goal]",    "进入 Goal 模式（需 condition 约束）"),
     ("/hive",      "[target]",  "进入 Hive 多 worker 协作模式"),
     ("/conductor", "[task]",    "调用 frontends/conductor.py 多 subagent 编排"),
-    ("/scheduler", "",          "多选启动 reflect 任务 / 查看 cron"),
+    ("/scheduler", "",          "多选启动/停止 reflect 任务（cron 由 reflect/scheduler.py 驱动）"),
+    ("/resume",    "",           "列出最近会话并恢复其中一个（GA 端展开 prompt）"),
 ]
 
 
