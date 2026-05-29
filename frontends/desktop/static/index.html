@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>GenericAgent</title>
 <link rel="stylesheet" href="assets/fonts/fonts.css">
-<link rel="stylesheet" href="styles.css?v=80">
+<link rel="stylesheet" href="styles.css?v=81">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
@@ -240,6 +240,12 @@
         <section class="page" data-page="token">
           <div class="page-pad">
             <div class="page-title" data-i18n="page.token.title"></div>
+            <!-- tok-tabs disabled pending conductor time tracking
+            <div class="tok-tabs" id="tok-tabs">
+              <button class="tok-tab active" data-tab="all" data-i18n="tok.tabAll"></button>
+              <button class="tok-tab" data-tab="conductor" data-i18n="tok.tabConductor"></button>
+            </div>
+            -->
             <div class="tok-filter">
               <label data-i18n="tok.from"></label>
               <input type="text" id="tok-since" class="tok-date" readonly>
@@ -506,7 +512,7 @@
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
 <script src="phosphor-icons.js"></script>
-<script src="app.js?v=64"></script>
+<script src="app.js?v=65"></script>
 <script src="annot.js"></script><!-- DEV 脚手架，可删 -->
 </body>
 </html>

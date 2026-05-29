@@ -346,7 +346,7 @@ const I18N = {
     'proc.imbotWechat': 'imbot · 微信', 'proc.imbotDing': 'imbot · 钉钉', 'proc.scheduler': '定时任务调度',
     'cm.scheduling': '调度中', 'cm.running': '执行中', 'cm.idleSt': '空闲',
     'cm.master': '已派 3 子任务', 'cm.w1': '子任务：抓取数据', 'cm.w2': '子任务：复核结果', 'cm.sub': '等待派单',
-    'tok.total': '累计 token', 'tok.cost': '估算成本', 'tok.today': '今日 token',
+    'tok.total': '累计 token', 'tok.cost': '估算成本', 'tok.today': '今日 token', 'tok.tabAll': '总体', 'tok.tabConductor': 'Subagent Token 消耗',
     'tok.colSession': '会话', 'tok.colIn': '输入', 'tok.colOut': '输出', 'tok.colCacheW': '缓存写入', 'tok.colCache': '缓存读取', 'tok.colCost': '成本',
     'tok.from': '从', 'tok.to': '到', 'tok.reset': '重置', 'tok.noData': '暂无记录', 'tok.deleted': '此会话已删除',
     'tok.pricingUnknown': '⚠ 此模型计费规则尚未明确，按默认估算',
@@ -491,7 +491,7 @@ const I18N = {
     'proc.imbotWechat': 'imbot · WeChat', 'proc.imbotDing': 'imbot · DingTalk', 'proc.scheduler': 'Scheduler',
     'cm.scheduling': 'Scheduling', 'cm.running': 'Running', 'cm.idleSt': 'Idle',
     'cm.master': 'Dispatched 3 subtasks', 'cm.w1': 'Subtask: fetch data', 'cm.w2': 'Subtask: review results', 'cm.sub': 'Waiting for tasks',
-    'tok.total': 'Total tokens', 'tok.cost': 'Est. cost', 'tok.today': 'Today tokens',
+    'tok.total': 'Total tokens', 'tok.cost': 'Est. cost', 'tok.today': 'Today tokens', 'tok.tabAll': 'Overall', 'tok.tabConductor': 'Subagent token usage',
     'tok.colSession': 'Session', 'tok.colIn': 'Input', 'tok.colOut': 'Output', 'tok.colCacheW': 'Cache write', 'tok.colCache': 'Cache read', 'tok.colCost': 'Cost',
     'tok.from': 'From', 'tok.to': 'To', 'tok.reset': 'Reset', 'tok.noData': 'No records', 'tok.deleted': 'Session deleted',
     'tok.pricingUnknown': '⚠ Pricing not confirmed, using defaults',
@@ -2887,7 +2887,7 @@ async function tokPollBridge() {
       if (di>0||do_>0||dc>0||dr>0) {
         const sid = key.replace('GA-','');
         const sess = [...state.sessions.values()].find(s=>s.bridgeSessionId===sid);
-        const title = sess?.title||sid;
+        const title = sess ? displayTitle(sess) : sid;
         history.push({sessionId:sid, title:title, input:di, output:do_, cacheCreate:dc, cacheRead:dr, model:r.model||'', ts:Date.now()/1000});
         if(sess?.title) history.forEach(h=>{if(h.sessionId===sid&&(!h.title||h.title===sid))h.title=sess.title;});
       }
@@ -2923,12 +2923,12 @@ function tokRenderTable(records) {
   const bySession=new Map();
   for(const r of records){
     const k=r.sessionId||'?';
-    let title = r.title||k;
-    if(!title||title===k){ const ss=[...state.sessions.values()].find(s=>s.bridgeSessionId===k); if(ss)title=ss.title; }
-    const deleted = ![...state.sessions.values()].some(s=>s.bridgeSessionId===k);
+    const ss= r._conductor ? null : [...state.sessions.values()].find(s=>s.bridgeSessionId===k);
+    let title = ss ? displayTitle(ss) : (r.title||k);
+    const deleted = r._conductor ? !!r._killed : !ss;
     if(!bySession.has(k)) bySession.set(k,{title:title,deleted:deleted,input:0,output:0,cacheCreate:0,cacheRead:0,lastTs:0,prompts:[]});
     const s=bySession.get(k); s.input+=r.input||0; s.output+=r.output||0; s.cacheCreate+=r.cacheCreate||0; s.cacheRead+=r.cacheRead||0;
-    if(r.ts>s.lastTs){s.lastTs=r.ts; s.title=r.title||s.title;} s.prompts.push(r);
+    if(r.ts>s.lastTs){s.lastTs=r.ts; s.title=title;} s.prompts.push(r);
   }
   tokTbody.innerHTML='';
   if(bySession.size===0){tokTbody.innerHTML=`<tr><td colspan="6" style="color:var(--muted)">${t('tok.noData')}</td></tr>`;if(tokPager)tokPager.innerHTML='';return;}
@@ -2954,6 +2954,43 @@ function tokRenderTable(records) {
 }
 
 async function loadTokenPage(){await tokPollBridge();const f=tokGetFiltered();const all=tokLoadHistory();tokRenderStats(f,all);tokRenderTable(f);}
+
+/* ─── Conductor token tab (disabled — pending time tracking) ─── */
+/*
+let _tokTab = 'all';
+const tokTabs = document.getElementById('tok-tabs');
+if (tokTabs) tokTabs.addEventListener('click', e => {
+  const btn = e.target.closest('.tok-tab');
+  if (!btn || btn.classList.contains('active')) return;
+  tokTabs.querySelectorAll('.tok-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  _tokTab = btn.dataset.tab;
+  _tokPage = 0;
+  if (_tokTab === 'conductor') loadConductorTokens();
+  else loadTokenPage();
+});
+
+async function loadConductorTokens() {
+  try {
+    const data = await (await fetch(`http://${location.hostname}:8900/token-stats`)).json();
+    const titles = data.titles || {};
+    const killedSet = new Set(data.killed || []);
+    const records = (data.records || []).filter(r => r.thread === 'conductor-agent' || r.thread.startsWith('subagent-')).map(r => {
+      let title = 'Conductor';
+      if (r.thread.startsWith('subagent-')) {
+        const prompt = titles[r.thread] || '';
+        title = prompt ? (prompt.length > 30 ? prompt.slice(0, 30) + '…' : prompt) : 'Sub ' + r.thread.replace('subagent-', '');
+      }
+      return { sessionId: r.thread, title, input: r.input || 0, output: r.output || 0, cacheCreate: r.cacheCreate || 0, cacheRead: r.cacheRead || 0, model: r.model || '', ts: Date.now() / 1000, _conductor: true, _killed: killedSet.has(r.thread) };
+    });
+    tokRenderStats(records, records);
+    tokRenderTable(records);
+  } catch (_) {
+    if (tokTbody) tokTbody.innerHTML = `<tr><td colspan="6" style="color:var(--muted)">无法连接 Conductor (8900)</td></tr>`;
+  }
+}
+*/
+
 /* Flatpickr 初始化 */
 const _fpOpts = { enableTime:true, time_24hr:true, dateFormat:'Y-m-d  H:i', locale:window.flatpickr?.l10ns?.[document.documentElement.lang==='en'?'default':'zh']||'default', allowInput:false, onChange(){ _tokPage=0; loadTokenPage(); } };
 const fpSince = tokSince ? flatpickr(tokSince, _fpOpts) : null;

@@ -786,6 +786,13 @@ html[data-boot-has-sessions] .chat-start{ display:none !important; }
 .cm-d{ font-size:11px; color:var(--muted); margin-top:4px; }
 
 /* token 汇总卡 */
+.tok-tabs{ display:flex; gap:4px; margin:10px 0 0; }
+.tok-tab{
+  padding:6px 14px; font-size:12px; font-weight:600; border:1px solid var(--line);
+  border-radius:6px; background:transparent; color:var(--muted); cursor:pointer;
+}
+.tok-tab:hover{ background:var(--line-soft); }
+.tok-tab.active{ background:var(--blue-bg); color:var(--blue); border-color:var(--blue); }
 .tok-filter{ display:flex; align-items:center; gap:8px; margin:12px 0; flex-wrap:wrap; }
 .tok-filter label{ font-size:12px; color:var(--muted); }
 .tok-date{
