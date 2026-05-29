@@ -343,7 +343,13 @@ def conductor_loop():
 async def on_startup():
     global main_loop
     main_loop = asyncio.get_running_loop()
+    import cost_tracker; cost_tracker.install()
     threading.Thread(target=conductor_loop, name="conductor-loop", daemon=True).start()
+
+@app.get("/token-stats")
+def conductor_token_stats():
+    import cost_tracker
+    return {"records": [{"thread": k, "input": v.input, "output": v.output, "cacheCreate": v.cache_create, "cacheRead": v.cache_read} for k, v in cost_tracker.all_trackers().items()]}
 
 @app.get("/")
 def index():

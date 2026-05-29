@@ -2953,7 +2953,30 @@ function tokRenderTable(records) {
   if(tokPager){tokPager.innerHTML='';if(totalPages>1)for(let i=0;i<totalPages;i++){const b=document.createElement('button');b.textContent=i+1;if(i===_tokPage)b.className='active';b.addEventListener('click',()=>{_tokPage=i;tokRenderTable(records);});tokPager.appendChild(b);}}
 }
 
-async function loadTokenPage(){await tokPollBridge();const f=tokGetFiltered();const all=tokLoadHistory();tokRenderStats(f,all);tokRenderTable(f);}
+async function loadTokenPage(){await tokPollBridge();const f=tokGetFiltered();const all=tokLoadHistory();tokRenderStats(f,all);tokRenderTable(f);await tokRenderConductorRow();}
+
+let _conductorRowGen = 0;
+async function tokRenderConductorRow() {
+  if (!tokTbody) return;
+  const gen = ++_conductorRowGen;
+  tokTbody.querySelectorAll('.tok-row-conductor').forEach(el => el.remove());
+  try {
+    const data = await (await fetch(`http://${location.hostname}:8900/token-stats`)).json();
+    if (gen !== _conductorRowGen) return;
+    tokTbody.querySelectorAll('.tok-row-conductor').forEach(el => el.remove());
+    const recs = (data.records || []).filter(r => r.thread === 'conductor-agent' || r.thread.startsWith('subagent-'));
+    if (!recs.length) return;
+    let totalIn = 0, totalOut = 0, totalCc = 0, totalCr = 0, cost = 0;
+    for (const r of recs) {
+      totalIn += r.input || 0; totalOut += r.output || 0; totalCc += r.cacheCreate || 0; totalCr += r.cacheRead || 0;
+      cost += parseFloat(estCost(r.input || 0, r.output || 0, r.model || '', r.cacheRead || 0, r.cacheCreate || 0));
+    }
+    const tr = document.createElement('tr'); tr.className = 'tok-row-session tok-row-conductor';
+    tr.title = 'Conductor 消耗的 token 不计入累计 token 中';
+    tr.innerHTML = `<td>🎛 Conductor (${recs.length} threads)</td><td>${fmtTok(totalIn)}</td><td>${fmtTok(totalOut)}</td><td>${fmtTok(totalCc)}</td><td>${fmtTok(totalCr)}</td><td>¥${cost.toFixed(2)}</td>`;
+    tokTbody.insertBefore(tr, tokTbody.firstChild);
+  } catch (_) {}
+}
 
 /* ─── Conductor token tab (disabled — pending time tracking) ─── */
 /*

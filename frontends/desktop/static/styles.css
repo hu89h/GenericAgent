@@ -844,6 +844,9 @@ span.flatpickr-weekday{ color:var(--muted) !important; font-size:11px; }
 .tok-row-session:hover td{ background:var(--hover-dim); }
 .tok-row-session td:first-child::before{ content:'▶'; margin-right:6px; font-size:10px; color:var(--muted2); transition:transform .15s; display:inline-block; }
 .tok-row-session.open td:first-child::before{ transform:rotate(90deg); }
+.tok-row-conductor{ cursor:default; background:var(--blue-soft); }
+.tok-row-conductor td:first-child::before{ content:''; margin:0; }
+.tok-row-conductor:hover td{ background:var(--blue-soft); }
 .tok-detail td{ padding:5px 12px 5px 32px; font-size:11px; color:var(--muted); border-bottom:1px solid var(--line-soft); background:var(--field-bg); }
 .tok-detail td:not(:first-child){ text-align:right; }
 .tok-detail[hidden]{ display:none; }
