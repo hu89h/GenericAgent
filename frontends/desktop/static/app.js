@@ -3054,10 +3054,11 @@ async function tokRenderConductorRow() {
   // Row 1: historical total
   const tr1 = document.createElement('tr'); tr1.className = 'tok-row-session tok-row-conductor'; tr1.title = tip;
   const hIn = hist.input + curIn, hOut = hist.output + curOut, hCc = hist.cacheCreate + curCc, hCr = hist.cacheRead + curCr, hCost = hist.cost + curCost;
-  tr1.innerHTML = `<td>🎛 Conductor 累计</td><td>${fmtTok(hIn)}</td><td>${fmtTok(hOut)}</td><td>${fmtTok(hCc)}</td><td>${fmtTok(hCr)}</td><td>¥${hCost.toFixed(2)}</td>`;
+  const _ci = `<svg width="14" height="14" ${CONDUCTOR_SVG_ATTRS} style="vertical-align:-2px;margin-right:4px">${CONDUCTOR_SVG_INNER}</svg>`;
+  tr1.innerHTML = `<td>${_ci}Conductor 累计</td><td>${fmtTok(hIn)}</td><td>${fmtTok(hOut)}</td><td>${fmtTok(hCc)}</td><td>${fmtTok(hCr)}</td><td>¥${hCost.toFixed(2)}</td>`;
   // Row 2: current session
   const tr2 = document.createElement('tr'); tr2.className = 'tok-row-session tok-row-conductor'; tr2.title = tip;
-  tr2.innerHTML = `<td>🎛 Conductor 本次</td><td>${fmtTok(curIn)}</td><td>${fmtTok(curOut)}</td><td>${fmtTok(curCc)}</td><td>${fmtTok(curCr)}</td><td>¥${curCost.toFixed(2)}</td>`;
+  tr2.innerHTML = `<td>${_ci}Conductor 本次</td><td>${fmtTok(curIn)}</td><td>${fmtTok(curOut)}</td><td>${fmtTok(curCc)}</td><td>${fmtTok(curCr)}</td><td>¥${curCost.toFixed(2)}</td>`;
   tokTbody.insertBefore(tr2, tokTbody.firstChild);
   tokTbody.insertBefore(tr1, tokTbody.firstChild);
 }
