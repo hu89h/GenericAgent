@@ -221,10 +221,10 @@ const I18N = {
     'app.title': 'GenericAgent 桌面版',
     'brand.sub': '桌面终端',
     'nav.chat': '聊天', 'nav.channels': '消息通道', 'nav.status': '状态面板',
-    'nav.collab': 'Agent 指挥', 'nav.token': 'Token 统计',
+    'nav.collab': '指挥家', 'nav.token': 'Token 统计',
     'foot.settings': '配置', 'foot.ver': 'GenericAgent · 桌面版',
     'chat.startTitle': '开始对话', 'chat.startSub': '直接输入，或点预设功能一键启动',
-    'preset.butler.t': 'Conductor', 'preset.butler.d': '复杂任务自动拆活，进度在 Conductor 查看',
+    'preset.butler.t': '指挥家', 'preset.butler.d': '复杂任务自动拆解，只需查看进度和简报',
     'preset.plan.t': 'Plan 模式', 'preset.plan.d': '加载 Plan SOP，按探索→规划→执行→验证流程',
     'preset.goal.t': 'Goal 模式', 'preset.goal.d': '设定目标，自主完成',
     'preset.explore.t': '自主探索', 'preset.explore.d': '自动浏览并周期汇总',
@@ -260,32 +260,33 @@ const I18N = {
     'confirm.modelDelete': '确定删除该模型配置？',
     'page.channels.title': '消息通道', 'page.channels.sub': '后台 IM 进程：列表、启停与日志（同 hub.pyw）',
     'page.status.title': '状态面板', 'page.status.sub': 'hub.pyw 管理的后台进程/服务，集中查看与启停',
-    'page.collab.title': 'Conductor', 'page.collab.sub': '交代目标，自动拆活与跟进',
+    'page.collab.title': '指挥家', 'page.collab.sub': '交代目标，自动拆活与跟进',
     'collab.progressTitle': '分工进度',
-    'collab.progressEmpty': '还没有任务在执行。告诉 Conductor 你的目标后，这里会显示拆分后的处理进度。',
-    'collab.chatTitle': '与 Conductor 对话',
+    'collab.progressEmpty': '还没有任务在执行。告诉指挥家你的目标后，这里会显示拆分后的处理进度。',
     'collab.placeholder': '描述你想完成的目标，Enter 发送…',
-    'collab.guideTitle': '把要完成的事告诉 Conductor',
+    'collab.guideTitle': '把要完成的事告诉指挥家',
     'collab.guideWhen': '适合需要多步处理、要花一些时间才能完成的目标。日常聊天和快问快答，请用左侧「聊天」。',
     'collab.guideStep1t': '描述目标',
-    'collab.guideStep1d': '在聊天框里写下你想做的事，发给 Conductor',
+    'collab.guideStep1d': '在聊天框里写下你想做的事，发给指挥家',
     'collab.guideStep2t': '自动拆解',
-    'collab.guideStep2d': 'Conductor 自动拆解、分配任务，实时监督和调度',
+    'collab.guideStep2d': '指挥家自动拆解、分配任务，实时监督和调度',
     'collab.guideStep3t': '交付摘要',
-    'collab.guideStep3d': 'Conductor 根据执行状态，呈上任务简报',
+    'collab.guideStep3d': '指挥家根据执行状态，呈上任务简报',
     'collab.guideStep4t': '随时调整',
-    'collab.guideStep4d': '随时补充要求或细节，Conductor 都会处理',
+    'collab.guideStep4d': '随时补充要求或细节，指挥家都会处理',
     'collab.chipProgress': '现在进展如何？',
     'collab.chipPause': '先暂停当前任务',
     'collab.chipSummary': '总结一下目前的结果',
-    'collab.showProgressTitle': '查看任务执行进度（窄屏）',
-    'collab.progressStats': '{running} 进行中 · {done} 已完成 · {issue} 需关注',
-    'collab.typing': 'Conductor 正在处理',
+    'collab.showProgressTitle': '查看分工进度',
+    'collab.statRunning': '进行中',
+    'collab.statDone': '已完成',
+    'collab.plusMenu': '更多操作',
+    'collab.switchMode': '切换模式',
+    'collab.typing': '指挥家正在处理',
     'collab.offline': '无法连接 Conductor（8900）。请确认服务已启动且本地已穿透 8900 端口。',
     'collab.retry': '重试',
     'collab.reconnect': '连接断开，正在重连… 已保留上次任务进度。',
     'collab.reconnectIn': '{n} 秒后重试',
-    'collab.sticky': '{n} 个任务进行中',
     'collab.stRunning': '执行中', 'collab.stReported': '已回报', 'collab.stPaused': '已暂停',
     'collab.stFailed': '遇到问题', 'collab.stTerminated': '已终止',
     'collab.summaryRunning': '正在处理中…', 'collab.summaryWait': '等待回报',
@@ -369,7 +370,7 @@ const I18N = {
     'nav.collab': 'Conductor', 'nav.token': 'Token usage',
     'foot.settings': 'Settings', 'foot.ver': 'GenericAgent · Desktop',
     'chat.startTitle': 'Start a conversation', 'chat.startSub': 'Type a message, or pick a preset',
-    'preset.butler.t': 'Conductor', 'preset.butler.d': 'Delegate complex tasks; track progress in Conductor',
+    'preset.butler.t': 'Conductor', 'preset.butler.d': 'Auto-decompose complex tasks; just check progress and briefings',
     'preset.plan.t': 'Plan mode', 'preset.plan.d': 'Load Plan SOP — explore→plan→execute→verify',
     'preset.goal.t': 'Goal mode', 'preset.goal.d': 'Set a goal, run autonomously',
     'preset.explore.t': 'Auto explore', 'preset.explore.d': 'Browse & summarize periodically',
@@ -408,7 +409,6 @@ const I18N = {
     'page.collab.title': 'Conductor', 'page.collab.sub': 'Describe a goal — split, delegate, and follow up',
     'collab.progressTitle': 'Progress',
     'collab.progressEmpty': 'No tasks running yet. After you describe a goal to Conductor, split tasks will appear here.',
-    'collab.chatTitle': 'Chat with Conductor',
     'collab.placeholder': 'Describe your goal, Enter to send…',
     'collab.guideTitle': 'Tell Conductor what you want done',
     'collab.guideWhen': 'Best for multi-step goals that take a while. For everyday chat and quick questions, use Chat in the sidebar.',
@@ -423,14 +423,16 @@ const I18N = {
     'collab.chipProgress': 'How is it going?',
     'collab.chipPause': 'Pause current tasks',
     'collab.chipSummary': 'Summarize progress so far',
-    'collab.showProgressTitle': 'View task progress (narrow screens)',
-    'collab.progressStats': '{running} running · {done} done · {issue} need attention',
+    'collab.showProgressTitle': 'View task progress',
+    'collab.statRunning': 'Running',
+    'collab.statDone': 'Done',
+    'collab.plusMenu': 'More actions',
+    'collab.switchMode': 'Switch mode',
     'collab.typing': 'Conductor is working',
     'collab.offline': 'Cannot reach Conductor (8900). Start the service and forward port 8900.',
     'collab.retry': 'Retry',
     'collab.reconnect': 'Disconnected — reconnecting… Your last progress is kept.',
     'collab.reconnectIn': 'Retry in {n}s',
-    'collab.sticky': '{n} task(s) running',
     'collab.stRunning': 'Running', 'collab.stReported': 'Reported', 'collab.stPaused': 'Paused',
     'collab.stFailed': 'Issue', 'collab.stTerminated': 'Ended',
     'collab.summaryRunning': 'Working…', 'collab.summaryWait': 'Awaiting report',
@@ -775,6 +777,7 @@ nav.addEventListener('click', (e) => {
 
 /* ═══════════════ 弹窗开关 ═══════════════ */
 const openModal = (id) => { const m = document.getElementById(id); if (m) m.hidden = false; };
+window.gaOpenModal = openModal;
 const closeModals = () => document.querySelectorAll('.modal').forEach(m => {
   m.hidden = true;
   m.querySelectorAll('.field-limit-hint').forEach(h => h.style.display = 'none');
@@ -1282,7 +1285,8 @@ const msgLoading = document.getElementById('msg-loading');
 const MIN_MSG_LOADING_MS = 450;
 let _submitInFlight = false;
 const runToggle  = document.getElementById('run-toggle');
-const runLabel   = runToggle.querySelector('.rs-label');
+const chatStatus = pageStatusBar(runToggle);
+const runLabel   = runToggle?.querySelector('.rs-label');
 const convListEl = document.querySelector('.conv-list');
 const newConvBtn = document.querySelector('.new-conv');
 const searchInput = document.querySelector('.search input');
@@ -1327,7 +1331,7 @@ bindResize(sbResize, sbPanel, +1, 180, 360);  // 左栏:cursor 右移 → 增宽
 const modelChip  = document.getElementById('model-chip');
 const modelNameEl= modelChip ? modelChip.querySelector('.model-name') : null;
 // conductor 页面也有一个独立的模型 chip,共用一份模型数据
-const collabModelChip   = document.getElementById('collab-model-chip');
+const collabModelChip   = document.getElementById('cdb-model-chip');
 const collabModelNameEl = collabModelChip ? collabModelChip.querySelector('.model-name') : null;
 
 let msgsEl = null;
@@ -1434,6 +1438,18 @@ function msgNode(msg) {
     el.appendChild(copyBtn);
   }
   return el;
+}
+function collabItemToMsg(item) {
+  const attach = arr => (arr || []).map(x => {
+    const sid = x.sid != null ? x.sid : (String(x.id || '').startsWith('f-') ? String(x.id).slice(2) : x.id);
+    return { id: 'f-' + sid, name: x.name, path: x.path, dataUrl: x.dataUrl };
+  });
+  if (item.role === 'user') {
+    return { role: 'user', content: item.msg, display: item.msg, images: attach(item.images), files: attach(item.files) };
+  }
+  if (item.role === 'conductor') return { role: 'assistant', content: item.msg || '' };
+  if (item.role === 'error') return { role: 'error', content: item.msg || '' };
+  return { role: 'system', content: item.msg || '' };
 }
 function renderAllMessages(sess) {
   const box = ensureMsgs(); box.innerHTML = '';
@@ -1556,12 +1572,28 @@ function flushTypewriter(sess) {
 }
 
 /* ═══════════════ 运行状态 ═══════════════ */
-function statusLabel() {
-  const s = activeSess();
-  if (s && rt(s).busy) return t('status.running');
-  return state.bridgeReady ? t('status.ready') : t('status.disconnected');
+function pageStatusBar(btnEl) {
+  const label = btnEl?.querySelector('.rs-label');
+  return {
+    set(text, busy = false) {
+      if (!btnEl) return;
+      btnEl.classList.toggle('busy', !!busy);
+      if (label) label.textContent = text ?? '';
+    },
+    setBusy(text) { this.set(text, true); },
+    setReady() { this.set(t('status.ready')); },
+    setDisconnected() { this.set(t('status.disconnected')); },
+    setConnecting() { this.set(t('status.connecting')); },
+  };
 }
-function refreshStatusLabel() { runLabel.textContent = statusLabel(); }
+function refreshStatusLabel() {
+  const s = activeSess();
+  if (s && rt(s).busy) {
+    chatStatus.setBusy(formatTaskElapsed(Date.now() - (rt(s).taskStartedAt || Date.now())));
+  } else {
+    chatStatus.set(state.bridgeReady ? t('status.ready') : t('status.disconnected'));
+  }
+}
 
 /* ═══════════════ 消息计时 ═══════════════ */
 function formatTaskElapsed(ms) {
@@ -1609,8 +1641,7 @@ function startTaskTimer(sess) {
     if (el) ensureTaskElapsedBadge(el, r.taskStartedAt, null);
     // 更新左上角状态栏显示实时耗时
     if (isActive(sess)) {
-      const elapsed = Date.now() - r.taskStartedAt;
-      runLabel.textContent = formatTaskElapsed(elapsed);
+      chatStatus.setBusy(formatTaskElapsed(Date.now() - r.taskStartedAt));
     }
   }, 1000);
 }
@@ -1626,12 +1657,10 @@ function setBusy(sess, busy) {
   const r = rt(sess); r.busy = busy;
   if (busy) startTaskTimer(sess); else stopTaskTimer(sess);
   if (!isActive(sess)) return;
-  runToggle.classList.toggle('busy', busy);
   if (busy) {
-    const elapsed = Date.now() - (r.taskStartedAt || Date.now());
-    runLabel.textContent = formatTaskElapsed(elapsed);
+    chatStatus.setBusy(formatTaskElapsed(Date.now() - (r.taskStartedAt || Date.now())));
   } else {
-    runLabel.textContent = state.bridgeReady ? t('status.ready') : t('status.disconnected');
+    chatStatus.set(state.bridgeReady ? t('status.ready') : t('status.disconnected'));
   }
   if (sendBtn) {
     sendBtn.classList.toggle('is-stop', busy);
@@ -2281,7 +2310,7 @@ async function loadModelProfiles() {
 }
 /* ═══════════════ 模型菜单(chat + conductor 共用一份逻辑,各自一个 DOM) ═══════════════ */
 const modelMenu       = document.getElementById('model-menu');
-const collabModelMenu = document.getElementById('collab-model-menu');
+const collabModelMenu = document.getElementById('cdb-model-menu');
 function renderModelMenu(menuEl) {
   if (!menuEl) return;
   const list = state.modelProfiles || [];
@@ -2296,11 +2325,12 @@ function renderModelMenu(menuEl) {
 function openModelMenu(chipEl, menuEl) {
   if (!chipEl || !menuEl) return;
   if (typeof convMenu !== 'undefined' && convMenu) convMenu.hidden = true;
+  window.collabComposer?.closeMenu?.();
   closeAllModelMenus();
   renderModelMenu(menuEl);
   menuEl.hidden = false;
   const chipRect = chipEl.getBoundingClientRect();
-  const composer = chipEl.closest('.composer');
+  const composer = chipEl.closest('.cdb-composer') || chipEl.closest('.composer');
   if (composer) {
     const composerRect = composer.getBoundingClientRect();
     menuEl.style.left = (chipRect.left - composerRect.left) + 'px';
@@ -2336,11 +2366,16 @@ if (collabModelChip) collabModelChip.addEventListener('click', (e) => {
 });
 document.addEventListener('click', (e) => {
   if (e.target.closest('#model-menu') || e.target.closest('#model-chip') ||
-      e.target.closest('#collab-model-menu') || e.target.closest('#collab-model-chip')) return;
+      e.target.closest('#cdb-model-menu') || e.target.closest('#cdb-model-chip') ||
+      e.target.closest('#cdb-menu') || e.target.closest('#cdb-plus-btn')) return;
   closeAllModelMenus();
+  window.collabComposer?.closeMenu?.();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeAllModelMenus();
+  if (e.key === 'Escape') {
+    closeAllModelMenus();
+    window.collabComposer?.closeMenu?.();
+  }
 });
 
 const themeSwatches = document.getElementById('theme-swatches');
@@ -2432,11 +2467,11 @@ function filesForCtx(ctx) { return state.pendingFiles.filter(f => fileCtx(f) ===
 function composerCfg(ctx = activeFileComposer) {
   if (ctx === 'collab') {
     return {
-      input: document.getElementById('collab-input'),
-      strip: document.getElementById('collab-thumb-strip'),
-      uploadBtn: document.getElementById('collab-upload-btn'),
-      imgInput: document.getElementById('collab-img-input'),
-      dropZone: document.querySelector('.collab-chat'),
+      input: document.getElementById('cdb-input'),
+      strip: document.getElementById('cdb-thumb-strip'),
+      uploadBtn: null,
+      imgInput: document.getElementById('cdb-file-input'),
+      dropZone: document.querySelector('.page[data-page="collab"]'),
     };
   }
   return { input: inputEl, strip: thumbStrip, uploadBtn, imgInput, dropZone: chatPanel };
@@ -2505,9 +2540,8 @@ function removePlaceholderFromComposer(file) {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-// 读取 ctx 输入框内容为纯文本：chip → [Image #N]/[File #N]，<br>/<div> → 换行
-function composerText(ctx = activeFileComposer) {
-  const input = composerCfg(ctx).input;
+// 读取 contenteditable 输入框为纯文本：chip → [Image #N]/[File #N]，<br>/<div> → 换行
+function readComposerTextFrom(input) {
   if (!input) return '';
   const ser = (node, first) => {
     if (node.nodeType === 3) return node.nodeValue;
@@ -2519,11 +2553,15 @@ function composerText(ctx = activeFileComposer) {
     if (node.tagName === 'BR') return '\n';
     let inner = '';
     node.childNodes.forEach(c => { inner += ser(c, false); });
-    return (first ? '' : '\n') + inner;  // DIV/P 视为换行
+    return (first ? '' : '\n') + inner;
   };
   let out = '';
   input.childNodes.forEach((n, i) => { out += ser(n, i === 0); });
-  return out.replace(/ /g, ' ');  // nbsp → 普通空格
+  return out.replace(/ /g, ' ');
+}
+
+function composerText(ctx = activeFileComposer) {
+  return readComposerTextFrom(composerCfg(ctx).input);
 }
 
 function isImageFile(f) {
@@ -2674,20 +2712,27 @@ function handleThumbStripClick(e, ctx) {
 
 function bindComposerUpload(ctx) {
   const cfg = composerCfg(ctx);
-  if (!cfg.uploadBtn || cfg.uploadBtn.dataset.bound) return;
-  cfg.uploadBtn.dataset.bound = '1';
-  cfg.uploadBtn.addEventListener('click', (e) => {
-    e.preventDefault();
-    activeFileComposer = ctx;
-    cfg.imgInput?.click();
-  });
-  cfg.imgInput?.addEventListener('change', () => {
-    activeFileComposer = ctx;
-    addFiles(cfg.imgInput.files);
-    cfg.imgInput.value = '';
-  });
+  if (!cfg.input || cfg.input.dataset.gaUploadBound) return;
+  cfg.input.dataset.gaUploadBound = ctx;
+
+  if (cfg.uploadBtn && !cfg.uploadBtn.dataset.bound) {
+    cfg.uploadBtn.dataset.bound = '1';
+    cfg.uploadBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      activeFileComposer = ctx;
+      cfg.imgInput?.click();
+    });
+  }
+  if (cfg.imgInput && !cfg.imgInput.dataset.bound) {
+    cfg.imgInput.dataset.bound = '1';
+    cfg.imgInput.addEventListener('change', () => {
+      activeFileComposer = ctx;
+      addFiles(cfg.imgInput.files);
+      cfg.imgInput.value = '';
+    });
+  }
   cfg.strip?.addEventListener('click', (e) => handleThumbStripClick(e, ctx));
-  cfg.input?.addEventListener('paste', (e) => {
+  cfg.input.addEventListener('paste', (e) => {
     activeFileComposer = ctx;
     const cd = e.clipboardData || window.clipboardData;
     const items = cd && cd.items;
@@ -2709,15 +2754,16 @@ function bindComposerUpload(ctx) {
     document.execCommand('insertText', false, insert);
     if (text.length > remaining) showChanToast(t('err.charLimit').replace('{n}', maxLen), '', 'err');
   });
-  cfg.input?.addEventListener('input', () => {
+  cfg.input.addEventListener('input', () => {
     activeFileComposer = ctx;
     // 内容清空后浏览器可能残留 <br>，抹掉以便 :empty 占位提示生效
     if (!cfg.input.textContent.trim() && !cfg.input.querySelector('.ph-chip')) cfg.input.innerHTML = '';
     reconcilePendingFiles(ctx);  // chip 被删 → 同步清理附件 + 删磁盘文件
   });
   const zone = cfg.dropZone;
-  if (!zone || zone.dataset.dropBound) return;
-  zone.dataset.dropBound = '1';
+  const dropKey = `dropBound_${ctx}`;
+  if (!zone || zone.dataset[dropKey]) return;
+  zone.dataset[dropKey] = '1';
   let dragDepth = 0;
   const hasFiles = (e) => {
     const types = e.dataTransfer && e.dataTransfer.types;
@@ -2761,12 +2807,18 @@ bindComposerUpload('collab');
 
 Object.assign(window, {
   gaSetActiveFileComposer: ctx => { activeFileComposer = ctx === 'collab' ? 'collab' : 'chat'; },
+  gaPageStatusBar: pageStatusBar,
   gaExpandFilePlaceholders: expandFilePlaceholders,
   gaRenderMsgChips: renderMsgTextWithChips,
   gaCollectUsedFiles: collectUsedFiles,
   gaComposerText: composerText,
   gaClearUsedPendingFiles: text => removeUsedPendingFiles(collectUsedFiles(text)),
   gaFileSubLabel: fileSubLabel,
+  gaMsgNode: msgNode,
+  gaCollabItemToMsg: collabItemToMsg,
+  gaRenderAssistant: renderAssistant,
+  gaPostRenderEnhance: postRenderEnhance,
+  gaEscapeHtml: escapeHtml,
 });
 
 if (chatPanel) {
@@ -2805,7 +2857,7 @@ window.ga.onBridgeNotification((msg) => {
   }
 });
 window.ga.onBridgeError((err) => { console.warn('[bridge error]', err); });
-window.ga.onBridgeClosed(() => { state.bridgeReady = false; runLabel.textContent = t('status.disconnected'); });
+window.ga.onBridgeClosed(() => { state.bridgeReady = false; chatStatus.setDisconnected(); });
 
 /* ═══════════════ Token 统计页 ═══════════════ */
 const tokTbody = document.getElementById('tok-tbody');
@@ -3057,9 +3109,17 @@ nav.addEventListener('click',(e)=>{const item=e.target.closest('.nav-item');if(i
 const CP_KEY = 'ga_custom_presets';
 const HB_KEY = 'ga_hidden_builtins';
 
+const CONDUCTOR_SVG_INNER = '<path d="M0,0 L18,1 L38,5 L51,10 L66,18 L78,29 L82,37 L83,40 L83,57 L62,204 L59,220 L52,221 L23,220 L-20,220 L-53,221 L-55,219 L-71,108 L-78,57 L-78,41 L-75,33 L-69,25 L-59,17 L-44,9 L-29,4 L-13,1 Z" transform="translate(551,74)"/><path d="M0,0 L18,1 L30,4 L34,7 L36,31 L55,164 L57,179 L57,186 L56,187 L20,191 L-9,196 L-37,203 L-51,208 L-56,208 L-59,200 L-67,176 L-83,141 L-91,121 L-95,105 L-96,98 L-96,81 L-93,66 L-87,51 L-80,40 L-69,28 L-60,20 L-45,11 L-30,5 L-11,1 Z" transform="translate(426,109)"/><path d="M0,0 L9,0 L26,2 L41,6 L57,13 L71,22 L82,32 L91,44 L99,60 L103,74 L104,81 L104,98 L101,115 L93,137 L78,169 L70,190 L65,207 L64,208 L56,207 L38,201 L18,196 L-12,191 L-48,187 L-50,186 L-47,162 L-28,29 L-26,7 L-20,3 L-10,1 Z" transform="translate(673,109)"/><path d="M0,0 L35,0 L79,2 L117,6 L153,12 L180,19 L196,25 L201,30 L202,32 L203,42 L203,78 L201,86 L199,90 L219,97 L236,106 L252,118 L262,127 L273,136 L282,144 L299,155 L317,163 L335,168 L371,175 L380,178 L381,182 L371,203 L364,223 L359,243 L358,250 L356,252 L346,252 L326,249 L311,245 L296,239 L280,230 L267,219 L258,208 L249,194 L240,175 L232,156 L221,137 L209,124 L199,116 L193,113 L193,123 L201,130 L206,138 L209,150 L209,167 L206,185 L201,200 L195,211 L185,221 L177,225 L170,251 L163,271 L155,289 L145,308 L137,320 L125,336 L111,351 L100,361 L96,364 L95,391 L92,420 L87,448 L79,481 L68,516 L54,552 L38,587 L21,622 L16,624 L12,619 L0,595 L-15,562 L-27,534 L-40,498 L-50,462 L-56,433 L-60,404 L-61,391 L-62,364 L-77,351 L-85,343 L-94,332 L-103,320 L-114,302 L-123,285 L-134,257 L-141,232 L-142,224 L-147,223 L-156,216 L-162,208 L-168,196 L-173,177 L-174,171 L-174,147 L-170,135 L-163,126 L-159,123 L-159,111 L-160,93 L-165,89 L-168,82 L-168,34 L-165,28 L-157,23 L-135,16 L-108,10 L-83,6 L-43,2 Z M-1,70 L-38,72 L-64,75 L-91,80 L-110,85 L-116,88 L-119,95 L-124,121 L-126,144 L-126,172 L-123,202 L-117,231 L-109,257 L-100,278 L-89,299 L-77,316 L-66,328 L-65,330 L-63,330 L-62,333 L-57,336 L-50,315 L-42,300 L-35,291 L-26,282 L-12,274 L1,270 L7,269 L27,269 L43,273 L59,281 L70,291 L80,306 L88,326 L91,336 L98,331 L105,323 L114,312 L124,297 L136,274 L145,250 L152,226 L157,200 L159,184 L160,170 L160,144 L158,121 L153,95 L150,88 L141,84 L115,78 L90,74 L58,71 L35,70 Z" transform="translate(536,309)"/><path d="M0,0 L7,0 L20,4 L30,12 L38,24 L46,20 L57,19 L67,22 L77,30 L83,39 L87,47 L90,58 L101,59 L107,63 L114,71 L120,84 L124,97 L127,119 L135,123 L141,135 L144,151 L145,173 L143,198 L138,223 L133,240 L125,259 L116,275 L108,286 L97,299 L86,309 L76,316 L64,323 L55,327 L60,369 L60,372 L68,372 L78,375 L86,382 L90,391 L90,402 L86,410 L80,415 L76,416 L22,419 L19,421 L18,426 L20,430 L27,431 L65,429 L83,429 L90,433 L94,439 L95,442 L95,453 L92,459 L87,464 L83,466 L57,468 L27,470 L24,473 L25,480 L27,481 L46,481 L66,480 L86,480 L92,484 L96,492 L96,502 L92,510 L86,515 L82,517 L59,519 L52,519 L57,556 L60,563 L66,566 L74,565 L77,564 L79,559 L79,549 L78,540 L78,530 L89,527 L97,522 L104,514 L108,502 L108,491 L104,480 L99,473 L100,469 L104,463 L107,453 L107,442 L104,432 L100,426 L95,421 L97,416 L101,408 L102,404 L102,390 L99,380 L93,372 L89,368 L91,364 L104,352 L117,342 L133,331 L148,322 L170,310 L192,299 L226,284 L232,283 L234,287 L240,324 L246,353 L254,384 L266,420 L278,449 L291,477 L309,513 L322,543 L330,565 L335,584 L336,593 L334,595 L48,595 L38,592 L27,585 L17,576 L8,565 L-2,551 L-12,533 L-20,516 L-27,495 L-32,473 L-34,459 L-35,436 L-33,419 L-29,406 L-23,395 L-14,386 L-4,380 L7,376 L16,375 L13,356 L10,329 L1,328 L-20,321 L-36,313 L-48,306 L-64,294 L-82,276 L-92,263 L-103,245 L-112,226 L-118,209 L-123,190 L-126,171 L-126,149 L-123,137 L-119,131 L-114,128 L-111,128 L-112,121 L-112,107 L-109,88 L-104,76 L-98,68 L-92,63 L-87,61 L-79,61 L-78,50 L-73,37 L-66,28 L-57,22 L-51,20 L-41,20 L-30,24 L-25,15 L-18,7 L-9,2 Z" transform="translate(200,368)"/><path d="M0,0 L6,1 L42,17 L71,31 L100,46 L123,60 L140,72 L154,83 L167,95 L179,107 L190,121 L201,136 L210,151 L221,172 L230,195 L237,218 L243,247 L246,272 L247,289 L247,306 L245,310 L241,312 L-102,312 L-104,310 L-102,298 L-96,278 L-88,256 L-75,228 L-61,199 L-49,174 L-37,145 L-28,120 L-21,97 L-13,65 L-6,29 L-2,4 Z" transform="translate(674,651)"/>';
+const CONDUCTOR_SVG_ATTRS = 'viewBox="0 0 995 1037" fill="currentColor" stroke="none"';
+const CONDUCTOR_ICON_SVG = `<svg class="fc-ic" ${CONDUCTOR_SVG_ATTRS}>${CONDUCTOR_SVG_INNER}</svg>`;
+(() => {
+  const ic = document.querySelector('a.nav-item[data-page="collab"] > .ic');
+  if (ic) ic.innerHTML = `<svg ${CONDUCTOR_SVG_ATTRS} aria-hidden="true">${CONDUCTOR_SVG_INNER}</svg>`;
+})();
+
 const BUILTIN_PRESETS = [
   { key: 'butler', titleKey: 'preset.butler.t', descKey: 'preset.butler.d', navigate: 'collab',
-    iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>' },
+    iconSvg: CONDUCTOR_ICON_SVG },
   { key: 'plan',   titleKey: 'preset.plan.t',   descKey: 'preset.plan.d',   promptKey: 'presetPrompt.plan',
     iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="8" y1="18" x2="16" y2="18"/><circle cx="4" cy="6" r="1.5"/><circle cx="4" cy="12" r="1.5"/><circle cx="4" cy="18" r="1.5"/></svg>' },
   { key: 'goal',    titleKey: 'preset.goal.t',    descKey: 'preset.goal.d',    promptKey: 'presetPrompt.goal',
@@ -3500,7 +3560,7 @@ function showChanToast(title, detail, kind) {
   function setup() {
     // Contenteditable inputs (chat + collab)
     const chatInput = document.querySelector('.input[contenteditable][data-i18n-ph="composer.placeholder"]');
-    const collabInput = document.getElementById('collab-input');
+    const collabInput = document.getElementById('cdb-input');
     bindContentEditableLimit(chatInput, 20000);
     bindContentEditableLimit(collabInput, 20000);
 
@@ -3818,8 +3878,116 @@ loadHiddenBuiltins();
 renderAllPresets();
 if (state.activeId) setActiveSession(state.activeId);
 else refreshEmptyState(null);
-runLabel.textContent = t('status.connecting');
+chatStatus.setConnecting();
 window.ga.startBridge && window.ga.startBridge();
+})();
+
+/* Conductor 输入框 — 与主聊天 composer 解耦（cdb-* DOM，便于日后抽离） */
+(function () {
+  'use strict';
+  const CTX = 'collab';
+  const root = document.getElementById('cdb-composer');
+  if (!root) return;
+
+  const input = document.getElementById('cdb-input');
+  const fileInput = document.getElementById('cdb-file-input');
+  const plusBtn = document.getElementById('cdb-plus-btn');
+  const menu = document.getElementById('cdb-menu');
+  const sendBtn = document.getElementById('cdb-send');
+  let onSend = null;
+
+  function text() { return window.gaComposerText?.('collab') ?? ''; }
+
+  function clearIfMatch(raw) {
+    if (input && text().trim() === String(raw || '').trim()) input.innerHTML = '';
+  }
+
+  function setEnabled(on) {
+    if (input) input.contentEditable = on ? 'true' : 'false';
+    if (sendBtn) sendBtn.disabled = !on;
+  }
+
+  function closeMenu() {
+    if (!menu) return;
+    menu.hidden = true;
+    if (plusBtn) plusBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  function openMenu() {
+    if (!menu || !plusBtn) return;
+    closeAllModelMenus?.();
+    menu.hidden = false;
+    plusBtn.setAttribute('aria-expanded', 'true');
+  }
+
+  function toggleMenu() {
+    if (!menu) return;
+    if (menu.hidden) openMenu();
+    else closeMenu();
+  }
+
+  function doSend() {
+    if (!onSend) return;
+    onSend(text());
+  }
+
+  function bindOnce() {
+    if (root.dataset.bound) return;
+    root.dataset.bound = '1';
+
+    plusBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleMenu();
+    });
+
+    menu?.addEventListener('click', (e) => {
+      const item = e.target.closest('.ga-menu-item');
+      if (!item) return;
+      e.stopPropagation();
+      closeMenu();
+      if (item.id === 'cdb-menu-upload') {
+        window.gaSetActiveFileComposer?.(CTX);
+        fileInput?.click();
+        return;
+      }
+      if (item.id === 'cdb-menu-preset') {
+        window.gaOpenModal?.('preset-modal');
+        return;
+      }
+    });
+
+    document.querySelectorAll('#collab-quick [data-prompt-key]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!onSend) return;
+        const key = btn.dataset.promptKey;
+        onSend((window.gaT && window.gaT(key)) || key);
+      });
+    });
+
+    input?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+        e.preventDefault();
+        doSend();
+      }
+    });
+
+    sendBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      doSend();
+    });
+  }
+
+  function init(handler) {
+    onSend = handler;
+    bindOnce();
+  }
+
+  window.collabComposer = {
+    init, text, clearIfMatch, setEnabled,
+    focus: () => input?.focus(),
+    closeMenu,
+  };
 })();
 
 /* Conductor 页 — 直连 Conductor WS，不走 bridge session */
@@ -3829,13 +3997,11 @@ window.ga.startBridge && window.ga.startBridge();
   const FAIL_MAX = 5, RECON_BASE = 1200, RECON_MAX = 30000;
   const $ = id => document.getElementById(id);
   const t = k => (window.gaT && window.gaT(k)) || k;
-  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  const md = s => { try { return typeof marked !== 'undefined' ? marked.parse(s || '') : esc(s); } catch { return esc(s); } };
+  const esc = s => (window.gaEscapeHtml ? window.gaEscapeHtml(s) : String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])));
   const stripAttach = text => String(text || '')
     .replace(/\[(Image|File)\s+#\d+\]\s*/g, '')
     .replace(/[^\s]*desktop_uploads[^\s]*\s*/g, '')  // 兜底:去掉内联的本地上传路径,避免历史/回显消息把全路径甩出来
     .trim();
-  const FC_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
   const ST_ICONS = {
     running: '<span class="collab-st-ic collab-st-ic--spin" aria-hidden="true"></span>',
     reported: '<span class="collab-st-ic collab-st-ic--ok" aria-hidden="true">✓</span>',
@@ -3844,7 +4010,6 @@ window.ga.startBridge && window.ga.startBridge();
     terminated: '<span class="collab-st-ic collab-st-ic--off" aria-hidden="true">×</span>',
   };
   const ST_KEYS = { running: 'collab.stRunning', reported: 'collab.stReported', paused: 'collab.stPaused', failed: 'collab.stFailed', terminated: 'collab.stTerminated' };
-  const CHIP_KEYS = ['collab.chipProgress', 'collab.chipPause', 'collab.chipSummary'];
 
   const S = {
     everConnected: false, reconnecting: false, serviceAvailable: false,
@@ -3854,11 +4019,68 @@ window.ga.startBridge && window.ga.startBridge();
   };
   let ws, connectTimer, reconnectTick, titleSeq = 0, wsGen = 0, localSeq = 0;
   const titleSeen = new Map();
+  let prevRail = { running: 0, done: 0, count: 0, sig: '' };
+  const prevUpdated = new Map();
+  const collabStatus = window.gaPageStatusBar?.($('collab-run-toggle'));
 
   let draftEl = null;
 
-  const scrollMsgs = () => { const a = $('collab-msgs'); if (a) a.scrollTop = a.scrollHeight; };
+  const scrollMsgs = () => {
+    const root = $('collab-msgs');
+    const sc = root?.querySelector('.collab-scroll');
+    if (sc) sc.scrollTop = sc.scrollHeight;
+  };
   const showDraft = () => S.conductorTyping && S.serviceAvailable && S.historyReady && S.messages.length > 0;
+
+  function workerSig(list) {
+    return (list || []).map(w => `${w.id}:${w.updatedAt}:${w.status}`).join('|');
+  }
+
+  function pulseEl(el) {
+    if (!el) return;
+    el.classList.remove('pulse');
+    void el.offsetWidth;
+    el.classList.add('pulse');
+  }
+
+  function syncProgressDrawer() {
+    const page = document.querySelector('.page[data-page="collab"]');
+    if (page) page.classList.toggle('collab-prog-open', S.progressOpen);
+  }
+
+  function syncRail(opts = {}) {
+    const rail = $('collab-rail');
+    const hasChat = S.historyReady && S.messages.length > 0;
+    if (rail) rail.hidden = !hasChat;
+
+    const running = S.workers.filter(w => w.status === 'running').length;
+    const done = S.workers.filter(w => w.status === 'reported').length;
+    const runBadge = $('collab-rail-run');
+    const doneBadge = $('collab-rail-done');
+    const runN = $('collab-rail-run-n');
+    const doneN = $('collab-rail-done-n');
+
+    if (runBadge) runBadge.hidden = running <= 0;
+    if (doneBadge) doneBadge.hidden = done <= 0;
+    if (runN) runN.textContent = String(running);
+    if (doneN) doneN.textContent = String(done);
+
+    const sig = workerSig(S.workers);
+    if (opts.pulse) {
+      if (running > prevRail.running || S.workers.length > prevRail.count) pulseEl(runBadge);
+      if (done > prevRail.done) pulseEl(doneBadge);
+    } else if (sig !== prevRail.sig) {
+      if (running !== prevRail.running) pulseEl(runBadge);
+      if (done !== prevRail.done) pulseEl(doneBadge);
+    }
+    prevRail = { running, done, count: S.workers.length, sig };
+    syncProgressDrawer();
+  }
+
+  function toggleProgress(open) {
+    S.progressOpen = typeof open === 'boolean' ? open : !S.progressOpen;
+    syncRail();
+  }
 
   function clearDraft() {
     if (draftEl) { draftEl.remove(); draftEl = null; }
@@ -3911,16 +4133,16 @@ window.ga.startBridge && window.ga.startBridge();
     return { id: raw.id, title, status: ui, summary, fullReply: raw.reply || '', updatedAt: raw.updated_at };
   }
 
-  function syncProgressToggle() {
-    const btn = $('collab-progress-toggle'), body = $('collab-body');
-    if (!btn || !body) return;
-    const split = body.classList.contains('collab-body--split');
-    btn.hidden = !split;
-    body.classList.toggle('collab-progress-open', split && S.progressOpen);
+  function syncCollabStatus() {
+    if (!collabStatus) return;
+    if (S.conductorTyping && S.serviceAvailable) collabStatus.setBusy(t('status.running'));
+    else if (S.serviceAvailable) collabStatus.setReady();
+    else if (S.reconnecting || (!S.everConnected && S.failCount < FAIL_MAX)) collabStatus.setConnecting();
+    else collabStatus.setDisconnected();
   }
 
   function setConnUi() {
-    const off = $('collab-offline'), recon = $('collab-reconnect'), inp = $('collab-input'), btn = $('collab-send');
+    const off = $('collab-offline'), recon = $('collab-reconnect');
     const avail = S.serviceAvailable;
     const trying = !avail && !S.everConnected && S.failCount < FAIL_MAX;
     if (off) off.hidden = avail || S.reconnecting || trying;
@@ -3930,10 +4152,10 @@ window.ga.startBridge && window.ga.startBridge();
         ? t('collab.reconnect') + ' ' + t('collab.reconnectIn').replace('{n}', Math.ceil((S.reconnectAt - Date.now()) / 1000))
         : t('collab.reconnect');
     }
-    if (inp) inp.contentEditable = avail ? 'true' : 'false';  // div 无 .disabled，改切 contentEditable
-    if (btn) btn.disabled = !avail;
+    window.collabComposer?.setEnabled?.(avail);
+    syncCollabStatus();
     syncDraft();
-    syncProgressToggle();
+    syncRail();
   }
 
   let cardMenu = null;
@@ -3960,7 +4182,12 @@ window.ga.startBridge && window.ga.startBridge();
     closeWorkerDrawer();
     drawerEl = document.createElement('div');
     drawerEl.className = 'collab-drawer-wrap';
-    drawerEl.innerHTML = `<div class="collab-drawer-backdrop"></div><aside class="collab-drawer"><div class="collab-drawer-head"><span class="collab-drawer-title">${esc(w.title)}</span><button class="modal-x collab-drawer-close">${GA_ICON('x')}</button></div><div class="collab-drawer-body">${md(w.fullReply || t('collab.summaryWait'))}</div></aside>`;
+    drawerEl.innerHTML = `<div class="collab-drawer-backdrop"></div><aside class="collab-drawer"><div class="collab-drawer-head"><span class="collab-drawer-title">${esc(w.title)}</span><button class="modal-x collab-drawer-close">${GA_ICON('x')}</button></div><div class="collab-drawer-body"><div class="bubble md"></div></div></aside>`;
+    const bubble = drawerEl.querySelector('.collab-drawer-body .bubble');
+    if (bubble) {
+      bubble.innerHTML = (window.gaRenderAssistant || (s => esc(s)))(w.fullReply || t('collab.summaryWait'));
+      window.gaPostRenderEnhance?.(bubble);
+    }
     drawerEl.querySelector('.collab-drawer-backdrop').onclick = closeWorkerDrawer;
     drawerEl.querySelector('.collab-drawer-close').onclick = closeWorkerDrawer;
     document.body.appendChild(drawerEl);
@@ -3977,80 +4204,65 @@ window.ga.startBridge && window.ga.startBridge();
         <div class="collab-card-sum">${esc(w.summary)}</div>
       </article>`).join('');
     box.querySelectorAll('.collab-card').forEach(el => {
+      const w = S.workers.find(x => x.id === el.dataset.sid);
+      if (w) {
+        const prev = prevUpdated.get(w.id);
+        if (prev != null && prev !== w.updatedAt) pulseEl(el);
+        prevUpdated.set(w.id, w.updatedAt);
+      }
       el.addEventListener('contextmenu', e => {
         e.preventDefault();
         showCardMenu(e.clientX, e.clientY, el.dataset.sid);
       });
       el.addEventListener('click', () => {
-        const w = S.workers.find(w => w.id === el.dataset.sid);
         if (w) openWorkerDrawer(w);
       });
     });
     const running = S.workers.filter(w => w.status === 'running').length;
+    const done = S.workers.filter(w => w.status === 'reported').length;
     S.runningCount = running;
     document.dispatchEvent(new CustomEvent('collab:running-count', { detail: { count: running } }));
-    const sticky = $('collab-sticky');
-    if (sticky) { sticky.hidden = !running; sticky.textContent = t('collab.sticky').replace('{n}', running); }
     const stats = $('collab-progress-stats');
     if (stats) {
-      const has = S.workers.length > 0;
+      const has = running > 0 || done > 0;
       stats.hidden = !has;
-      if (has) stats.textContent = t('collab.progressStats')
-        .replace('{running}', running)
-        .replace('{done}', S.workers.filter(w => w.status === 'reported').length)
-        .replace('{issue}', S.workers.filter(w => w.status === 'failed' || w.status === 'terminated').length);
+      if (has) {
+        stats.innerHTML = [
+          running > 0 ? `<span class="collab-stat collab-stat--running"><span class="collab-rail-spin" aria-hidden="true"></span><span class="n">${running}</span> ${esc(t('collab.statRunning'))}</span>` : '',
+          done > 0 ? `<span class="collab-stat collab-stat--done"><span class="collab-rail-dot" aria-hidden="true"></span><span class="n">${done}</span> ${esc(t('collab.statDone'))}</span>` : '',
+        ].filter(Boolean).join('');
+      }
     }
-  }
-
-  function renderUserMsg(item) {
-    const sub = n => (window.gaFileSubLabel && window.gaFileSubLabel(n)) || n;
-    const imgs = (item.images || []).map(im => `<img src="${esc(im.dataUrl || '')}" alt="">`).join('');
-    const files = (item.files || []).map(f => {
-      const name = f.name || 'file';
-      return `<div class="file-chip" data-path="${esc(f.path || '')}" data-name="${esc(name)}"><span class="fc-icon">${FC_SVG}</span><span class="fc-meta"><span class="fc-name">${esc(name)}</span><span class="fc-sub">${esc(sub(name))}</span></span></div>`;
-    }).join('');
-    const chipText = window.gaRenderMsgChips
-      ? window.gaRenderMsgChips(item.msg, (kind, n) => {
-          const hit = (kind === 'Image' ? (item.images || []) : (item.files || [])).find(x => x.sid === n);
-          return hit && (hit.name || '');
-        })
-      : esc(stripAttach(item.msg));
-    const text = chipText ? `<div class="bubble">${chipText}</div>` : '';
-    return `<div class="msg user collab-msg-enter"><div class="user-stack">${files ? `<div class="user-files">${files}</div>` : ''}${imgs ? `<div class="user-imgs">${imgs}</div>` : ''}${text}</div></div>`;
-  }
-
-  function renderMsg(item) {
-    if (item.role === 'user') return renderUserMsg(item);
-    if (item.role === 'conductor') return `<div class="msg assistant collab-msg-enter"><div class="bubble md">${md(item.msg)}</div></div>`;
-    return `<div class="msg system collab-msg-enter"><div class="bubble sys">${esc(item.msg)}</div></div>`;
-  }
-
-  function syncLayout() {
-    const body = $('collab-body');
-    if (!body) return;
-    body.classList.toggle('collab-body--split', S.historyReady && S.messages.length > 0);
-    syncProgressToggle();
+    syncRail({ pulse: true });
   }
 
   function syncMessages() {
-    const area = $('collab-msgs'), welcome = $('collab-welcome'), list = $('collab-msg-list'), head = $('collab-chat-head');
+    const area = $('collab-msgs'), welcome = $('collab-welcome'), list = $('collab-msg-list');
     if (!area || !list) return;
     if (!S.historyReady) {
       area.classList.remove('has-msgs');
       if (welcome) welcome.hidden = true;
-      if (head) head.hidden = true;
       list.hidden = true;
-      return syncLayout();
+      syncRail();
+      return;
     }
     const has = S.messages.length > 0;
     area.classList.toggle('has-msgs', has);
     if (welcome) welcome.hidden = has;
-    if (head) head.hidden = !has;
     list.hidden = !has;
-    list.innerHTML = S.messages.map(renderMsg).join('');
+    list.replaceChildren();
+    const toMsg = window.gaCollabItemToMsg;
+    const render = window.gaMsgNode;
+    if (toMsg && render) {
+      for (const item of S.messages) {
+        const el = render(toMsg(item));
+        el.classList.add('collab-msg-enter');
+        list.appendChild(el);
+      }
+    }
     syncDraft();
     scrollMsgs();
-    syncLayout();
+    syncRail();
   }
 
   function pushMsg(item) {
@@ -4084,7 +4296,6 @@ window.ga.startBridge && window.ga.startBridge();
   function setWorkers(rawList) {
     S.workers = (rawList || []).map(normalizeWorker);
     renderWorkers();
-    syncLayout();
   }
 
   function onWsData(data, gen) {
@@ -4163,6 +4374,7 @@ window.ga.startBridge && window.ga.startBridge();
   function sendText(rawText) {
     const text = (rawText || '').trim();
     if (!text || !ws || ws.readyState !== WebSocket.OPEN) return false;
+    window.gaSetActiveFileComposer?.('collab');
     const expand = window.gaExpandFilePlaceholders || (s => s);
     const collect = window.gaCollectUsedFiles || (() => []);
     const clearUsed = window.gaClearUsedPendingFiles || (() => {});
@@ -4174,36 +4386,24 @@ window.ga.startBridge && window.ga.startBridge();
     syncMessages();
     ws.send(JSON.stringify({ msg: expand(text), files, images }));
     clearUsed(text);
-    const inp = $('collab-input');
-    if (inp && window.gaComposerText && window.gaComposerText('collab').trim() === text) inp.innerHTML = '';
+    window.collabComposer?.clearIfMatch?.(text);
     setConnUi();
     return true;
   }
 
-  function buildChips() {
-    const box = $('collab-chips');
-    if (box) box.innerHTML = CHIP_KEYS.map(k => `<button type="button" class="chip sm collab-chip" data-text-key="${k}">${esc(t(k))}</button>`).join('');
-  }
-
-  $('collab-send')?.addEventListener('click', () => sendText(window.gaComposerText ? window.gaComposerText('collab') : ''));
   $('collab-retry')?.addEventListener('click', () => { S.failCount = 0; S.reconnecting = false; resetWs(); connect(); });
-  $('collab-input')?.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sendText(window.gaComposerText ? window.gaComposerText('collab') : ''); } });
-  $('collab-chips')?.addEventListener('click', e => { const k = e.target.closest('.collab-chip')?.dataset.textKey; if (k) sendText(t(k)); });
-  $('collab-progress-toggle')?.addEventListener('click', () => { S.progressOpen = !S.progressOpen; syncProgressToggle(); });
-  document.querySelector('[data-page="collab"]')?.addEventListener('click', e => {
-    if (!S.progressOpen || e.target.closest('.collab-progress') || e.target.closest('#collab-progress-toggle')) return;
-    S.progressOpen = false;
-    syncProgressToggle();
-  });
+  $('collab-rail-toggle')?.addEventListener('click', () => toggleProgress());
+  $('collab-prog-close')?.addEventListener('click', () => toggleProgress(false));
+
+  window.collabComposer?.init?.(sendText);
 
   window.collabInit = () => {
     window.gaSetActiveFileComposer?.('collab');
-    buildChips();
     syncMessages();
     setConnUi();
     renderWorkers();
     connect();
   };
-  window.collabFocus = () => $('collab-input')?.focus();
-  window.collabRetranslate = () => { buildChips(); renderWorkers(); syncMessages(); setConnUi(); };
+  window.collabFocus = () => window.collabComposer?.focus?.();
+  window.collabRetranslate = () => { renderWorkers(); syncMessages(); setConnUi(); };
 })();
