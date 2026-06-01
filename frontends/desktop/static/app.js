@@ -3952,10 +3952,6 @@ window.ga.startBridge && window.ga.startBridge();
         fileInput?.click();
         return;
       }
-      if (item.id === 'cdb-menu-preset') {
-        window.gaOpenModal?.('preset-modal');
-        return;
-      }
     });
 
     document.querySelectorAll('#collab-quick [data-prompt-key]').forEach((btn) => {
