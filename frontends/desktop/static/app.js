@@ -347,7 +347,7 @@ const I18N = {
     'proc.imbotWechat': 'imbot · 微信', 'proc.imbotDing': 'imbot · 钉钉', 'proc.scheduler': '定时任务调度',
     'cm.scheduling': '调度中', 'cm.running': '执行中', 'cm.idleSt': '空闲',
     'cm.master': '已派 3 子任务', 'cm.w1': '子任务：抓取数据', 'cm.w2': '子任务：复核结果', 'cm.sub': '等待派单',
-    'tok.total': '累计 token', 'tok.cost': '估算成本', 'tok.today': '今日 token', 'tok.tabAll': '聊天', 'tok.tabConductor': 'Conductor',
+    'tok.total': '累计 token', 'tok.cost': '估算成本', 'tok.today': '今日 token', 'tok.tabAll': '聊天', 'tok.tabConductor': 'Conductor', 'tok.condTotal': 'Conductor 累计', 'tok.condCurrent': 'Conductor 本次', 'tok.condTip': 'Conductor 消耗的 token 不计入聊天累计 token 中', 'tok.disclaimer': '不同 API 网站的计费价格可能会有差异，请以实际网站为准。',
     'tok.colSession': '会话', 'tok.colIn': '输入', 'tok.colOut': '输出', 'tok.colCacheW': '缓存写入', 'tok.colCache': '缓存读取', 'tok.colCost': '成本',
     'tok.from': '从', 'tok.to': '到', 'tok.reset': '重置', 'tok.noData': '暂无记录', 'tok.deleted': '此会话已删除',
     'tok.pricingUnknown': '⚠ 此模型计费规则尚未明确，按默认估算',
@@ -493,7 +493,7 @@ const I18N = {
     'proc.imbotWechat': 'imbot · WeChat', 'proc.imbotDing': 'imbot · DingTalk', 'proc.scheduler': 'Scheduler',
     'cm.scheduling': 'Scheduling', 'cm.running': 'Running', 'cm.idleSt': 'Idle',
     'cm.master': 'Dispatched 3 subtasks', 'cm.w1': 'Subtask: fetch data', 'cm.w2': 'Subtask: review results', 'cm.sub': 'Waiting for tasks',
-    'tok.total': 'Total tokens', 'tok.cost': 'Est. cost', 'tok.today': 'Today tokens', 'tok.tabAll': 'Chat', 'tok.tabConductor': 'Conductor',
+    'tok.total': 'Total tokens', 'tok.cost': 'Est. cost', 'tok.today': 'Today tokens', 'tok.tabAll': 'Chat', 'tok.tabConductor': 'Conductor', 'tok.condTotal': 'Conductor Total', 'tok.condCurrent': 'Conductor Current', 'tok.condTip': 'Conductor tokens are not included in chat totals', 'tok.disclaimer': 'Pricing may vary by API provider. Please refer to the actual website.',
     'tok.colSession': 'Session', 'tok.colIn': 'Input', 'tok.colOut': 'Output', 'tok.colCacheW': 'Cache write', 'tok.colCache': 'Cache read', 'tok.colCost': 'Cost',
     'tok.from': 'From', 'tok.to': 'To', 'tok.reset': 'Reset', 'tok.noData': 'No records', 'tok.deleted': 'Session deleted',
     'tok.pricingUnknown': '⚠ Pricing not confirmed, using defaults',
@@ -3063,9 +3063,9 @@ async function loadConductorTokens() {
   if (fetchOk) _condSave(hist, {input:curIn, output:curOut, cacheCreate:curCc, cacheRead:curCr, cost:curCost});
   const hIn = hist.input + curIn, hOut = hist.output + curOut, hCc = hist.cacheCreate + curCc, hCr = hist.cacheRead + curCr, hCost = hist.cost + curCost;
   if (!tokTbody) return;
-  const tip = 'Conductor 消耗的 token 不计入聊天累计 token 中';
+  const tip = t('tok.condTip');
   const _ci = `<svg width="14" height="14" ${CONDUCTOR_SVG_ATTRS} style="vertical-align:-2px;margin-right:4px">${CONDUCTOR_SVG_INNER}</svg>`;
-  tokTbody.innerHTML = `<tr class="tok-row-conductor" title="${tip}"><td>${_ci}Conductor 累计</td><td>${fmtTok(hIn)}</td><td>${fmtTok(hOut)}</td><td>${fmtTok(hCc)}</td><td>${fmtTok(hCr)}</td><td>¥${hCost.toFixed(2)}</td></tr><tr class="tok-row-conductor" title="${tip}"><td>${_ci}Conductor 本次</td><td>${fmtTok(curIn)}</td><td>${fmtTok(curOut)}</td><td>${fmtTok(curCc)}</td><td>${fmtTok(curCr)}</td><td>¥${curCost.toFixed(2)}</td></tr>`;
+  tokTbody.innerHTML = `<tr class="tok-row-conductor" title="${tip}"><td>${_ci}${t('tok.condTotal')}</td><td>${fmtTok(hIn)}</td><td>${fmtTok(hOut)}</td><td>${fmtTok(hCc)}</td><td>${fmtTok(hCr)}</td><td>¥${hCost.toFixed(2)}</td></tr><tr class="tok-row-conductor" title="${tip}"><td>${_ci}${t('tok.condCurrent')}</td><td>${fmtTok(curIn)}</td><td>${fmtTok(curOut)}</td><td>${fmtTok(curCc)}</td><td>${fmtTok(curCr)}</td><td>¥${curCost.toFixed(2)}</td></tr>`;
   const pager = document.getElementById('tok-pager');
   if (pager) pager.innerHTML = '';
 }
