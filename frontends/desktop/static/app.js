@@ -55,6 +55,8 @@ const gaServiceStore = {
   const listeners = new Map();
   let ws = null;
   let cachedBridgeReady = null;
+  let wsRetries = 0;
+  let wsRetryTimer = null;
   const bridgeBase = BRIDGE_ORIGIN;
   const wsUrl = `${BRIDGE_WS_ORIGIN}/ws`;
 
@@ -105,9 +107,10 @@ const gaServiceStore = {
 
   function connectWs() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    if (wsRetryTimer) { clearTimeout(wsRetryTimer); wsRetryTimer = null; }
     try {
       ws = new WebSocket(wsUrl);
-      ws.addEventListener('open', () => emit('bridge-log', 'WS connected'));
+      ws.addEventListener('open', () => { wsRetries = 0; emit('bridge-log', 'WS connected'); });
       ws.addEventListener('message', (ev) => {
         let msg;
         try { msg = JSON.parse(ev.data); } catch (_) { return; }
@@ -117,11 +120,29 @@ const gaServiceStore = {
         else if (msg.type === 'bridge-log') emit('bridge-log', msg.payload || msg);
         else if (msg.type === 'bridge-error') emit('bridge-error', msg.payload || msg);
       });
-      ws.addEventListener('close', () => emit('bridge-closed', { reason: 'ws-closed' }));
+      ws.addEventListener('close', () => { emit('bridge-closed', { reason: 'ws-closed' }); scheduleWsReconnect(); });
       ws.addEventListener('error', () => emit('bridge-error', { type: 'ws-error', message: 'WebSocket error' }));
     } catch (err) {
       emit('bridge-error', { type: 'ws-error', message: err.message || String(err) });
+      scheduleWsReconnect();
     }
+  }
+
+  /* WS 自动重连(指数退避,封顶 30s)。手机浏览器后台会被 OS 掐 WS,
+     不重连的话回到前台还是死连接。`visibilitychange` 那一段是回前台立刻重连。 */
+  function scheduleWsReconnect() {
+    if (wsRetryTimer) clearTimeout(wsRetryTimer);
+    if (typeof document !== 'undefined' && document.hidden) return; // 后台等回前台再连
+    const delay = Math.min(30000, 1000 * Math.pow(2, wsRetries));
+    wsRetries++;
+    wsRetryTimer = setTimeout(() => { wsRetryTimer = null; connectWs(); }, delay);
+  }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && (!ws || ws.readyState >= WebSocket.CLOSING)) {
+        wsRetries = 0; connectWs();
+      }
+    });
   }
 
   async function rpc(method, params = {}) {
