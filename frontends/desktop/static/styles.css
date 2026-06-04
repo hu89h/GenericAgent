@@ -685,28 +685,23 @@ html[data-appearance="dark"] .swatch[data-theme="8"].sel::after{
 .page-title{ font-size:18px; font-weight:700; color:var(--txt-strong); font-family:var(--font-title-en); }
 .page-sub{ font-size:12px; color:var(--muted); margin-top:5px; margin-bottom:16px; }
 
-/* 聊天页：撑满主栏；消息区顶 = 新对话顶；输入框与消息区同宽 */
-.page.active[data-page="chat"]{ min-height:0; width:100%; }
-.page.active[data-page="chat"] > .page-top{ flex:0 0 var(--shell-head-h); }
-.chat-shell{
+/* 聊天 / Conductor 共用对话布局（page--chat-ui） */
+.page.page--chat-ui{ min-height:0; width:100%; }
+.page.page--chat-ui > .page-top{ flex:0 0 var(--shell-head-h); }
+.page.page--chat-ui > .chat-shell{
   flex:1; min-height:0; width:100%;
   margin-top:var(--shell-gap);
   padding:0 16px 16px;
   display:flex; flex-direction:column;
-  --chat-gutter:0;
   box-sizing:border-box;
 }
-.chat-panel{
+.page.page--chat-ui > .chat-shell > .chat-panel{
   flex:1; min-height:0; width:100%;
   display:flex; flex-direction:column;
   gap:var(--chat-stack-gap);
-  border:none;
-  border-radius:0;
-  overflow:visible;
   box-sizing:border-box;
-  background:transparent;
 }
-.page.active[data-page="chat"] .msg-area{
+.page.page--chat-ui .msg-area{
   position:relative;
   flex:1; min-height:0;
   width:100%;
@@ -723,31 +718,31 @@ html[data-appearance="dark"] .swatch[data-theme="8"].sel::after{
   background:var(--card);
   box-sizing:border-box;
 }
-.page.active[data-page="chat"] .composer-anchor,
-.page.active[data-page="chat"] .composer,
-.page.active[data-page="chat"] .composer-slot,
-.page.active[data-page="chat"] .composer-inset{
+.page.page--chat-ui .composer-anchor,
+.page.page--chat-ui .composer,
+.page.page--chat-ui .composer-slot,
+.page.page--chat-ui .composer-inset{
   width:100%;
   min-width:0;
   box-sizing:border-box;
 }
-.page.active[data-page="chat"] .composer-anchor{
+.page.page--chat-ui .composer-anchor{
   flex:0 0 auto;
   padding:0;
   margin:0;
   background:transparent;
 }
-.page.active[data-page="chat"] .composer-inset{
+.page.page--chat-ui .composer-inset{
   border:1px solid var(--line);
   border-radius:var(--radius);
   background:var(--card);
 }
-.page.active[data-page="chat"] .msgs{
+.page.page--chat-ui .msgs{
   width:100%;
   max-width:var(--chat-col-w);
   margin:0 auto;
 }
-.page.active[data-page="chat"] .chat-start{
+.page.page--chat-ui .chat-start{
   width:100%;
   max-width:var(--chat-col-w);
   margin:0 auto;
@@ -1164,8 +1159,7 @@ span.flatpickr-weekday{ color:var(--muted) !important; font-size:11px; }
 }
 .composer-inset .composer-bot .spacer{ flex:1; }
 .composer-plus-wrap{ position:relative; flex:0 0 auto; }
-.composer-plus-wrap .composer-menu,
-.composer-plus-wrap .cdb-menu{
+.composer-plus-wrap .composer-menu{
   left:0; right:auto; top:auto; bottom:calc(100% + 6px); min-width:180px;
 }
 .composer-plus{ width:34px; height:34px; }
@@ -1240,12 +1234,12 @@ span.flatpickr-weekday{ color:var(--muted) !important; font-size:11px; }
 .body.sb-collapsed .sb-toggle:hover{ opacity:1; background:var(--panel); border-color:var(--line-strong); }
 
 .rp-resize, .sb-resize{
-  width:4px; flex:0 0 4px; cursor:col-resize; border-radius:2px;
-  background:transparent; transition:background .15s; align-self:stretch;
-  position:relative; z-index:5;  /* gap 缩小后会与面板重叠,提到面板之上保证可拖 */
+  width:100%; min-width:0; cursor:col-resize; border-radius:2px;
+  background:transparent; transition:background .15s;
+  align-self:stretch; justify-self:stretch;
+  position:relative; z-index:5;
+  margin:0;
 }
-.rp-resize{ margin-right:-10px; }
-.sb-resize{ margin-left:-10px; }
 .rp-resize:hover, .rp-resize.dragging,
 .sb-resize:hover, .sb-resize.dragging{ background:var(--accent); }
 .body.rp-collapsed .rp-resize,
@@ -1606,12 +1600,10 @@ html[data-appearance="dark"] .plan-item--warn .plan-item-text{ color:#f0a020; }
 }
 .ga-menu-item:hover{ background:var(--hover-2); }
 .ga-menu-item.active{ color:var(--accent); }
-.composer-menu .ga-menu-item,
-.cdb-menu .ga-menu-item{
+.composer-menu .ga-menu-item{
   display:flex; align-items:center; gap:8px;
 }
-.composer-menu .ga-menu-item svg,
-.cdb-menu .ga-menu-item svg{ width:16px; height:16px; flex:0 0 auto; color:var(--icon); }
+.composer-menu .ga-menu-item svg{ width:16px; height:16px; flex:0 0 auto; color:var(--icon); }
 
 /* ─── chat composer: image thumb strip ─── */
 .thumb-strip{
@@ -2137,7 +2129,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   border-radius:var(--radius-sm);
 }
 
-/* ---- Conductor（drawer/composer 工具栏除外，对话区复用主聊天 .page-top / .msg-area / .composer） ---- */
+/* ---- Conductor（仅保留与主聊天不同的部分，布局见 .page--chat-ui） ---- */
 .collab-offline,.collab-reconnect{
   flex:0 0 auto; padding:10px 16px; font-size:13px; text-align:center;
   background:color-mix(in srgb, var(--amber) 12%, var(--panel));
@@ -2148,21 +2140,21 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
 .collab-rail-run[hidden], .collab-rail-done[hidden], .collab-rail-issue[hidden]{ display:none !important; }
 .collab-offline:not([hidden]), .collab-reconnect:not([hidden]){ display:flex; }
 .collab-reconnect{ background:color-mix(in srgb, var(--accent) 10%, var(--panel)); }
-.page[data-page="collab"] .msg-area.collab-msgs{ position:relative; overflow:hidden; padding:0; }
-.page[data-page="collab"] .collab-scroll{
+.page.page--chat-ui[data-page="collab"] .msg-area.collab-msgs{ overflow:hidden; padding:0; }
+.page.page--chat-ui[data-page="collab"] .collab-scroll{
   flex:1 1 0; min-height:0; overflow:auto;
   display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
-  padding:24px;
+  padding:16px;
 }
-.page[data-page="collab"] .collab-msgs.has-msgs .collab-scroll{
+.page.page--chat-ui[data-page="collab"] .collab-msgs.has-msgs .collab-scroll{
   align-items:stretch; justify-content:flex-start;
 }
-.page[data-page="collab"] .collab-overlay{
+.page.page--chat-ui[data-page="collab"] .collab-overlay{
   position:absolute; inset:0; z-index:10; pointer-events:none;
 }
-.page[data-page="collab"] .collab-overlay > .collab-rail,
-.page[data-page="collab"] .collab-overlay > .collab-prog-panel{ pointer-events:auto; }
-.page[data-page="collab"].dragover .collab-msgs::after{
+.page.page--chat-ui[data-page="collab"] .collab-overlay > .collab-rail,
+.page.page--chat-ui[data-page="collab"] .collab-overlay > .collab-prog-panel{ pointer-events:auto; }
+.page.page--chat-ui[data-page="collab"].dragover .collab-msgs::after{
   content:attr(data-drop-hint); position:absolute; inset:8px; z-index:20; pointer-events:none;
   display:flex; align-items:center; justify-content:center; border-radius:var(--radius);
   border:2px dashed var(--accent); background:color-mix(in srgb, var(--accent) 8%, var(--panel));
@@ -2173,7 +2165,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   transform:translateY(-50%);
   transition:left .22s ease-out;
 }
-.page[data-page="collab"].collab-prog-open .collab-rail{ left:232px; }
+.page.page--chat-ui[data-page="collab"].collab-prog-open .collab-rail{ left:232px; }
 .collab-rail-handle{
   display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px;
   width:22px; padding:10px 3px; cursor:pointer;
@@ -2190,7 +2182,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   opacity:.55;
 }
 .collab-rail-chev{ width:12px; height:12px; flex:0 0 auto; transition:transform .22s ease-out; }
-.page[data-page="collab"].collab-prog-open .collab-rail-chev{ transform:rotate(180deg); }
+.page.page--chat-ui[data-page="collab"].collab-prog-open .collab-rail-chev{ transform:rotate(180deg); }
 .collab-rail-badge{
   display:flex; flex-direction:column; align-items:center; gap:2px;
   font-size:10px; font-weight:700; line-height:1;
@@ -2228,7 +2220,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   transform:translateX(-100%); transition:transform .22s ease-out;
   pointer-events:none;
 }
-.page[data-page="collab"].collab-prog-open .collab-prog-panel{
+.page.page--chat-ui[data-page="collab"].collab-prog-open .collab-prog-panel{
   transform:translateX(0); pointer-events:auto;
 }
 .collab-prog-panel-head{
@@ -2348,12 +2340,13 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   margin-left:auto; min-width:18px; height:18px; padding:0 5px; border-radius:999px;
   background:var(--ok); color:#fff; font-size:10px; font-weight:700; line-height:18px; text-align:center;
 }
-.page[data-page="collab"] .collab-quick{
-  display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px;
+.page.page--chat-ui[data-page="collab"] > .chat-shell > .chat-panel > .collab-quick{
+  flex:0 0 auto;
+  display:flex; flex-wrap:wrap; gap:8px;
 }
 @media (max-width:900px){
   .collab-guide-steps{ grid-template-columns:repeat(2, minmax(0, 1fr)); gap:40px 32px; }
   .collab-guide-step{ gap:20px; }
-  .page[data-page="collab"].collab-prog-open .collab-rail{ left:min(232px, 72vw); }
+  .page.page--chat-ui[data-page="collab"].collab-prog-open .collab-rail{ left:min(232px, 72vw); }
   .collab-prog-panel{ width:min(232px, 72vw); }
 }

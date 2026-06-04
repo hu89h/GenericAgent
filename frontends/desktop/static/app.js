@@ -3069,7 +3069,7 @@ function openModelMenu(chipEl, menuEl) {
   renderModelMenu(menuEl);
   menuEl.hidden = false;
   const chipRect = chipEl.getBoundingClientRect();
-  const composer = chipEl.closest('.cdb-composer') || chipEl.closest('.composer');
+  const composer = chipEl.closest('.composer');
   if (composer) {
     const composerRect = composer.getBoundingClientRect();
     menuEl.style.left = (chipRect.left - composerRect.left) + 'px';
@@ -3204,22 +3204,22 @@ let activeFileComposer = 'chat';
 function fileCtx(f) { return f.ctx || 'chat'; }
 function filesForCtx(ctx) { return state.pendingFiles.filter(f => fileCtx(f) === ctx); }
 
+function composerPageEl(ctx) {
+  const page = ctx === 'collab' ? 'collab' : 'chat';
+  return document.querySelector(`.page--chat-ui[data-page="${page}"]`);
+}
+function composerRootEl(ctx) {
+  return composerPageEl(ctx)?.querySelector('.composer');
+}
 function composerCfg(ctx = activeFileComposer) {
-  if (ctx === 'collab') {
-    return {
-      input: document.getElementById('cdb-input'),
-      strip: document.getElementById('cdb-thumb-strip'),
-      uploadBtn: null,
-      imgInput: document.getElementById('cdb-file-input'),
-      dropZone: document.querySelector('.page[data-page="collab"]'),
-    };
-  }
+  const root = composerRootEl(ctx);
+  const page = composerPageEl(ctx);
   return {
-    input: inputEl,
-    strip: thumbStrip,
+    input: root?.querySelector('.composer-inset .input') || null,
+    strip: root?.querySelector('.thumb-strip') || null,
     uploadBtn: null,
-    imgInput: document.getElementById('chat-file-input'),
-    dropZone: chatPanel,
+    imgInput: root?.querySelector('input[type="file"]') || null,
+    dropZone: ctx === 'collab' ? page : chatPanel,
   };
 }
 
@@ -4692,28 +4692,28 @@ chatStatus.setConnecting();
 window.ga.startBridge && window.ga.startBridge();
 })();
 
-/* 聊天输入框 — 与 Conductor collabComposer 同构（inset + 加号菜单 + Enter 发送） */
-(function () {
-  'use strict';
-  const root = document.getElementById('chat-composer');
-  if (!root) return;
-
-  const input = document.getElementById('chat-input');
-  const fileInput = document.getElementById('chat-file-input');
-  const plusBtn = document.getElementById('chat-plus-btn');
-  const menu = document.getElementById('chat-menu');
-  const sendBtnEl = document.getElementById('send-btn');
+/* 聊天 / Conductor 共用 composer 绑定（结构：.composer > .composer-slot > .composer-inset） */
+function bindComposerInRoot(root, opts) {
+  if (!root || root.dataset.composerBound) return null;
+  root.dataset.composerBound = '1';
+  const ctx = opts.ctx || root.dataset.composerCtx || 'chat';
+  const input = root.querySelector('.composer-inset .input');
+  const fileInput = root.querySelector('input[type="file"]');
+  const plusBtn = root.querySelector('.composer-plus');
+  const menu = root.querySelector('.composer-menu');
+  const sendBtn = root.querySelector('.send');
 
   function closeMenu() {
     if (!menu) return;
     menu.hidden = true;
-    if (plusBtn) plusBtn.setAttribute('aria-expanded', 'false');
+    plusBtn?.setAttribute('aria-expanded', 'false');
   }
 
   function openMenu() {
     if (!menu || !plusBtn) return;
     closeAllModelMenus?.();
-    window.collabComposer?.closeMenu?.();
+    if (ctx === 'chat') window.collabComposer?.closeMenu?.();
+    else window.chatComposer?.closeMenu?.();
     menu.hidden = false;
     plusBtn.setAttribute('aria-expanded', 'true');
   }
@@ -4724,155 +4724,99 @@ window.ga.startBridge && window.ga.startBridge();
     else closeMenu();
   }
 
-  function doSend() {
-    const sess = activeSess();
-    if (sess && rt(sess).busy) { cancelPrompt(); return; }
-    submitInput();
-  }
+  function doSend() { opts.onSend?.(); }
 
-  function bindOnce() {
-    if (root.dataset.bound) return;
-    root.dataset.bound = '1';
+  plusBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleMenu();
+  });
 
-    plusBtn?.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      toggleMenu();
-    });
+  menu?.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-composer-action]');
+    if (!item) return;
+    e.stopPropagation();
+    closeMenu();
+    const act = item.dataset.composerAction;
+    if (act === 'upload') {
+      window.gaSetActiveFileComposer?.(ctx);
+      fileInput?.click();
+      return;
+    }
+    if (act === 'preset') openModal('preset-modal');
+  });
 
-    menu?.addEventListener('click', (e) => {
-      const item = e.target.closest('.ga-menu-item');
-      if (!item) return;
-      e.stopPropagation();
-      closeMenu();
-      if (item.id === 'chat-menu-upload') {
-        window.gaSetActiveFileComposer?.('chat');
-        fileInput?.click();
-        return;
-      }
-      if (item.id === 'chat-menu-preset') {
-        openModal('preset-modal');
-      }
-    });
-
-    input?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
-        e.preventDefault();
-        doSend();
-      }
-    });
-
-    sendBtnEl?.addEventListener('click', (e) => {
+  input?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       doSend();
-    });
-  }
+    }
+  });
 
-  bindOnce();
-  window.chatComposer = { closeMenu, focus: () => input?.focus() };
-})();
+  sendBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
+    doSend();
+  });
 
-/* Conductor 输入框 — 与主聊天 composer 解耦（cdb-* DOM，便于日后抽离） */
+  opts.afterBind?.(root, { input, closeMenu, doSend });
+  return { ctx, input, closeMenu, focus: () => input?.focus() };
+}
+
 (function () {
   'use strict';
-  const CTX = 'collab';
+  const root = document.getElementById('chat-composer');
+  const bound = bindComposerInRoot(root, {
+    ctx: 'chat',
+    onSend() {
+      const sess = activeSess();
+      if (sess && rt(sess).busy) { cancelPrompt(); return; }
+      submitInput();
+    },
+  });
+  if (bound) window.chatComposer = { closeMenu: bound.closeMenu, focus: bound.focus };
+})();
+
+(function () {
+  'use strict';
   const root = document.getElementById('cdb-composer');
   if (!root) return;
 
-  const input = document.getElementById('cdb-input');
-  const fileInput = document.getElementById('cdb-file-input');
-  const plusBtn = document.getElementById('cdb-plus-btn');
-  const menu = document.getElementById('cdb-menu');
-  const sendBtn = document.getElementById('cdb-send');
   let onSend = null;
+  const input = root.querySelector('.composer-inset .input');
+  const sendBtn = root.querySelector('.send');
 
   function text() { return window.gaComposerText?.('collab') ?? ''; }
-
   function clearIfMatch(raw) {
     if (input && text().trim() === String(raw || '').trim()) input.innerHTML = '';
   }
-
   function setEnabled(on) {
     if (input) input.contentEditable = on ? 'true' : 'false';
     if (sendBtn) sendBtn.disabled = !on;
   }
 
-  function closeMenu() {
-    if (!menu) return;
-    menu.hidden = true;
-    if (plusBtn) plusBtn.setAttribute('aria-expanded', 'false');
-  }
-
-  function openMenu() {
-    if (!menu || !plusBtn) return;
-    closeAllModelMenus?.();
-    menu.hidden = false;
-    plusBtn.setAttribute('aria-expanded', 'true');
-  }
-
-  function toggleMenu() {
-    if (!menu) return;
-    if (menu.hidden) openMenu();
-    else closeMenu();
-  }
-
-  function doSend() {
-    if (!onSend) return;
-    onSend(text());
-  }
-
-  function bindOnce() {
-    if (root.dataset.bound) return;
-    root.dataset.bound = '1';
-
-    plusBtn?.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      toggleMenu();
-    });
-
-    menu?.addEventListener('click', (e) => {
-      const item = e.target.closest('.ga-menu-item');
-      if (!item) return;
-      e.stopPropagation();
-      closeMenu();
-      if (item.id === 'cdb-menu-upload') {
-        window.gaSetActiveFileComposer?.(CTX);
-        fileInput?.click();
-        return;
-      }
-    });
-
-    document.querySelectorAll('#collab-quick [data-prompt-key]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        if (!onSend) return;
-        const key = btn.dataset.promptKey;
-        onSend((window.gaT && window.gaT(key)) || key);
+  const bound = bindComposerInRoot(root, {
+    ctx: 'collab',
+    onSend() { if (onSend) onSend(text()); },
+    afterBind() {
+      document.querySelectorAll('#collab-quick [data-prompt-key]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          if (!onSend) return;
+          const key = btn.dataset.promptKey;
+          onSend((window.gaT && window.gaT(key)) || key);
+        });
       });
-    });
-
-    input?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
-        e.preventDefault();
-        doSend();
-      }
-    });
-
-    sendBtn?.addEventListener('click', (e) => {
-      e.preventDefault();
-      doSend();
-    });
-  }
+    },
+  });
+  if (!bound) return;
 
   function init(handler) {
     onSend = handler;
-    bindOnce();
   }
 
   window.collabComposer = {
     init, text, clearIfMatch, setEnabled,
-    focus: () => input?.focus(),
-    closeMenu,
+    focus: bound.focus,
+    closeMenu: bound.closeMenu,
   };
 })();
 

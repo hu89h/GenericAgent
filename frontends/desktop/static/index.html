@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>GenericAgent</title>
 <link rel="stylesheet" href="assets/fonts/fonts.css">
-<link rel="stylesheet" href="styles.css?v=124">
+<link rel="stylesheet" href="styles.css?v=127">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
@@ -98,8 +98,7 @@
       <div id="pages">
 
         <!-- 聊天 -->
-        <section class="page active" data-page="chat"
-                >
+        <section class="page active page--chat-ui" data-page="chat">
           <div class="page-top">
             <button type="button" class="pt-icon pt-sb-toggle" aria-label="toggle sidebar">
               <span data-ga-icon="caretLeft"></span>
@@ -131,7 +130,7 @@
             </div>
           </div>
           <div class="composer-anchor" id="chat-composer-anchor">
-            <div class="composer" id="chat-composer">
+            <div class="composer" id="chat-composer" data-composer-ctx="chat">
             <div class="composer-slot">
             <div class="plan-card" id="plan-bar" hidden aria-live="polite"></div>
             <div class="composer-inset">
@@ -143,11 +142,11 @@
                     <span data-ga-icon="plus"></span>
                   </button>
                   <div class="ga-menu composer-menu" id="chat-menu" hidden role="menu">
-                    <button type="button" class="ga-menu-item" id="chat-menu-upload" role="menuitem">
+                    <button type="button" class="ga-menu-item" data-composer-action="upload" role="menuitem">
                       <span data-ga-icon="paperclip"></span>
                       <span data-i18n="upload.button"></span>
                     </button>
-                    <button type="button" class="ga-menu-item" id="chat-menu-preset" role="menuitem">
+                    <button type="button" class="ga-menu-item" data-composer-action="preset" role="menuitem">
                       <span data-ga-icon="lightning"></span>
                       <span data-i18n="modal.preset"></span>
                     </button>
@@ -197,8 +196,8 @@
           </div>
         </section>
 
-        <!-- 指挥家 Conductor -->
-        <section class="page" data-page="collab">
+        <!-- 指挥家 Conductor（对话区结构复用 page--chat-ui / chat-shell） -->
+        <section class="page page--chat-ui" data-page="collab">
           <div class="collab-offline" id="collab-offline" hidden>
             <span data-i18n="collab.offline"></span>
             <button type="button" class="chip sm" id="collab-retry" data-i18n="collab.retry"></button>
@@ -215,6 +214,8 @@
               <span data-ga-icon="caretRight"></span>
             </button>
           </div>
+          <div class="chat-shell">
+          <div class="chat-panel">
           <div class="msg-area collab-msgs" id="collab-msgs">
             <div class="collab-scroll">
               <div class="collab-guide" id="collab-welcome" hidden>
@@ -275,22 +276,24 @@
               </aside>
             </div>
           </div>
-          <div class="composer cdb-composer" id="cdb-composer">
-            <div class="collab-quick" id="collab-quick">
-              <button type="button" class="pill" data-prompt-key="collab.chipProgress" data-i18n="collab.chipProgress"></button>
-              <button type="button" class="pill" data-prompt-key="collab.chipPause" data-i18n="collab.chipPause"></button>
-              <button type="button" class="pill" data-prompt-key="collab.chipSummary" data-i18n="collab.chipSummary"></button>
-            </div>
-            <div class="composer-inset cdb-inset">
+          <div class="collab-quick" id="collab-quick">
+            <button type="button" class="pill" data-prompt-key="collab.chipProgress" data-i18n="collab.chipProgress"></button>
+            <button type="button" class="pill" data-prompt-key="collab.chipPause" data-i18n="collab.chipPause"></button>
+            <button type="button" class="pill" data-prompt-key="collab.chipSummary" data-i18n="collab.chipSummary"></button>
+          </div>
+          <div class="composer-anchor" id="cdb-composer-anchor">
+            <div class="composer" id="cdb-composer" data-composer-ctx="collab">
+            <div class="composer-slot">
+            <div class="composer-inset">
               <div class="thumb-strip" id="cdb-thumb-strip" hidden></div>
               <div class="input" id="cdb-input" contenteditable="true" role="textbox" aria-multiline="true" data-i18n-ph="collab.placeholder"></div>
               <div class="composer-bot">
-                <div class="composer-plus-wrap cdb-plus-wrap">
-                  <button type="button" class="ic-btn composer-plus cdb-plus" id="cdb-plus-btn" aria-haspopup="menu" aria-expanded="false" data-i18n-title="collab.plusMenu" title="">
+                <div class="composer-plus-wrap">
+                  <button type="button" class="ic-btn composer-plus" id="cdb-plus-btn" aria-haspopup="menu" aria-expanded="false" data-i18n-title="collab.plusMenu" title="">
                     <span data-ga-icon="plus"></span>
                   </button>
-                  <div class="ga-menu cdb-menu" id="cdb-menu" hidden role="menu">
-                    <button type="button" class="ga-menu-item" id="cdb-menu-upload" role="menuitem">
+                  <div class="ga-menu composer-menu" id="cdb-menu" hidden role="menu">
+                    <button type="button" class="ga-menu-item" data-composer-action="upload" role="menuitem">
                       <span data-ga-icon="paperclip"></span>
                       <span data-i18n="upload.button"></span>
                     </button>
@@ -306,8 +309,12 @@
                 </button>
               </div>
             </div>
+            </div>
             <div class="ga-menu" id="cdb-model-menu" hidden></div>
             <input type="file" id="cdb-file-input" multiple hidden>
+            </div>
+          </div>
+          </div>
           </div>
         </section>
 
@@ -598,6 +605,6 @@
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
 <script src="phosphor-icons.js"></script>
-<script src="app.js?v=161"></script>
+<script src="app.js?v=162"></script>
 </body>
 </html>
