@@ -1684,7 +1684,10 @@ function applyPlanPayload(sess, raw) {
 
   if (!isActive(sess)) return;
   if (raw?.active && raw.complete && (raw.items?.length || r.planHoldItems.length)) {
-    refreshPlanBar(raw);
+    refreshPlanBar({
+      ...raw,
+      items: raw.items?.length ? raw.items : r.planHoldItems,
+    });
     return;
   }
   refreshPlanBarFromRuntime(sess);
