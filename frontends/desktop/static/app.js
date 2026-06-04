@@ -1470,7 +1470,7 @@ const state = {
 };
 function rt(sess) {
   let r = state.runtime.get(sess.id);
-  if (!r) { r = { polling:false, busy:false, lastId:0, seen:new Set(), draftEl:null, draftText:'', taskStartedAt:null, taskEndedAt:null, taskTimerId:null, planCompleteAt:null, planLostAt:null, planHoldItems:[], planHideTimer:null, planDismissedComplete:false }; state.runtime.set(sess.id, r); }
+  if (!r) { r = { polling:false, busy:false, lastId:0, seen:new Set(), draftEl:null, draftText:'', taskStartedAt:null, taskEndedAt:null, taskTimerId:null, planCompleteAt:null, planLostAt:null, planHoldItems:[], planLastPayload:null, planLastComplete:false, planHideTimer:null, planDismissedComplete:false }; state.runtime.set(sess.id, r); }
   return r;
 }
 const activeSess = () => state.sessions.get(state.activeId) || null;
@@ -1589,55 +1589,102 @@ function planTpl(tpl, v) {
 let planPollTimer;
 function syncPlanPollTimer() {
   const on = !!(activeSess()?.bridgeSessionId && state.bridgeReady);
-  if (on && !planPollTimer) planPollTimer = setInterval(() => { const s = activeSess(); if (s && isActive(s)) planPoll(s); }, 1000);
-  else if (!on && planPollTimer) { clearInterval(planPollTimer); planPollTimer = null; }
+  if (on && !planPollTimer) {
+    planPollTimer = setInterval(() => {
+      const s = activeSess();
+      if (!s || !isActive(s)) return;
+      planFetch(s);
+      planTick(s);
+    }, 1000);
+  } else if (!on && planPollTimer) {
+    clearInterval(planPollTimer);
+    planPollTimer = null;
+  }
 }
 
 function clearPlanGrace(r) {
   r.planCompleteAt = r.planLostAt = null;
   r.planHoldItems = [];
+  r.planLastPayload = null;
   r.planDismissedComplete = false;
   if (r.planHideTimer) { clearTimeout(r.planHideTimer); r.planHideTimer = null; }
+}
+
+/** tuiapp_v2._refresh_planbar：用 runtime 里缓存的 items / placeholder 重绘 */
+function refreshPlanBarFromRuntime(sess) {
+  const r = rt(sess);
+  const lp = r.planLastPayload;
+  let items = r.planHoldItems || [];
+  if (r.planLostAt != null && Date.now() - r.planLostAt >= PLAN_LOST_GRACE_MS) {
+    items = [];
+    r.planHoldItems = [];
+    r.planLostAt = null;
+  }
+  if (r.planDismissedComplete) {
+    refreshPlanBar(null);
+    return;
+  }
+  if (r.planCompleteAt != null && Date.now() - r.planCompleteAt >= PLAN_COMPLETE_GRACE_MS) {
+    r.planDismissedComplete = true;
+    refreshPlanBar(null);
+    return;
+  }
+  if (!items.length) {
+    if (lp?.active && lp.placeholder) {
+      refreshPlanBar(lp);
+      return;
+    }
+    refreshPlanBar(null);
+    return;
+  }
+  refreshPlanBar({
+    active: true,
+    placeholder: false,
+    items,
+    done: lp?.done ?? items.filter(it => it.status === 'done').length,
+    total: lp?.total ?? items.length,
+    complete: !!lp?.complete,
+    step: lp?.step || '',
+  });
+}
+
+/** 每秒 tick grace（对齐 TUI _poll_plan_files → _refresh_planbar） */
+function planTick(sess) {
+  if (!sess || !isActive(sess)) return;
+  refreshPlanBarFromRuntime(sess);
 }
 
 function applyPlanPayload(sess, raw) {
   if (!sess) return;
   const r = rt(sess);
-  if (!raw?.active) {
-    clearPlanGrace(r);
-    if (isActive(sess)) refreshPlanBar(null);
-    return;
-  }
-  let plan = raw;
-  const items = plan.items || [];
   const now = Date.now();
-  if (items.length) { r.planLostAt = null; r.planHoldItems = items; }
-  else if (!plan.placeholder && r.planHoldItems.length) {
+
+  if (raw?.active) {
+    r.planLastPayload = raw;
+    const items = raw.items || [];
+    if (items.length) {
+      r.planLostAt = null;
+      r.planHoldItems = items;
+    } else if (!raw.placeholder && r.planHoldItems.length) {
+      if (!r.planLostAt) r.planLostAt = now;
+    }
+    const nowComplete = raw.complete && items.length > 0;
+    const wasComplete = r.planLastComplete;
+    if (nowComplete && !wasComplete) r.planCompleteAt = now;
+    else if (!nowComplete) r.planCompleteAt = null;
+    r.planLastComplete = !!nowComplete;
+    if (!nowComplete) {
+      r.planDismissedComplete = false;
+      if (r.planHideTimer) { clearTimeout(r.planHideTimer); r.planHideTimer = null; }
+    }
+  } else if (r.planHoldItems.length) {
     if (!r.planLostAt) r.planLostAt = now;
-    if (now - r.planLostAt < PLAN_LOST_GRACE_MS) plan = { ...plan, items: r.planHoldItems };
-    else { r.planHoldItems = []; r.planLostAt = null; }
-  }
-  if (plan.complete) {
-    if (r.planDismissedComplete) {
-      if (isActive(sess)) refreshPlanBar(null);
-      return;
-    }
-    if (!r.planCompleteAt) {
-      r.planCompleteAt = now;
-      clearTimeout(r.planHideTimer);
-      r.planHideTimer = setTimeout(() => {
-        r.planHideTimer = null;
-        r.planDismissedComplete = true;
-        if (isActive(sess)) refreshPlanBar(null);
-      }, PLAN_COMPLETE_GRACE_MS);
-    }
   } else {
-    r.planCompleteAt = null;
-    r.planDismissedComplete = false;
-    if (r.planHideTimer) { clearTimeout(r.planHideTimer); r.planHideTimer = null; }
+    clearPlanGrace(r);
   }
+
   if (!isActive(sess)) return;
-  refreshPlanBar(plan);
+  refreshPlanBarFromRuntime(sess);
 }
 
 function refreshPlanBar(plan) {
@@ -1692,13 +1739,19 @@ function refreshPlanBar(plan) {
   planBarEl.replaceChildren(frag);
 }
 
-async function planPoll(sess) {
+async function planFetch(sess) {
   if (!sess?.bridgeSessionId || !state.bridgeReady || !isActive(sess)) return;
   try {
-    const res = await window.ga.pollSession(sess.bridgeSessionId, rt(sess).lastId || 0);
-    if (res?.error) throw new Error(res.error.message || res.error);
-    applyPlanPayload(sess, (res.result || res).plan);
-  } catch (_) { /* tui: failed file read does not hide the card */ }
+    const res = await fetch(`${BRIDGE_ORIGIN}/session/${encodeURIComponent(sess.bridgeSessionId)}/plan`);
+    if (!res.ok) throw new Error(`plan ${res.status}`);
+    const data = await res.json();
+    applyPlanPayload(sess, data.plan ?? data.result?.plan);
+  } catch (_) { /* 对齐 TUI：读盘/网络失败不立刻清空条 */ }
+}
+
+async function planPoll(sess) {
+  await planFetch(sess);
+  planTick(sess);
 }
 
 /* ═══════════════ 消息渲染 ═══════════════ */

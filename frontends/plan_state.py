@@ -219,11 +219,21 @@ def _find_path_at(messages, start_idx: int, root: str) -> Optional[str]:
     return None
 
 
-def _desktop_plan_path(agent, msgs, root: str, start_idx: int = 0) -> Optional[str]:
+def session_plan_active(agent, messages, start_idx: int, root: str) -> bool:
+    """Like is_active() but resolve plan.md under session cwd (bridge thread cwd may differ)."""
+    if _stashed_plan_path(agent):
+        return True
+    return _find_path_at(messages, start_idx, root) is not None
+
+
+def session_plan_path(agent, msgs, root: str, start_idx: int = 0) -> Optional[str]:
     stash = _stashed_plan_path(agent)
-    if stash and (p := _resolve_stashed_at(stash, root) or _resolve_stashed(stash)): return p
-    if p := _find_path_at(msgs, start_idx, root): return p
-    if m := plan_path_mention_in_messages(msgs, start_idx): return _resolve_stashed_at(m, root)
+    if stash and (p := _resolve_stashed_at(stash, root) or _resolve_stashed(stash)):
+        return p
+    if p := _find_path_at(msgs, start_idx, root):
+        return p
+    if m := plan_path_mention_in_messages(msgs, start_idx):
+        return _resolve_stashed_at(m, root)
     return None
 
 
@@ -235,9 +245,9 @@ def desktop_plan_payload_from_session(sess: Any, ga_root: str = "") -> dict:
         base = len(raw)
     root = (getattr(sess, "cwd", None) or ga_root or "").strip()
     agent = getattr(sess, "agent", None)
-    if not is_active(agent, messages=raw, start_idx=base):
+    if not session_plan_active(agent, raw, base, root):
         return {"active": False}
-    path = _desktop_plan_path(agent, raw, root, start_idx=base)
+    path = session_plan_path(agent, raw, root, start_idx=base)
     items = []
     if path:
         try:

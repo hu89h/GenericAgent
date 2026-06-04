@@ -524,6 +524,17 @@ class AgentManager:
                 "lastError": sess.last_error,
             }
 
+    def plan_snapshot(self, sid: str) -> dict:
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
+            import plan_state
+            return {
+                "sessionId": sid,
+                "plan": plan_state.desktop_plan_payload_from_session(sess, self.ga_root),
+            }
+
     def cancel(self, sid: str) -> dict:
         with self.lock:
             sess = self.sessions.get(sid)
@@ -1095,6 +1106,11 @@ async def restore_handler(request):
     return json_ok(manager.restore_context(sid))
 
 
+async def plan_handler(request):
+    sid = request.match_info["sid"]
+    return json_ok(manager.plan_snapshot(sid))
+
+
 async def path_open_handler(request):
     data = await read_json(request)
     kind = data.get("kind", "")
@@ -1440,6 +1456,7 @@ def create_app():
     app.router.add_patch("/session/{sid}", patch_session_handler)
     app.router.add_post("/session/{sid}/prompt", prompt_handler)
     app.router.add_get("/session/{sid}/messages", messages_handler)
+    app.router.add_get("/session/{sid}/plan", plan_handler)
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
     app.router.add_post("/session/{sid}/restore", restore_handler)
     app.router.add_post("/path/open", path_open_handler)
