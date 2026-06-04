@@ -358,6 +358,8 @@ const I18N = {
     'upload.dropHint': '松开以上传文件',
     'lightbox.closeTitle': '关闭',
     'fold.thinking': '思考', 'fold.tool': '工具调用', 'fold.toolResult': '工具结果', 'fold.llm': 'LLM Running', 'fold.turn': '第 {n} 轮',
+    'plan.header': '计划 ({done}/{total})', 'plan.complete': '✓ 计划完成 ({n}/{n})',
+    'plan.placeholder': '计划模式已激活', 'plan.waiting': '等待写入 {path} …', 'plan.overflow': '还有 {n} 项',
     'timing.elapsed': '已运行 {t}',
     'model.auto': '自动选择',
     'model.menuLabel': '选择模型',
@@ -505,6 +507,8 @@ const I18N = {
     'upload.dropHint': 'Drop to upload files',
     'lightbox.closeTitle': 'Close',
     'fold.thinking': 'Thinking', 'fold.tool': 'Tool call', 'fold.toolResult': 'Tool result', 'fold.llm': 'LLM Running', 'fold.turn': 'Turn {n}',
+    'plan.header': 'Plan ({done}/{total})', 'plan.complete': '✓ Plan complete ({n}/{n})',
+    'plan.placeholder': 'Plan mode activated', 'plan.waiting': 'waiting for {path} …', 'plan.overflow': '+{n} more',
     'timing.elapsed': 'Elapsed {t}',
     'model.auto': 'Auto',
     'model.menuLabel': 'Select model',
@@ -1466,7 +1470,7 @@ const state = {
 };
 function rt(sess) {
   let r = state.runtime.get(sess.id);
-  if (!r) { r = { polling:false, busy:false, lastId:0, seen:new Set(), draftEl:null, draftText:'', taskStartedAt:null, taskEndedAt:null, taskTimerId:null }; state.runtime.set(sess.id, r); }
+  if (!r) { r = { polling:false, busy:false, lastId:0, seen:new Set(), draftEl:null, draftText:'', taskStartedAt:null, taskEndedAt:null, taskTimerId:null, planCompleteAt:null, planLostAt:null, planHoldItems:[], planHideTimer:null, planDismissedComplete:false }; state.runtime.set(sess.id, r); }
   return r;
 }
 const activeSess = () => state.sessions.get(state.activeId) || null;
@@ -1505,6 +1509,7 @@ const msgArea    = chatPage.querySelector('.msg-area');
 const chatStart  = msgArea.querySelector('.chat-start');
 const inputEl    = chatPage.querySelector('.input');
 const sendBtn    = document.getElementById('send-btn');
+const planBarEl = document.getElementById('plan-bar');
 const composerEl = chatPage.querySelector('.composer');
 const msgLoading = document.getElementById('msg-loading');
 const MIN_MSG_LOADING_MS = 450;
@@ -1573,6 +1578,119 @@ function refreshEmptyState(sess) {
   msgArea.classList.toggle('has-msgs', !!has);
   if (chatStart) chatStart.style.display = has ? 'none' : '';
   if (msgsEl) msgsEl.style.display = has ? '' : 'none';
+}
+
+function planTpl(tpl, v) {
+  return String(tpl || '').replace(/\{(\w+)\}/g, (_, k) => (v[k] != null ? String(v[k]) : `{${k}}`));
+}
+
+let planPollTimer;
+function syncPlanPollTimer() {
+  const on = !!(activeSess()?.bridgeSessionId && state.bridgeReady);
+  if (on && !planPollTimer) planPollTimer = setInterval(() => { const s = activeSess(); if (s && isActive(s)) planPoll(s); }, 1000);
+  else if (!on && planPollTimer) { clearInterval(planPollTimer); planPollTimer = null; }
+}
+
+function clearPlanGrace(r) {
+  r.planCompleteAt = r.planLostAt = null;
+  r.planHoldItems = [];
+  r.planDismissedComplete = false;
+  if (r.planHideTimer) { clearTimeout(r.planHideTimer); r.planHideTimer = null; }
+}
+
+function applyPlanPayload(sess, raw) {
+  if (!planBarEl || !sess) return;
+  const r = rt(sess);
+  if (!raw?.active) { clearPlanGrace(r); return refreshPlanBar(null); }
+  let plan = raw;
+  const items = plan.items || [];
+  const now = Date.now();
+  if (items.length) { r.planLostAt = null; r.planHoldItems = items; }
+  else if (!plan.placeholder && r.planHoldItems.length) {
+    if (!r.planLostAt) r.planLostAt = now;
+    if (now - r.planLostAt < 5000) plan = { ...plan, items: r.planHoldItems };
+    else { r.planHoldItems = []; r.planLostAt = null; }
+  }
+  if (plan.complete) {
+    if (r.planDismissedComplete) return refreshPlanBar(null);
+    if (!r.planCompleteAt) {
+      r.planCompleteAt = now;
+      clearTimeout(r.planHideTimer);
+      r.planHideTimer = setTimeout(() => {
+        r.planHideTimer = null;
+        r.planDismissedComplete = true;
+        if (isActive(sess)) refreshPlanBar(null);
+      }, 3000);
+    }
+  } else {
+    r.planCompleteAt = null;
+    r.planDismissedComplete = false;
+    if (r.planHideTimer) { clearTimeout(r.planHideTimer); r.planHideTimer = null; }
+  }
+  refreshPlanBar(plan);
+}
+
+function refreshPlanBar(plan) {
+  if (!planBarEl) return;
+  if (!plan?.active) { planBarEl.hidden = true; planBarEl.replaceChildren(); return; }
+  planBarEl.hidden = false;
+  const frag = document.createDocumentFragment();
+  const head = document.createElement('div');
+  head.className = 'plan-head';
+  head.textContent = plan.placeholder ? `📋 ${t('plan.placeholder')}`
+    : plan.complete ? planTpl(t('plan.complete'), { n: plan.total })
+    : `📋 ${planTpl(t('plan.header'), { done: plan.done, total: plan.total })}`;
+  frag.appendChild(head);
+  const stepText = plan.step ? String(plan.step).slice(0, 120) : '';
+  if (stepText) {
+    const step = document.createElement('div');
+    step.className = 'plan-step';
+    step.textContent = `▸ ${stepText}`;
+    frag.appendChild(step);
+  }
+  if (plan.placeholder) {
+    const wait = document.createElement('div');
+    wait.className = 'plan-wait';
+    wait.textContent = planTpl(t('plan.waiting'), { path: plan.pathHint || 'plan.md' });
+    frag.appendChild(wait);
+  } else {
+    const list = plan.items || [];
+    const budget = 4 - (stepText ? 1 : 0);
+    const ordered = list.filter(it => it.status !== 'done').concat(list.filter(it => it.status === 'done'));
+    const bodyLines = ordered.length > budget ? budget - 1 : budget;
+    const shown = ordered.slice(0, bodyLines);
+    const overflow = ordered.length - shown.length;
+    for (const it of shown) {
+      const row = document.createElement('div');
+      row.className = 'plan-item' + (it.status === 'done' ? ' plan-item--done' : '');
+      const mark = document.createElement('span');
+      mark.className = 'plan-mark';
+      mark.textContent = it.status === 'done' ? '✔' : '☐';
+      const txt = document.createElement('span');
+      txt.className = 'plan-text';
+      txt.textContent = it.content || '';
+      row.append(mark, txt);
+      frag.appendChild(row);
+    }
+    if (overflow > 0) {
+      const more = document.createElement('div');
+      more.className = 'plan-more';
+      more.textContent = `⋮ ${planTpl(t('plan.overflow'), { n: overflow })}`;
+      frag.appendChild(more);
+    }
+  }
+  planBarEl.replaceChildren(frag);
+}
+
+async function planPoll(sess) {
+  if (!sess?.bridgeSessionId || !state.bridgeReady || !isActive(sess)) return applyPlanPayload(sess, null);
+  try {
+    const res = await window.ga.pollSession(sess.bridgeSessionId, rt(sess).lastId || 0);
+    if (res?.error) throw new Error(res.error.message || res.error);
+    applyPlanPayload(sess, (res.result || res).plan);
+  } catch (_) {
+    applyPlanPayload(sess, null);
+  }
 }
 
 /* ═══════════════ 消息渲染 ═══════════════ */
@@ -2051,8 +2169,11 @@ function setActiveSession(id) {
   renderAllMessages(sess);
   setBusy(sess, rt(sess).busy);
   renderSessionList();
-  if (sess.bridgeSessionId && !sess.messages.length && state.bridgeReady) {
-    pollSession(sess);
+  applyPlanPayload(sess, null);
+  syncPlanPollTimer();
+  if (sess.bridgeSessionId && state.bridgeReady) {
+    if (!sess.messages.length) pollSession(sess);
+    else planPoll(sess);
   }
 }
 async function closeSession(id) {
@@ -2216,6 +2337,7 @@ async function pollSession(sess) {
         if (result.partial) upsert(sess, result.partial, true);
         const busy = result.status === 'running' || !!result.partial;
         setBusy(sess, busy);
+        if (isActive(sess)) applyPlanPayload(sess, result.plan);
         if (busy) await new Promise(z => setTimeout(z, 500));
         else {
           if (r.draftEl) { r.draftEl.remove(); r.draftEl = null; r.draftText = ''; }
@@ -3132,12 +3254,14 @@ if (chatPanel) {
 /* ═══════════════ bridge 事件 ═══════════════ */
 window.ga.onBridgeReady(async () => {
   state.bridgeReady = true;
+  syncPlanPollTimer();
   if (!state.activeId) { refreshStatusLabel(); refreshEmptyState(null); }
   await loadModelProfiles();
   await loadBridgeConfig();
   if (isServicesPageActive()) renderChannelList(gaServiceStore.list());
   const sess = activeSess();
   if (sess && sess.bridgeSessionId && !sess.messages.length) await pollSession(sess);
+  else if (sess) planPoll(sess);
   delete document.documentElement.dataset.bootHasSessions;
   if (sess) refreshEmptyState(sess);
 });
@@ -3155,7 +3279,13 @@ window.ga.onBridgeNotification((msg) => {
   }
 });
 window.ga.onBridgeError((err) => { console.warn('[bridge error]', err); });
-window.ga.onBridgeClosed(() => { state.bridgeReady = false; chatStatus.setDisconnected(); });
+window.ga.onBridgeClosed(() => {
+  state.bridgeReady = false;
+  syncPlanPollTimer();
+  const s = activeSess();
+  if (s) applyPlanPayload(s, null);
+  chatStatus.setDisconnected();
+});
 
 /* ═══════════════ Token 统计页 ═══════════════ */
 const tokTbody = document.getElementById('tok-tbody');

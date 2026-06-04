@@ -1127,6 +1127,29 @@ span.flatpickr-weekday{ color:var(--muted) !important; font-size:11px; }
 .ctx-item.danger{ color:var(--danger); }
 .ctx-item.danger:hover{ background:var(--danger-bg); }
 
+/* Plan todo 卡片：消息区与输入框之间（对齐 TUI #planbar） */
+.plan-bar{
+  flex:0 0 auto;
+  margin:0 16px 8px;
+  padding:10px 12px;
+  border-left:3px solid var(--ok);
+  background:color-mix(in srgb, var(--ok) 8%, var(--card));
+  font-size:12px;
+  line-height:1.45;
+  color:var(--txt);
+  max-height:7.5em;
+  overflow:hidden;
+}
+.plan-bar[hidden]{ display:none !important; }
+.plan-head{ font-weight:700; color:var(--ok); margin-bottom:4px; }
+.plan-step{ color:var(--muted); margin-bottom:4px; }
+.plan-wait{ color:var(--muted2); padding-left:1.25em; }
+.plan-item{ display:flex; gap:6px; align-items:flex-start; margin-top:2px; }
+.plan-item--done{ color:var(--muted); }
+.plan-mark{ flex:0 0 auto; width:1.2em; }
+.plan-text{ flex:1 1 auto; word-break:break-word; }
+.plan-more{ color:var(--muted2); margin-top:4px; }
+
 /* ─── chat composer: Plan/Auto toggle ─── */
 .chip.on{
   background:var(--accent);

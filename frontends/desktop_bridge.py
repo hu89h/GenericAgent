@@ -500,11 +500,13 @@ class AgentManager:
             msgs = [m for m in sess.messages if int(m.get("id", 0)) > after]
             if limit > 0:
                 msgs = msgs[-limit:]
+            import plan_state
             return {
                 "sessionId": sid,
                 "status": sess.status,
                 "messages": msgs,
                 "partial": dict(sess.partial) if sess.partial else None,
+                "plan": plan_state.desktop_plan_payload_from_session(sess, self.ga_root),
                 "msgSeq": sess.msg_seq,
                 "updatedAt": sess.updated_at,
                 "lastError": sess.last_error,

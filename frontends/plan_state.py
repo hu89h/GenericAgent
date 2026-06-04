@@ -20,7 +20,7 @@ Supported task-line shapes (all matched by `extract`):
 """
 from __future__ import annotations
 import os, re
-from typing import Optional
+from typing import Any, Optional
 
 _DONE_CHARS = set("xX✓✔√☑")
 # Newline-insert before a bullet stuck to JSON debris (`{"content": "- [ ] …`).
@@ -178,3 +178,75 @@ def summary(items: list[tuple[str, str]]) -> tuple[int, int]:
 
 def is_complete(items: list[tuple[str, str]]) -> bool:
     return not items or all(st == "done" for _, st in items)
+
+
+# --- Desktop bridge only (APIs above unchanged) ---
+_ENTER_PLAN_RE = re.compile(r"""enter_plan_mode\s*\(\s*["']([^"']+)["']""", re.I)
+
+
+def _msg_content(m) -> str:
+    if isinstance(m, str): return m
+    c = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+    return c if isinstance(c, str) else ""
+
+
+def plan_path_mention_in_messages(messages, start_idx: int = 0) -> Optional[str]:
+    for m in reversed(_slice(messages, start_idx)):
+        text = _msg_content(m)
+        if not text: continue
+        if "enter_plan_mode" in text and (hit := _ENTER_PLAN_RE.search(text)):
+            return hit.group(1).strip().strip("\"'")
+        if "plan.md" in text and (hits := _PATH_RE.findall(text)):
+            return hits[-1].strip().strip("\"'")
+    return None
+
+
+def _resolve_stashed_at(p: str, root: str) -> Optional[str]:
+    if not p or not root: return None
+    rel = p.lstrip("./\\")
+    cwd = root.rstrip("/\\")
+    for c in (p, os.path.join(cwd, "temp", rel), os.path.join(cwd, rel)):
+        if os.path.isfile(c) and os.path.getsize(c) > 0: return c
+    return None
+
+
+def _find_path_at(messages, start_idx: int, root: str) -> Optional[str]:
+    for m in reversed(_slice(messages, start_idx)):
+        text = _msg_content(m)
+        if not text or "plan.md" not in text: continue
+        for hit in reversed(_PATH_RE.findall(text)):
+            if p := _resolve_stashed_at(hit.strip().strip("\"'"), root): return p
+    return None
+
+
+def _desktop_plan_path(agent, msgs, root: str, start_idx: int = 0) -> Optional[str]:
+    stash = _stashed_plan_path(agent)
+    if stash and (p := _resolve_stashed_at(stash, root) or _resolve_stashed(stash)): return p
+    if p := _find_path_at(msgs, start_idx, root): return p
+    if m := plan_path_mention_in_messages(msgs, start_idx): return _resolve_stashed_at(m, root)
+    return None
+
+
+def desktop_plan_payload_from_session(sess: Any, ga_root: str = "") -> dict:
+    msgs = [t for t in (_msg_content(m) for m in getattr(sess, "messages", []) or []) if t]
+    if isinstance(p := getattr(sess, "partial", None), dict) and isinstance(c := p.get("content"), str) and c:
+        msgs.append(c)
+    root = (getattr(sess, "cwd", None) or ga_root or "").strip()
+    agent = getattr(sess, "agent", None)
+    if not (_stashed_plan_path(agent) or plan_path_mention_in_messages(msgs) or (root and _find_path_at(msgs, 0, root))):
+        return {"active": False}
+    path = _desktop_plan_path(agent, msgs, root)
+    items = []
+    if path:
+        try:
+            items = [{"content": c, "status": st} for c, st in extract(open(path, encoding="utf-8", errors="replace").read())]
+        except OSError:
+            pass
+    step = current_step(msgs)
+    if not items:
+        hp = _stashed_plan_path(agent) or plan_path_mention_in_messages(msgs) or ""
+        hint = "/".join(hp.replace("\\", "/").rstrip("/").split("/")[-2:]) if hp else "plan.md"
+        return {"active": True, "placeholder": True, "done": 0, "total": 0, "complete": False, "step": step, "pathHint": hint, "items": []}
+    pairs = [(x["content"], x["status"]) for x in items]
+    n_done, n_total = summary(pairs)
+    return {"active": True, "placeholder": False, "done": n_done, "total": n_total, "complete": is_complete(pairs), "step": step, "items": items}
