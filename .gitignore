@@ -134,6 +134,10 @@ reflect/*
 !reflect/goal_mode.py
 !reflect/checklist_master.py
 
+# Conductor IM plugins: 私有插件/配置不入库，email.py & lark.py 作为示例保留
+frontends/conductor_im_plugins/wechat.py
+frontends/conductor_im_plugins/config.local.json
+
 # Universal: never track __pycache__ anywhere
 **/__pycache__/
 
