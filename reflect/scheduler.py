@@ -20,6 +20,9 @@ _LOG  = os.path.join(_dir, '../sche_tasks/scheduler.log')
 _logger = logging.getLogger('scheduler')
 if not _logger.handlers:
     _logger.setLevel(logging.INFO)
+    # sche_tasks/ 在 .gitignore 里,fresh deploy 时不存在,先建出来再开 FileHandler
+    # (跟 check() 里 line 78 的 os.makedirs(DONE, exist_ok=True) 是一个 pattern)
+    os.makedirs(os.path.dirname(_LOG), exist_ok=True)
     _fh = logging.FileHandler(_LOG, encoding='utf-8')
     _fh.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s',
                                         datefmt='%Y-%m-%d %H:%M'))
