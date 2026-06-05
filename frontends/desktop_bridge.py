@@ -86,6 +86,27 @@ class Session:
     last_error: str = ""
     pinned: bool = False
     untitled: bool = True
+    plan_scan_baseline: int = 0
+    plan_path: str = ""
+
+
+def _load_plan_baseline(item: dict, msgs: list) -> int:
+    """Persisted per-session baseline (tuiapp_v2: set on /continue, not on preset text)."""
+    base = int(item.get("plan_scan_baseline", 0) or 0)
+    if base >= len(msgs):
+        return 0
+    return max(0, base)
+
+
+def _sanitize_desktop_plan_path(session_id: str, plan_path: str) -> str:
+    """Desktop: drop shared plan_demo paths so sessions do not read the same file."""
+    import plan_state
+    p = (plan_path or "").strip()
+    if not p:
+        return ""
+    if plan_state.is_session_scoped_plan_path(p, session_id):
+        return p
+    return plan_state.default_session_plan_path(session_id)
 
 
 class AgentManager:
@@ -111,7 +132,9 @@ class AgentManager:
                     arr.append({"id": s.id, "title": s.title, "cwd": s.cwd,
                                 "created_at": s.created_at, "updated_at": s.updated_at,
                                 "messages": s.messages, "msg_seq": s.msg_seq,
-                                "pinned": s.pinned, "untitled": s.untitled})
+                                "pinned": s.pinned, "untitled": s.untitled,
+                                "plan_scan_baseline": s.plan_scan_baseline,
+                                "plan_path": s.plan_path or ""})
             self._sessions_file.write_text(json.dumps(arr, ensure_ascii=False, default=str), encoding="utf-8")
         except Exception as e:
             print(f"[bridge] persist sessions failed: {e}", file=sys.stderr)
@@ -122,14 +145,18 @@ class AgentManager:
                 return
             arr = json.loads(self._sessions_file.read_text(encoding="utf-8"))
             for item in arr:
+                msgs = item.get("messages", [])
                 sess = Session(id=item["id"], title=item.get("title", "New chat"),
                                cwd=item.get("cwd", self.ga_root),
                                created_at=item.get("created_at", time.time()),
                                updated_at=item.get("updated_at", time.time()),
-                               messages=item.get("messages", []),
+                               messages=msgs,
                                msg_seq=item.get("msg_seq", 0),
                                pinned=item.get("pinned", False),
                                untitled=item.get("untitled", True),
+                               plan_scan_baseline=_load_plan_baseline(item, msgs),
+                               plan_path=_sanitize_desktop_plan_path(
+                                   item["id"], item.get("plan_path") or ""),
                                status="idle", agent=None)
                 self.sessions[sess.id] = sess
             if self.sessions:
@@ -408,6 +435,10 @@ class AgentManager:
             if image_metas:
                 extra["images"] = image_metas
             user_msg = self.add_message(sess, "user", prompt, **extra)
+            import plan_state
+            if plan_state.is_plan_preset_prompt(prompt):
+                plan_state.bind_plan_session(sess, prompt)
+                self._persist()
             sess.status = "running"
             sess.cancel_requested = False
             sess.last_error = ""
@@ -478,6 +509,8 @@ class AgentManager:
                 # Strip trailing [Info] Final response to user. marker
                 import re as _re
                 full = _re.sub(r'\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$', '', full)
+                import plan_state
+                plan_state.sync_plan_path_from_text(sess, full, sess.cwd or self.ga_root)
                 self.add_message(sess, "assistant", full)
                 sess.status = "idle"
                 sess.last_error = ""
@@ -500,14 +533,27 @@ class AgentManager:
             msgs = [m for m in sess.messages if int(m.get("id", 0)) > after]
             if limit > 0:
                 msgs = msgs[-limit:]
+            import plan_state
             return {
                 "sessionId": sid,
                 "status": sess.status,
                 "messages": msgs,
                 "partial": dict(sess.partial) if sess.partial else None,
+                "plan": plan_state.desktop_plan_payload_from_session(sess, self.ga_root),
                 "msgSeq": sess.msg_seq,
                 "updatedAt": sess.updated_at,
                 "lastError": sess.last_error,
+            }
+
+    def plan_snapshot(self, sid: str) -> dict:
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
+            import plan_state
+            return {
+                "sessionId": sid,
+                "plan": plan_state.desktop_plan_payload_from_session(sess, self.ga_root),
             }
 
     def cancel(self, sid: str) -> dict:
@@ -1042,6 +1088,8 @@ async def patch_session_handler(request):
         sess.pinned = bool(data["pinned"])
     if "untitled" in data:
         sess.untitled = bool(data["untitled"])
+    if "plan_scan_baseline" in data:
+        sess.plan_scan_baseline = int(data["plan_scan_baseline"])
     sess.updated_at = time.time()
     manager._persist()
     return json_ok({"ok": True, "session": manager.snapshot(sess, include_messages=False)})
@@ -1077,6 +1125,11 @@ async def cancel_handler(request):
 async def restore_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.restore_context(sid))
+
+
+async def plan_handler(request):
+    sid = request.match_info["sid"]
+    return json_ok(manager.plan_snapshot(sid))
 
 
 async def path_open_handler(request):
@@ -1424,6 +1477,7 @@ def create_app():
     app.router.add_patch("/session/{sid}", patch_session_handler)
     app.router.add_post("/session/{sid}/prompt", prompt_handler)
     app.router.add_get("/session/{sid}/messages", messages_handler)
+    app.router.add_get("/session/{sid}/plan", plan_handler)
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
     app.router.add_post("/session/{sid}/restore", restore_handler)
     app.router.add_post("/path/open", path_open_handler)

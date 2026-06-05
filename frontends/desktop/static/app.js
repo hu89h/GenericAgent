@@ -358,6 +358,11 @@ const I18N = {
     'upload.dropHint': '松开以上传文件',
     'lightbox.closeTitle': '关闭',
     'fold.thinking': '思考', 'fold.tool': '工具调用', 'fold.toolResult': '工具结果', 'fold.llm': 'LLM Running', 'fold.turn': '第 {n} 轮',
+    'plan.header': '计划 ({done}/{total})', 'plan.complete': '✓ 计划完成 ({n}/{n})',
+    'plan.running': '计划执行中', 'plan.completeTitle': '计划完成',
+    'plan.placeholder': '计划模式已激活', 'plan.waiting': '等待写入 {path} …', 'plan.overflow': '还有 {n} 项',
+    'plan.current': '当前', 'plan.collapse': '收起', 'plan.expand': '展开', 'plan.details': '详情',
+    'plan.capsuleRunning': '运行中', 'plan.capsuleComplete': '已完成',
     'timing.elapsed': '已运行 {t}',
     'model.auto': '自动选择',
     'model.menuLabel': '选择模型',
@@ -505,6 +510,11 @@ const I18N = {
     'upload.dropHint': 'Drop to upload files',
     'lightbox.closeTitle': 'Close',
     'fold.thinking': 'Thinking', 'fold.tool': 'Tool call', 'fold.toolResult': 'Tool result', 'fold.llm': 'LLM Running', 'fold.turn': 'Turn {n}',
+    'plan.header': 'Plan ({done}/{total})', 'plan.complete': '✓ Plan complete ({n}/{n})',
+    'plan.running': 'Running plan', 'plan.completeTitle': 'Plan complete',
+    'plan.placeholder': 'Plan mode activated', 'plan.waiting': 'waiting for {path} …', 'plan.overflow': '+{n} more',
+    'plan.current': 'Now', 'plan.collapse': 'Collapse', 'plan.expand': 'Expand', 'plan.details': 'Details',
+    'plan.capsuleRunning': 'Running', 'plan.capsuleComplete': 'Done',
     'timing.elapsed': 'Elapsed {t}',
     'model.auto': 'Auto',
     'model.menuLabel': 'Select model',
@@ -956,6 +966,183 @@ function extractLastTurnForCopy(text) {
   body = body.replace(/<summary>[\s\S]*?<\/summary>\s*/i, '');
   return body.trim();
 }
+
+/**
+ * Agent 流协议（与 agent_loop.py / continue_cmd 一致）按行解析：
+ * - 工具调用：🛠️ 行 + 开围栏行 `` `{n}text `` + 正文 + 闭围栏行（仅 `{n}，取区间内最后一行）
+ * - 工具结果：开围栏行 `` `{n} ``（n≥5）+ 正文 + 同长度闭围栏行
+ */
+function parseAgentFenceLine(line) {
+  const m = /^[ \t]*(`{3,})([^\n`]*)[ \t]*$/.exec(line ?? '');
+  if (!m) return null;
+  return { ticks: m[1].length, tag: m[2] };
+}
+
+function isAgentStructureBoundaryLine(line, opts) {
+  if (/^🛠️ Tool:/.test(line)) return true;
+  // 工具「结果」区内：5 反引号是开/闭围栏，不能当边界（否则闭围栏会被当成下一结构 → 拆出多个空「工具结果」）
+  if (!opts || !opts.forToolResult) {
+    const f = parseAgentFenceLine(line);
+    if (f && f.ticks >= 5 && f.tag === '') return true;
+  }
+  if (/^\*\*LLM Running \(Turn \d+\)/.test(line)) return true;
+  if (/^<thinking>/i.test(line)) return true;
+  return false;
+}
+
+function indexOfNextAgentStructureLine(lines, from, opts) {
+  for (let i = from; i < lines.length; i++) {
+    if (isAgentStructureBoundaryLine(lines[i], opts)) return i;
+  }
+  return lines.length;
+}
+
+function lastFenceCloseLineIndex(lines, from, toExclusive, tickCount) {
+  let last = -1;
+  for (let i = from; i < toExclusive; i++) {
+    const f = parseAgentFenceLine(lines[i]);
+    if (f && f.ticks === tickCount && f.tag === '') last = i;
+  }
+  return last;
+}
+
+function parseToolCallBlock(lines, i) {
+  const m = /^🛠️ Tool: `([^`]+)`/.exec(lines[i] || '');
+  if (!m) return null;
+  const open = parseAgentFenceLine(lines[i + 1]);
+  if (!open || open.tag !== 'text') return null;
+  const bodyStart = i + 2;
+  const zoneEnd = indexOfNextAgentStructureLine(lines, bodyStart);
+  const closeIdx = lastFenceCloseLineIndex(lines, bodyStart, zoneEnd, open.ticks);
+  if (closeIdx < 0) return null;
+  return {
+    name: m[1],
+    body: lines.slice(bodyStart, closeIdx).join('\n'),
+    nextLine: closeIdx + 1,
+  };
+}
+
+function parseToolResultBlock(lines, i) {
+  const open = parseAgentFenceLine(lines[i]);
+  if (!open || open.ticks < 5 || open.tag !== '') return null;
+  const bodyStart = i + 1;
+  const zoneEnd = indexOfNextToolResultZoneEnd(lines, bodyStart);
+  const closeIdx = lastFenceCloseLineIndex(lines, bodyStart, zoneEnd, open.ticks);
+  if (closeIdx < 0) return null;
+  return {
+    body: lines.slice(bodyStart, closeIdx).join('\n'),
+    nextLine: closeIdx + 1,
+  };
+}
+
+/** 工具结果区 zone：不把 5 反引号围栏行当边界（见 isAgentStructureBoundaryLine） */
+function indexOfNextToolResultZoneEnd(lines, from) {
+  return indexOfNextAgentStructureLine(lines, from, { forToolResult: true });
+}
+
+/** 流式未闭合工具调用（对齐 TUI _safe_pos：末尾 in-flight 🛠️ 块） */
+function parseInFlightToolCall(lines, i) {
+  if (parseToolCallBlock(lines, i)) return null;
+  const m = /^🛠️ Tool: `([^`]+)`/.exec(lines[i] || '');
+  if (!m) return null;
+  const open = parseAgentFenceLine(lines[i + 1]);
+  let bodyStart;
+  let zoneEnd;
+  if (open && open.tag === 'text') {
+    bodyStart = i + 2;
+    zoneEnd = indexOfNextAgentStructureLine(lines, bodyStart);
+    if (lastFenceCloseLineIndex(lines, bodyStart, zoneEnd, open.ticks) >= 0) return null;
+  } else {
+    bodyStart = i + 1;
+    zoneEnd = lines.length;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (isAgentStructureBoundaryLine(lines[j])) { zoneEnd = j; break; }
+    }
+  }
+  return {
+    name: m[1],
+    body: lines.slice(bodyStart, zoneEnd).join('\n'),
+    nextLine: zoneEnd,
+    inFlight: true,
+  };
+}
+
+/** 流式未闭合工具结果（5 反引号围栏未到） */
+function parseInFlightToolResult(lines, i) {
+  if (parseToolResultBlock(lines, i)) return null;
+  const open = parseAgentFenceLine(lines[i]);
+  if (!open || open.ticks < 5 || open.tag !== '') return null;
+  const bodyStart = i + 1;
+  const zoneEnd = indexOfNextToolResultZoneEnd(lines, bodyStart);
+  if (lastFenceCloseLineIndex(lines, bodyStart, zoneEnd, open.ticks) >= 0) return null;
+  return {
+    body: lines.slice(bodyStart, zoneEnd).join('\n'),
+    nextLine: zoneEnd,
+    inFlight: true,
+  };
+}
+
+/** 将 agent 协议块替换为占位符，其余行原样保留给 Markdown */
+function foldAgentProtocolBlocks(body, { onTool, onResult }) {
+  const lines = String(body || '').split('\n');
+  const out = [];
+  let proseFrom = 0;
+  let i = 0;
+
+  const flushProse = (until) => {
+    if (until <= proseFrom) return;
+    out.push(lines.slice(proseFrom, until).join('\n'));
+    proseFrom = until;
+  };
+
+  while (i < lines.length) {
+    const tool = parseToolCallBlock(lines, i);
+    if (tool) {
+      flushProse(i);
+      out.push(onTool(tool.name, tool.body));
+      i = tool.nextLine;
+      proseFrom = i;
+      continue;
+    }
+    const result = parseToolResultBlock(lines, i);
+    if (result) {
+      flushProse(i);
+      out.push(onResult(result.body));
+      i = result.nextLine;
+      proseFrom = i;
+      continue;
+    }
+    const liveTool = parseInFlightToolCall(lines, i);
+    if (liveTool) {
+      flushProse(i);
+      out.push(onTool(liveTool.name, liveTool.body, { inFlight: true }));
+      i = liveTool.nextLine;
+      proseFrom = i;
+      continue;
+    }
+    const liveResult = parseInFlightToolResult(lines, i);
+    if (liveResult) {
+      flushProse(i);
+      out.push(onResult(liveResult.body, { inFlight: true }));
+      i = liveResult.nextLine;
+      proseFrom = i;
+      continue;
+    }
+    i++;
+  }
+  flushProse(lines.length);
+  return out.join('');
+}
+
+function extractAskUserToolJson(content) {
+  const lines = String(content || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const block = parseToolCallBlock(lines, i);
+    if (block && block.name === 'ask_user') return block.body;
+  }
+  return null;
+}
+
 function renderAssistant(text) {
   const src = String(text || '');
   // 1) 按 "LLM Running (Turn N)..." 标记切分多轮；N 从原文捕获，无硬编码文案
@@ -979,24 +1166,39 @@ function renderAssistant(text) {
   // 2) 块级折叠：占位符使用 HTML 注释，避免与正文 F\d+ 冲突
   const folds = [];
   const asks = [];
-  const stash = (label, body, cls) => { folds.push({ label, body, cls: cls || '' }); return `\n\n§§FOLD:${folds.length - 1}§§\n\n`; };
+  const stash = (label, body, cls, opts) => {
+    folds.push({ label, body, cls: cls || '', open: !!(opts && opts.open) });
+    return `\n\n§§FOLD:${folds.length - 1}§§\n\n`;
+  };
   const stashAsk = (data) => { asks.push(data); return `\n\n§§ASK:${asks.length - 1}§§\n\n`; };
   const foldBlocks = (body) => {
     let s = body;
     // thinking: 兼容 <thinking> XML 与 <details>...</details>（未来扩展）
     s = s.replace(/<thinking>[\s\S]*?<\/thinking>/gi, m => stash(t('fold.thinking'), m.replace(/<\/?thinking>/gi, ''), 'fold-thinking'));
-    // ask_user：渲染为提问卡片（必须在通用工具规则之前匹配）
-    s = s.replace(/🛠️ Tool: `ask_user`[^\n]*\n````text\n([\s\S]*?)\n````/g,
-                  (m, json) => {
-                    const data = parseAskUserJson(json);
-                    if (data && normalizeAskUserData(data)) return stashAsk(data);
-                    return stash(`${t('fold.tool')}: ask_user`, json, 'fold-tool');
-                  });
-    // 工具调用：agent_loop 实际格式 = "🛠️ Tool: `name`  📥 args:\n````text\n{json}\n````"
-    s = s.replace(/🛠️ Tool: `([^`]+)`[^\n]*\n````text\n([\s\S]*?)\n````/g,
-                  (_, name, json) => stash(`${t('fold.tool')}: ${name}`, json, 'fold-tool'));
-    // 工具结果：5 反引号围栏
-    s = s.replace(/`{5}\n([\s\S]*?)\n`{5}/g, (_, body) => stash(t('fold.toolResult'), body, 'fold-result'));
+    s = foldAgentProtocolBlocks(s, {
+      onTool(name, json, meta) {
+        if (name === 'ask_user' && !meta?.inFlight) {
+          const data = parseAskUserJson(json);
+          if (data && normalizeAskUserData(data)) return stashAsk(data);
+        }
+        const live = !!meta?.inFlight;
+        return stash(
+          `${t('fold.tool')}: ${name}${live ? ' …' : ''}`,
+          json,
+          live ? 'fold-tool fold-tool-live' : 'fold-tool',
+          { open: live },
+        );
+      },
+      onResult(body, meta) {
+        const live = !!meta?.inFlight;
+        return stash(
+          `${t('fold.toolResult')}${live ? ' …' : ''}`,
+          body,
+          live ? 'fold-result fold-tool-live' : 'fold-result',
+          { open: live },
+        );
+      },
+    });
     // 兼容旧 XML 标记（保险）
     s = s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi, m => stash(t('fold.tool'), m, 'fold-tool'));
     s = s.replace(/<function_results>[\s\S]*?<\/function_results>/gi, m => stash(t('fold.toolResult'), m, 'fold-result'));
@@ -1041,7 +1243,8 @@ function renderAssistant(text) {
     .replace(/(?:<p>\s*)?§§ASK:(\d+)§§(?:\s*<\/p>)?/g, (_, i) => renderAskUserNotice(asks[Number(i)]))
     .replace(/(?:<p>\s*)?§§FOLD:(\d+)§§(?:\s*<\/p>)?/g, (_, i) => {
       const f = folds[Number(i)];
-      return `<details class="fold ${f.cls}"><summary>${escapeHtml(f.label)}</summary><pre class="fold-pre">${escapeHtml(f.body)}</pre></details>`;
+      const openAttr = f.open ? ' open' : '';
+      return `<details class="fold ${f.cls}"${openAttr}><summary>${escapeHtml(f.label)}</summary><pre class="fold-pre">${escapeHtml(f.body)}</pre></details>`;
     });
 }
 
@@ -1137,7 +1340,6 @@ function shouldShowAskCandidates(item) {
   return true;
 }
 
-const ASK_USER_TOOL_RE = /🛠️ Tool: `ask_user`[^\n]*\n````text\n([\s\S]*?)\n````/;
 
 function renderAskUserNotice(data) {
   const item = normalizeAskUserData(data);
@@ -1180,10 +1382,10 @@ function getPendingAskUser(sess) {
   let askData = null;
   for (let i = msgs.length - 1; i >= 0; i--) {
     if (msgs[i].role !== 'assistant') continue;
-    const m = ASK_USER_TOOL_RE.exec(msgs[i].content || '');
-    if (m) {
+    const json = extractAskUserToolJson(msgs[i].content || '');
+    if (json != null) {
       lastAskIdx = i;
-      askData = normalizeAskUserData(parseAskUserJson(m[1]));
+      askData = normalizeAskUserData(parseAskUserJson(json));
       break;
     }
   }
@@ -1274,7 +1476,7 @@ const state = {
 };
 function rt(sess) {
   let r = state.runtime.get(sess.id);
-  if (!r) { r = { polling:false, busy:false, lastId:0, seen:new Set(), draftEl:null, draftText:'', taskStartedAt:null, taskEndedAt:null, taskTimerId:null }; state.runtime.set(sess.id, r); }
+  if (!r) { r = { polling:false, busy:false, lastId:0, seen:new Set(), draftEl:null, draftText:'', taskStartedAt:null, taskEndedAt:null, taskTimerId:null, planCompleteAt:null, planLostAt:null, planHoldItems:[], planLastPayload:null, planLastComplete:false, planHideTimer:null, planDismissedComplete:false, planCollapsed:false, planShowAll:false }; state.runtime.set(sess.id, r); }
   return r;
 }
 const activeSess = () => state.sessions.get(state.activeId) || null;
@@ -1311,11 +1513,19 @@ async function loadSessions() {
 const chatPage   = document.querySelector('.page[data-page="chat"]');
 const msgArea    = chatPage.querySelector('.msg-area');
 const chatStart  = msgArea.querySelector('.chat-start');
-const inputEl    = chatPage.querySelector('.input');
+const inputEl    = document.getElementById('chat-input');
 const sendBtn    = document.getElementById('send-btn');
-const composerEl = chatPage.querySelector('.composer');
+const planBarEl = document.getElementById('plan-bar');
+const composerEl = document.getElementById('chat-composer');
 const msgLoading = document.getElementById('msg-loading');
 const MIN_MSG_LOADING_MS = 450;
+const PLAN_LOST_GRACE_MS = 1500;  // tuiapp_v2._PLAN_LOST_GRACE_SEC
+const PLAN_COMPLETE_GRACE_MS = 3000;  // tuiapp_v2._PLAN_GRACE_SEC
+
+function isPlanPresetPrompt(text) {
+  const p = String(text || '').toLowerCase();
+  return p.includes('plan_sop') || p.includes('plan 模式') || p.includes('plan mode');
+}
 let _submitInFlight = false;
 const runToggle  = document.getElementById('run-toggle');
 const chatStatus = pageStatusBar(runToggle);
@@ -1381,6 +1591,364 @@ function refreshEmptyState(sess) {
   msgArea.classList.toggle('has-msgs', !!has);
   if (chatStart) chatStart.style.display = has ? 'none' : '';
   if (msgsEl) msgsEl.style.display = has ? '' : 'none';
+}
+
+function planTpl(tpl, v) {
+  return String(tpl || '').replace(/\{(\w+)\}/g, (_, k) => (v[k] != null ? String(v[k]) : `{${k}}`));
+}
+
+let planPollTimer;
+function syncPlanPollTimer() {
+  const on = !!(activeSess()?.bridgeSessionId && state.bridgeReady);
+  if (on && !planPollTimer) {
+    planPollTimer = setInterval(() => {
+      const s = activeSess();
+      if (!s || !isActive(s)) return;
+      planFetch(s);
+      planTick(s);
+    }, 1000);
+  } else if (!on && planPollTimer) {
+    clearInterval(planPollTimer);
+    planPollTimer = null;
+  }
+}
+
+function clearPlanGrace(r) {
+  r.planCompleteAt = r.planLostAt = null;
+  r.planHoldItems = [];
+  r.planLastPayload = null;
+  r.planLastComplete = false;
+  r.planDismissedComplete = false;
+  if (r.planHideTimer) { clearTimeout(r.planHideTimer); r.planHideTimer = null; }
+}
+
+function schedulePlanCompleteDismiss(sess) {
+  const r = rt(sess);
+  if (r.planHideTimer) clearTimeout(r.planHideTimer);
+  r.planHideTimer = setTimeout(() => {
+    r.planHideTimer = null;
+    r.planDismissedComplete = true;
+    if (isActive(sess)) refreshPlanBar(null);
+  }, PLAN_COMPLETE_GRACE_MS);
+}
+
+/** tuiapp_v2._refresh_planbar：用 runtime 里缓存的 items / placeholder 重绘 */
+function refreshPlanBarFromRuntime(sess) {
+  const r = rt(sess);
+  const lp = r.planLastPayload;
+  let items = r.planHoldItems || [];
+  if (r.planLostAt != null && Date.now() - r.planLostAt >= PLAN_LOST_GRACE_MS) {
+    items = [];
+    r.planHoldItems = [];
+    r.planLostAt = null;
+  }
+  if (r.planDismissedComplete) {
+    refreshPlanBar(null);
+    return;
+  }
+  if (r.planCompleteAt != null && Date.now() - r.planCompleteAt >= PLAN_COMPLETE_GRACE_MS) {
+    r.planDismissedComplete = true;
+    refreshPlanBar(null);
+    return;
+  }
+  if (!items.length) {
+    if (lp?.active && lp.placeholder) {
+      refreshPlanBar(lp);
+      return;
+    }
+    const held = r.planHoldItems || [];
+    if (lp?.complete && (lp.items?.length || held.length)) {
+      refreshPlanBar({
+        active: true,
+        placeholder: false,
+        items: lp.items?.length ? lp.items : held,
+        done: lp.done ?? held.filter(it => it.status === 'done').length,
+        total: lp.total ?? (lp.items?.length || held.length),
+        complete: true,
+        step: lp.step || '',
+      });
+      return;
+    }
+    refreshPlanBar(null);
+    return;
+  }
+  refreshPlanBar({
+    active: true,
+    placeholder: false,
+    items,
+    done: lp?.done ?? items.filter(it => it.status === 'done').length,
+    total: lp?.total ?? items.length,
+    complete: !!(lp?.complete || (items.length && items.every(it => it.status === 'done'))),
+    step: lp?.step || '',
+  });
+}
+
+/** 每秒 tick grace（对齐 TUI _poll_plan_files → _refresh_planbar） */
+function planTick(sess) {
+  if (!sess || !isActive(sess)) return;
+  refreshPlanBarFromRuntime(sess);
+}
+
+function applyPlanPayload(sess, raw) {
+  if (!sess) return;
+  const r = rt(sess);
+  const now = Date.now();
+
+  if (raw?.active) {
+    if (raw.placeholder && !r.planLastPayload?.active) {
+      r.planCollapsed = false;
+      r.planShowAll = false;
+    }
+    r.planLastPayload = raw;
+    const items = raw.items || [];
+    if (items.length) {
+      r.planLostAt = null;
+      r.planHoldItems = items;
+    } else if (!raw.placeholder && !raw.complete && r.planHoldItems.length) {
+      if (!r.planLostAt) r.planLostAt = now;
+    }
+    const nowComplete = !!raw.complete && (items.length > 0 || r.planHoldItems.length > 0);
+    const wasComplete = r.planLastComplete;
+    if (nowComplete && !wasComplete) {
+      r.planCompleteAt = now;
+      schedulePlanCompleteDismiss(sess);
+    } else if (!nowComplete) {
+      r.planCompleteAt = null;
+      r.planDismissedComplete = false;
+      if (r.planHideTimer) { clearTimeout(r.planHideTimer); r.planHideTimer = null; }
+    }
+    r.planLastComplete = nowComplete;
+  } else if (r.planHoldItems.length && !r.planDismissedComplete) {
+    if (!r.planLostAt) r.planLostAt = now;
+  } else if (!r.planDismissedComplete) {
+    clearPlanGrace(r);
+  }
+
+  if (!isActive(sess)) return;
+  if (r.planDismissedComplete) {
+    refreshPlanBar(null);
+    return;
+  }
+  if (raw?.active && raw.placeholder) {
+    refreshPlanBar(raw);
+    return;
+  }
+  if (raw?.active && raw.complete && (raw.items?.length || r.planHoldItems.length)) {
+    refreshPlanBar({
+      ...raw,
+      items: raw.items?.length ? raw.items : r.planHoldItems,
+    });
+    return;
+  }
+  refreshPlanBarFromRuntime(sess);
+}
+
+function planItemUi(status, isCurrent) {
+  const st = String(status || 'open').toLowerCase();
+  if (st === 'done') return { cls: 'plan-item--done', mark: '✓' };
+  if (st === 'error' || st === 'failed') return { cls: 'plan-item--error', mark: '✕' };
+  if (st === 'warn' || st === 'warning') return { cls: 'plan-item--warn', mark: '!' };
+  if (isCurrent) return { cls: 'plan-item--current', mark: '●' };
+  return { cls: 'plan-item--pending', mark: '○' };
+}
+
+function pickPlanWindow(items, stepText) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return { shown: [], curInShown: -1, overflow: 0 };
+  let cur = list.findIndex(it => it.status !== 'done');
+  if (cur < 0) cur = list.length - 1;
+  const step = String(stepText || '').trim();
+  if (step) {
+    const hit = list.findIndex(it => String(it.content || '').includes(step.slice(0, 24)));
+    if (hit >= 0) cur = hit;
+  }
+  let start, end;
+  if (cur <= 1) {
+    start = cur;
+    end = Math.min(list.length, cur + 3);
+  } else {
+    start = cur - 1;
+    end = Math.min(list.length, cur + 2);
+  }
+  const shown = list.slice(start, end);
+  return { shown, curInShown: cur - start, overflow: Math.max(0, list.length - shown.length) };
+}
+
+function planCapsuleLabel(plan) {
+  const step = plan.step ? String(plan.step).slice(0, 80) : '';
+  if (plan.complete) return { tag: t('plan.capsuleComplete'), step: step || planTpl(t('plan.complete'), { n: plan.total }) };
+  if (plan.placeholder) return { tag: t('plan.placeholder'), step: '' };
+  return { tag: t('plan.capsuleRunning'), step: step || planTpl(t('plan.header'), { done: plan.done, total: plan.total }) };
+}
+
+function bindPlanCardUiOnce() {
+  if (!planBarEl || planBarEl._planUiBound) return;
+  planBarEl._planUiBound = true;
+  planBarEl.addEventListener('click', (e) => {
+    const sess = activeSess();
+    if (!sess) return;
+    const r = rt(sess);
+    const payload = r.planLastPayload;
+    if (!payload?.active) return;
+    if (e.target.closest('[data-plan-expand]')) {
+      r.planCollapsed = false;
+      refreshPlanBar(payload);
+    } else if (e.target.closest('[data-plan-collapse]')) {
+      r.planCollapsed = true;
+      refreshPlanBar(payload);
+    } else if (e.target.closest('[data-plan-details]')) {
+      r.planShowAll = !r.planShowAll;
+      refreshPlanBar(payload);
+    }
+  });
+}
+
+function refreshPlanBar(plan) {
+  if (!planBarEl) return;
+  bindPlanCardUiOnce();
+  if (!plan?.active) {
+    planBarEl.hidden = true;
+    planBarEl.replaceChildren();
+    planBarEl.className = 'plan-card';
+    return;
+  }
+  const sess = activeSess();
+  const r = sess ? rt(sess) : { planCollapsed: false, planShowAll: false };
+  const collapsed = !!r.planCollapsed;
+  const stepText = plan.step ? String(plan.step).slice(0, 120) : '';
+  const done = plan.done ?? (plan.items || []).filter(it => it.status === 'done').length;
+  const total = plan.total ?? (plan.items || []).length;
+  const mod = [
+    'plan-card',
+    collapsed ? 'plan-card--collapsed' : 'plan-card--expanded',
+    plan.complete ? 'plan-card--complete' : '',
+    plan.placeholder ? 'plan-card--placeholder' : '',
+  ].filter(Boolean).join(' ');
+  planBarEl.hidden = false;
+  planBarEl.className = mod;
+
+  if (collapsed) {
+    const cap = planCapsuleLabel(plan);
+    planBarEl.innerHTML = '';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'plan-capsule';
+    btn.dataset.planExpand = '1';
+    const dot = document.createElement('span');
+    dot.className = 'plan-status-dot';
+    const txt = document.createElement('span');
+    txt.className = 'plan-capsule-text';
+    if (cap.step) txt.innerHTML = `${escapeHtml(cap.tag)} · <em>${escapeHtml(cap.step)}</em>`;
+    else txt.textContent = cap.tag;
+    btn.append(dot, txt);
+    planBarEl.append(btn);
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  const head = document.createElement('div');
+  head.className = 'plan-card-head';
+  const dot = document.createElement('span');
+  dot.className = 'plan-status-dot';
+  const title = document.createElement('span');
+  title.className = 'plan-title';
+  title.textContent = plan.placeholder ? t('plan.placeholder')
+    : plan.complete ? t('plan.completeTitle')
+    : t('plan.running');
+  head.append(dot, title);
+  if (!plan.placeholder && total > 0) {
+    const prog = document.createElement('span');
+    prog.className = 'plan-progress';
+    prog.textContent = `${done}/${total}`;
+    head.append(prog);
+  }
+  const actions = document.createElement('div');
+  actions.className = 'plan-head-actions';
+  const collapseBtn = document.createElement('button');
+  collapseBtn.type = 'button';
+  collapseBtn.className = 'plan-btn';
+  collapseBtn.dataset.planCollapse = '1';
+  collapseBtn.textContent = t('plan.collapse');
+  actions.append(collapseBtn);
+  head.append(actions);
+  frag.append(head);
+
+  if (stepText) {
+    const cur = document.createElement('div');
+    cur.className = 'plan-current';
+    const lab = document.createElement('span');
+    lab.className = 'plan-current-label';
+    lab.textContent = `${t('plan.current')}：`;
+    const body = document.createElement('span');
+    body.className = 'plan-current-text';
+    body.textContent = stepText;
+    cur.append(lab, body);
+    frag.append(cur);
+  }
+
+  if (plan.placeholder) {
+    const wait = document.createElement('div');
+    wait.className = 'plan-wait';
+    wait.textContent = planTpl(t('plan.waiting'), { path: plan.pathHint || 'plan.md' });
+    frag.append(wait);
+  } else {
+    const list = plan.items || [];
+    const { shown, curInShown, overflow } = r.planShowAll
+      ? { shown: list, curInShown: list.findIndex(it => it.status !== 'done'), overflow: 0 }
+      : pickPlanWindow(list, stepText);
+    if (shown.length) {
+      const ul = document.createElement('ul');
+      ul.className = 'plan-items';
+      shown.forEach((it, i) => {
+        const ui = planItemUi(it.status, i === curInShown);
+        const li = document.createElement('li');
+        li.className = 'plan-item ' + ui.cls;
+        const mark = document.createElement('span');
+        mark.className = 'plan-item-mark';
+        mark.textContent = ui.mark;
+        const txt = document.createElement('span');
+        txt.className = 'plan-item-text';
+        txt.textContent = it.content || '';
+        li.append(mark, txt);
+        ul.append(li);
+      });
+      frag.append(ul);
+    }
+    const foot = document.createElement('div');
+    foot.className = 'plan-foot';
+    const moreN = r.planShowAll ? 0 : (overflow || Math.max(0, list.length - shown.length));
+    if (moreN > 0) {
+      const hint = document.createElement('span');
+      hint.className = 'plan-more-hint';
+      hint.textContent = planTpl(t('plan.overflow'), { n: moreN });
+      foot.append(hint);
+    }
+    if (list.length > 3) {
+      const det = document.createElement('button');
+      det.type = 'button';
+      det.className = 'plan-btn';
+      det.dataset.planDetails = '1';
+      det.textContent = r.planShowAll ? t('plan.collapse') : t('plan.details');
+      foot.append(det);
+    }
+    if (foot.childNodes.length) frag.append(foot);
+  }
+  planBarEl.replaceChildren(frag);
+}
+
+async function planFetch(sess) {
+  if (!sess?.bridgeSessionId || !state.bridgeReady || !isActive(sess)) return;
+  try {
+    const res = await fetch(`${BRIDGE_ORIGIN}/session/${encodeURIComponent(sess.bridgeSessionId)}/plan`);
+    if (!res.ok) throw new Error(`plan ${res.status}`);
+    const data = await res.json();
+    applyPlanPayload(sess, data.plan ?? data.result?.plan);
+  } catch (_) { /* 对齐 TUI：读盘/网络失败不立刻清空条 */ }
+}
+
+async function planPoll(sess) {
+  await planFetch(sess);
+  planTick(sess);
 }
 
 /* ═══════════════ 消息渲染 ═══════════════ */
@@ -1542,6 +2110,46 @@ function scrollBottom(force) {
 /* ═══════════════ 打字机效果 (PR移植) ═══════════════ */
 const TW_SPEED = 12;  // 每 tick 显示字符数
 const TW_INTERVAL = 30; // ms
+const TW_RECOVER_MIN = 1200;  // 刷新恢复：partial 已有存量超过此值 → 直接对齐，不重播打字机
+const DRAFT_INTERACT_MS = 520; // 用户滚代码块/点折叠时暂缓 DOM 重写
+
+function isDraftInteractFrozen(r) {
+  return Date.now() < (r.draftFreezeUntil || 0);
+}
+function armDraftInteractFreeze(r, ms = DRAFT_INTERACT_MS) {
+  r.draftFreezeUntil = Math.max(r.draftFreezeUntil || 0, Date.now() + ms);
+}
+function snapshotDraftScroll(root) {
+  if (!root) return [];
+  return [...root.querySelectorAll('.bubble .code-block pre, .bubble .fold-pre')].map(n => n.scrollTop);
+}
+function restoreDraftScroll(root, tops) {
+  if (!root || !tops.length) return;
+  const nodes = root.querySelectorAll('.bubble .code-block pre, .bubble .fold-pre');
+  tops.forEach((top, i) => { if (nodes[i] && top > 0) nodes[i].scrollTop = top; });
+}
+function bindDraftInteractGuard(el, r) {
+  if (!el || el.dataset.gaDraftGuard) return;
+  el.dataset.gaDraftGuard = '1';
+  const arm = () => { if (!r._suppressToggleFreeze) armDraftInteractFreeze(r); };
+  el.addEventListener('mousedown', (e) => {
+    if (e.target.closest('details summary, .code-block pre, .fold-pre')) armDraftInteractFreeze(r);
+  }, true);
+  el.addEventListener('wheel', (e) => {
+    if (e.target.closest('.code-block pre, .fold-pre')) armDraftInteractFreeze(r);
+  }, { capture: true, passive: true });
+  el.addEventListener('toggle', (e) => {
+    if (e.target.matches('details')) arm();
+  }, true);
+}
+/** 刷新/重连后已有大段 partial：一次性对齐到当前全文，仅对之后新增字做打字机 */
+function maybeRecoverDraftSeek(r) {
+  const total = (r.draftText || '').length;
+  const tw = r.twState;
+  if (!r.draftRecoverPending || !tw || tw.shown > 0 || total < TW_RECOVER_MIN) return;
+  tw.shown = total;
+  r.draftRecoverPending = false;
+}
 
 function renderDraft(sess) {
   const r = rt(sess);
@@ -1549,11 +2157,12 @@ function renderDraft(sess) {
   const box = ensureMsgs();
   if (!r.draftEl || r.draftEl.parentNode !== box) {
     r.draftEl = document.createElement('div'); r.draftEl.className = 'msg assistant'; box.appendChild(r.draftEl);
-    // 正在计时则立即挂载 badge，避免等 1s tick 后才出现导致跳动
+    bindDraftInteractGuard(r.draftEl, r);
     if (r.taskStartedAt) ensureTaskElapsedBadge(r.draftEl, r.taskStartedAt, null);
   }
   if (!r.twState) r.twState = { shown: 0, timer: null };
   const tw = r.twState;
+  maybeRecoverDraftSeek(r);
   if (!tw.timer) {
     tw.timer = setInterval(() => {
       const cur = r.draftText || '';
@@ -1561,30 +2170,52 @@ function renderDraft(sess) {
         clearInterval(tw.timer); tw.timer = null;
         return;
       }
-      tw.shown = Math.min(tw.shown + TW_SPEED, cur.length);
-      const visible = cur.slice(0, tw.shown);
-      rewriteDraftBubble(r, visible);
+      if (isDraftInteractFrozen(r)) return;
+      const t0 = performance.now();
+      // 每 tick 都全量重渲整段，渲染开销随正文增大而升高（实测 140k 字时
+      // 单次可达数百 ms）。步长按「上次渲染耗时」自适应：
+      //  - 轻文档（渲染便宜）：小步、设上限 → 平滑打字；大块到达时在数十帧内
+      //    快速「打」出来，而不是一帧瞬跳一大坨（瞬跳就是用户看到的“突然出一坨”）。
+      //  - 重文档（单次渲染已很贵）：加大步长，用更少次昂贵渲染把积压排空，
+      //    避免在某一帧卡死数百 ms。
+      const backlog = cur.length - tw.shown;
+      const last = tw.lastElapsed || 0;
+      let step;
+      if (last > 80) step = Math.max(TW_SPEED * 6, Math.ceil(backlog / 2));
+      else step = Math.min(Math.max(TW_SPEED, Math.ceil(backlog / 10)), 160);
+      tw.shown = Math.min(tw.shown + step, cur.length);
+      rewriteDraftBubble(r, cur.slice(0, tw.shown));
+      tw.lastElapsed = performance.now() - t0;
     }, TW_INTERVAL);
   }
-  const visible = (r.draftText || '').slice(0, tw.shown);
-  rewriteDraftBubble(r, visible);
+  if (!isDraftInteractFrozen(r)) {
+    rewriteDraftBubble(r, (r.draftText || '').slice(0, tw.shown));
+  }
   refreshEmptyState(sess);
 }
 
 // 重写打字机气泡：先记 near + 保存 <details> open 态 + badge；innerHTML 替换后恢复；仅当原先贴底才滚
 function rewriteDraftBubble(r, visible) {
+  if (!r.draftEl) return;
+  if (isDraftInteractFrozen(r)) return;
+
   const wasNear = isNearBottom();
+  const scrollTops = snapshotDraftScroll(r.draftEl);
   const openIdx = [];
   // 保存 badge（会被 innerHTML 覆盖）
-  const oldBadge = r.draftEl ? r.draftEl.querySelector(':scope > .task-elapsed') : null;
+  const oldBadge = r.draftEl.querySelector(':scope > .task-elapsed');
   const badgeText = oldBadge ? oldBadge.textContent : null;
-  if (r.draftEl) {
-    r.draftEl.querySelectorAll('details').forEach((d, i) => { if (d.open) openIdx.push(i); });
-  }
+  r.draftEl.querySelectorAll('details').forEach((d, i) => { if (d.open) openIdx.push(i); });
+
   r.draftEl.innerHTML = `<div class="bubble md">${renderAssistant(visible)}<span class="cursor"></span></div>`;
   postRenderEnhance(r.draftEl.querySelector('.bubble'));
   const dets = r.draftEl.querySelectorAll('details');
+  // 程序化恢复 open 态会异步触发 toggle 事件；置标记让 guard 忽略，
+  // setTimeout(0) 在已排队的 toggle 任务之后清除（避免自冻结循环）。
+  r._suppressToggleFreeze = true;
   openIdx.forEach(i => { if (dets[i]) dets[i].open = true; });
+  setTimeout(() => { r._suppressToggleFreeze = false; }, 0);
+  restoreDraftScroll(r.draftEl, scrollTops);
   // 恢复 badge
   if (badgeText) {
     const badge = document.createElement('div');
@@ -1593,11 +2224,14 @@ function rewriteDraftBubble(r, visible) {
     badge.dataset.live = '1';
     r.draftEl.prepend(badge);
   }
-  if (wasNear) scrollBottom(true);
+  const inCodeScroll = document.activeElement?.closest?.('.code-block pre, .fold-pre')
+    && r.draftEl.contains(document.activeElement);
+  if (wasNear && !inCodeScroll) scrollBottom(true);
 }
 
 function flushTypewriter(sess) {
   const r = rt(sess);
+  r.draftRecoverPending = false;
   if (r.twState) {
     if (r.twState.timer) clearInterval(r.twState.timer);
     r.twState = null;
@@ -1608,23 +2242,30 @@ function flushTypewriter(sess) {
 function pageStatusBar(btnEl) {
   const label = btnEl?.querySelector('.rs-label');
   return {
-    set(text, busy = false) {
+    /** state: 'ready' | 'busy' | 'offline' | 'connecting'；兼容旧调用 set(text, true) */
+    set(text, state = 'ready') {
       if (!btnEl) return;
-      btnEl.classList.toggle('busy', !!busy);
+      const mode = state === true ? 'busy' : (state === false ? 'ready' : state);
+      btnEl.classList.remove('busy', 'offline', 'connecting');
+      if (mode === 'busy') btnEl.classList.add('busy');
+      else if (mode === 'offline') btnEl.classList.add('offline');
+      else if (mode === 'connecting') btnEl.classList.add('connecting');
       if (label) label.textContent = text ?? '';
     },
-    setBusy(text) { this.set(text, true); },
-    setReady() { this.set(t('status.ready')); },
-    setDisconnected() { this.set(t('status.disconnected')); },
-    setConnecting() { this.set(t('status.connecting')); },
+    setBusy(text) { this.set(text, 'busy'); },
+    setReady() { this.set(t('status.ready'), 'ready'); },
+    setDisconnected() { this.set(t('status.disconnected'), 'offline'); },
+    setConnecting() { this.set(t('status.connecting'), 'connecting'); },
   };
 }
 function refreshStatusLabel() {
   const s = activeSess();
   if (s && rt(s).busy) {
     chatStatus.setBusy(formatTaskElapsed(Date.now() - (rt(s).taskStartedAt || Date.now())));
+  } else if (state.bridgeReady) {
+    chatStatus.setReady();
   } else {
-    chatStatus.set(state.bridgeReady ? t('status.ready') : t('status.disconnected'));
+    chatStatus.setDisconnected();
   }
 }
 
@@ -1692,8 +2333,10 @@ function setBusy(sess, busy) {
   if (!isActive(sess)) return;
   if (busy) {
     chatStatus.setBusy(formatTaskElapsed(Date.now() - (r.taskStartedAt || Date.now())));
+  } else if (state.bridgeReady) {
+    chatStatus.setReady();
   } else {
-    chatStatus.set(state.bridgeReady ? t('status.ready') : t('status.disconnected'));
+    chatStatus.setDisconnected();
   }
   if (sendBtn) {
     sendBtn.classList.toggle('is-stop', busy);
@@ -1809,8 +2452,11 @@ function setActiveSession(id) {
   renderAllMessages(sess);
   setBusy(sess, rt(sess).busy);
   renderSessionList();
-  if (sess.bridgeSessionId && !sess.messages.length && state.bridgeReady) {
-    pollSession(sess);
+  refreshPlanBar(null);
+  syncPlanPollTimer();
+  if (sess.bridgeSessionId && state.bridgeReady) {
+    if (!sess.messages.length) pollSession(sess);
+    else planPoll(sess);
   }
 }
 async function closeSession(id) {
@@ -1937,7 +2583,16 @@ function normalize(m) {
 }
 function upsert(sess, raw, partial) {
   const m = normalize(raw); const r = rt(sess);
-  if (partial && m.role === 'assistant') { r.draftText = m.content; if (isActive(sess)) renderDraft(sess); return; }
+  if (partial && m.role === 'assistant') {
+    const wasEmpty = !(r.draftText || '').length;
+    r.draftText = m.content;
+    const tw = r.twState;
+    if (wasEmpty && r.draftText.length >= TW_RECOVER_MIN && (!tw || tw.shown === 0)) {
+      r.draftRecoverPending = true;
+    }
+    if (isActive(sess)) renderDraft(sess);
+    return;
+  }
   if (!m.id || r.seen.has(m.id)) return;
   r.seen.add(m.id); r.lastId = Math.max(r.lastId, m.id);
   if (m.role === 'assistant' && r.draftEl) { flushTypewriter(sess); r.draftEl.remove(); r.draftEl = null; r.draftText = ''; }
@@ -1965,6 +2620,7 @@ async function pollSession(sess) {
         if (result.partial) upsert(sess, result.partial, true);
         const busy = result.status === 'running' || !!result.partial;
         setBusy(sess, busy);
+        if (isActive(sess)) applyPlanPayload(sess, result.plan);
         if (busy) await new Promise(z => setTimeout(z, 500));
         else {
           if (r.draftEl) { r.draftEl.remove(); r.draftEl = null; r.draftText = ''; }
@@ -2080,6 +2736,16 @@ async function sendPrompt(text) {
   const previewFiles = usedFiles.filter(f => !f.isImage).map(f => ({ id: 'f-' + f.sid, name: f.name, path: f.path }));
   if (previewFiles.length) userMsg.files = previewFiles;
   sess.messages.push(userMsg); appendMessage(sess, userMsg);
+  if (isPlanPresetPrompt(text)) {
+    const pr = rt(sess);
+    pr.planCollapsed = false;
+    pr.planShowAll = false;
+    const sidHint = (sess.bridgeSessionId || sess.id || 'sess').replace(/\//g, '_');
+    applyPlanPayload(sess, {
+      active: true, placeholder: true, done: 0, total: 0, complete: false,
+      step: '', pathHint: `plan_${sidHint}/plan.md`, items: [],
+    });
+  }
   sess.lastActiveTs = Date.now();
   // 仿 TUI:不再从首条消息自动改名 —— 标题在 newSession 时已设为 agent-N,
   // 之后只接受用户手动 rename。
@@ -2106,6 +2772,7 @@ async function sendPrompt(text) {
     removeUsedPendingFiles(usedFiles);
     const uid = Number(res.userMessageId || res.result?.userMessageId || 0);
     if (uid) { r.seen.add(uid); r.lastId = Math.max(r.lastId, uid); }
+    planPoll(sess);
     pollSession(sess);
     return true;
   } catch (e) {
@@ -2414,13 +3081,16 @@ if (collabModelChip) collabModelChip.addEventListener('click', (e) => {
 document.addEventListener('click', (e) => {
   if (e.target.closest('#model-menu') || e.target.closest('#model-chip') ||
       e.target.closest('#cdb-model-menu') || e.target.closest('#cdb-model-chip') ||
+      e.target.closest('#chat-menu') || e.target.closest('#chat-plus-btn') ||
       e.target.closest('#cdb-menu') || e.target.closest('#cdb-plus-btn')) return;
   closeAllModelMenus();
+  window.chatComposer?.closeMenu?.();
   window.collabComposer?.closeMenu?.();
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     closeAllModelMenus();
+    window.chatComposer?.closeMenu?.();
     window.collabComposer?.closeMenu?.();
   }
 });
@@ -2502,9 +3172,7 @@ if (addModelForm) addModelForm.addEventListener('submit', async (e) => {
 const MAX_UPLOAD_FILES = 10;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
 const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
-const imgInput = document.getElementById('img-input');
 const thumbStrip = document.getElementById('thumb-strip');
-const uploadBtn = document.getElementById('upload-btn');
 const chatPanel = document.querySelector('main.main');
 let activeFileComposer = 'chat';
 
@@ -2521,7 +3189,13 @@ function composerCfg(ctx = activeFileComposer) {
       dropZone: document.querySelector('.page[data-page="collab"]'),
     };
   }
-  return { input: inputEl, strip: thumbStrip, uploadBtn, imgInput, dropZone: chatPanel };
+  return {
+    input: inputEl,
+    strip: thumbStrip,
+    uploadBtn: null,
+    imgInput: document.getElementById('chat-file-input'),
+    dropZone: chatPanel,
+  };
 }
 
 function renderThumbStrip(ctx = activeFileComposer) {
@@ -2881,12 +3555,14 @@ if (chatPanel) {
 /* ═══════════════ bridge 事件 ═══════════════ */
 window.ga.onBridgeReady(async () => {
   state.bridgeReady = true;
+  syncPlanPollTimer();
   if (!state.activeId) { refreshStatusLabel(); refreshEmptyState(null); }
   await loadModelProfiles();
   await loadBridgeConfig();
   if (isServicesPageActive()) renderChannelList(gaServiceStore.list());
   const sess = activeSess();
   if (sess && sess.bridgeSessionId && !sess.messages.length) await pollSession(sess);
+  else if (sess) planPoll(sess);
   delete document.documentElement.dataset.bootHasSessions;
   if (sess) refreshEmptyState(sess);
 });
@@ -2904,7 +3580,13 @@ window.ga.onBridgeNotification((msg) => {
   }
 });
 window.ga.onBridgeError((err) => { console.warn('[bridge error]', err); });
-window.ga.onBridgeClosed(() => { state.bridgeReady = false; chatStatus.setDisconnected(); });
+window.ga.onBridgeClosed(() => {
+  state.bridgeReady = false;
+  syncPlanPollTimer();
+  const s = activeSess();
+  if (s) applyPlanPayload(s, null);
+  chatStatus.setDisconnected();
+});
 
 /* ═══════════════ Token 统计页 ═══════════════ */
 const tokTbody = document.getElementById('tok-tbody');
@@ -3982,6 +4664,86 @@ chatStatus.setConnecting();
 window.ga.startBridge && window.ga.startBridge();
 })();
 
+/* 聊天输入框 — 与 Conductor collabComposer 同构（inset + 加号菜单 + Enter 发送） */
+(function () {
+  'use strict';
+  const root = document.getElementById('chat-composer');
+  if (!root) return;
+
+  const input = document.getElementById('chat-input');
+  const fileInput = document.getElementById('chat-file-input');
+  const plusBtn = document.getElementById('chat-plus-btn');
+  const menu = document.getElementById('chat-menu');
+  const sendBtnEl = document.getElementById('send-btn');
+
+  function closeMenu() {
+    if (!menu) return;
+    menu.hidden = true;
+    if (plusBtn) plusBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  function openMenu() {
+    if (!menu || !plusBtn) return;
+    closeAllModelMenus?.();
+    window.collabComposer?.closeMenu?.();
+    menu.hidden = false;
+    plusBtn.setAttribute('aria-expanded', 'true');
+  }
+
+  function toggleMenu() {
+    if (!menu) return;
+    if (menu.hidden) openMenu();
+    else closeMenu();
+  }
+
+  function doSend() {
+    const sess = activeSess();
+    if (sess && rt(sess).busy) { cancelPrompt(); return; }
+    submitInput();
+  }
+
+  function bindOnce() {
+    if (root.dataset.bound) return;
+    root.dataset.bound = '1';
+
+    plusBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleMenu();
+    });
+
+    menu?.addEventListener('click', (e) => {
+      const item = e.target.closest('.ga-menu-item');
+      if (!item) return;
+      e.stopPropagation();
+      closeMenu();
+      if (item.id === 'chat-menu-upload') {
+        window.gaSetActiveFileComposer?.('chat');
+        fileInput?.click();
+        return;
+      }
+      if (item.id === 'chat-menu-preset') {
+        openModal('preset-modal');
+      }
+    });
+
+    input?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+        e.preventDefault();
+        doSend();
+      }
+    });
+
+    sendBtnEl?.addEventListener('click', (e) => {
+      e.preventDefault();
+      doSend();
+    });
+  }
+
+  bindOnce();
+  window.chatComposer = { closeMenu, focus: () => input?.focus() };
+})();
+
 /* Conductor 输入框 — 与主聊天 composer 解耦（cdb-* DOM，便于日后抽离） */
 (function () {
   'use strict';
@@ -4098,13 +4860,17 @@ window.ga.startBridge && window.ga.startBridge();
     .replace(/\[(Image|File)\s+#\d+\]\s*/g, '')
     .replace(/[^\s]*desktop_uploads[^\s]*\s*/g, '')  // 兜底:去掉内联的本地上传路径,避免历史/回显消息把全路径甩出来
     .trim();
-  const ST_ICONS = {
-    running: '<span class="collab-st-ic collab-st-ic--spin" aria-hidden="true"></span>',
-    reported: '<span class="collab-st-ic collab-st-ic--ok" aria-hidden="true">✓</span>',
-    paused: '<span class="collab-st-ic collab-st-ic--pause" aria-hidden="true">⏸</span>',
-    failed: '<span class="collab-st-ic collab-st-ic--warn" aria-hidden="true">!</span>',
-    terminated: '<span class="collab-st-ic collab-st-ic--off" aria-hidden="true">×</span>',
-  };
+  const GA_STATUS_BREATHE_SM = '<span class="ga-status-breathe ga-status-breathe--sm" aria-hidden="true"><span class="ga-status-breathe__ring"></span><span class="ga-status-breathe__core"></span></span>';
+  function collabStatusMark(status) {
+    switch (status) {
+      case 'running': return GA_STATUS_BREATHE_SM;
+      case 'reported': return '<span class="collab-st-ic collab-st-ic--ok" aria-hidden="true">✓</span>';
+      case 'paused': return '<span class="collab-st-ic collab-st-ic--pause" aria-hidden="true">⏸</span>';
+      case 'failed': return '<span class="collab-st-ic collab-st-ic--warn" aria-hidden="true">!</span>';
+      case 'terminated': return '<span class="collab-st-ic collab-st-ic--off" aria-hidden="true">×</span>';
+      default: return '<span class="collab-dot" aria-hidden="true"></span>';
+    }
+  }
   const ST_KEYS = { running: 'collab.stRunning', reported: 'collab.stReported', paused: 'collab.stPaused', failed: 'collab.stFailed', terminated: 'collab.stTerminated' };
 
   const S = {
@@ -4115,7 +4881,7 @@ window.ga.startBridge && window.ga.startBridge();
   };
   let ws, connectTimer, reconnectTick, titleSeq = 0, wsGen = 0, localSeq = 0;
   const titleSeen = new Map();
-  let prevRail = { running: 0, done: 0, count: 0, sig: '' };
+  let prevRail = { running: 0, done: 0, issue: 0, count: 0, sig: '' };
   const prevUpdated = new Map();
   const collabStatus = window.gaPageStatusBar?.($('collab-run-toggle'));
 
@@ -4151,25 +4917,32 @@ window.ga.startBridge && window.ga.startBridge();
 
     const running = S.workers.filter(w => w.status === 'running').length;
     const done = S.workers.filter(w => w.status === 'reported').length;
+    const issue = S.workers.filter(w => w.status === 'failed').length;
     const runBadge = $('collab-rail-run');
     const doneBadge = $('collab-rail-done');
+    const issueBadge = $('collab-rail-issue');
     const runN = $('collab-rail-run-n');
     const doneN = $('collab-rail-done-n');
+    const issueN = $('collab-rail-issue-n');
 
     if (runBadge) runBadge.hidden = running <= 0;
     if (doneBadge) doneBadge.hidden = done <= 0;
+    if (issueBadge) issueBadge.hidden = issue <= 0;
     if (runN) runN.textContent = String(running);
     if (doneN) doneN.textContent = String(done);
+    if (issueN) issueN.textContent = String(issue);
 
     const sig = workerSig(S.workers);
     if (opts.pulse) {
       if (running > prevRail.running || S.workers.length > prevRail.count) pulseEl(runBadge);
       if (done > prevRail.done) pulseEl(doneBadge);
+      if (issue > prevRail.issue) pulseEl(issueBadge);
     } else if (sig !== prevRail.sig) {
       if (running !== prevRail.running) pulseEl(runBadge);
       if (done !== prevRail.done) pulseEl(doneBadge);
+      if (issue !== prevRail.issue) pulseEl(issueBadge);
     }
-    prevRail = { running, done, count: S.workers.length, sig };
+    prevRail = { running, done, issue, count: S.workers.length, sig };
     syncProgressDrawer();
   }
 
@@ -4295,7 +5068,7 @@ window.ga.startBridge && window.ga.startBridge();
     if (empty) empty.hidden = S.workers.length > 0;
     box.innerHTML = S.workers.map(w => `
       <article class="collab-card collab-card--${w.status}" data-sid="${esc(w.id)}">
-        <div class="collab-card-st">${ST_ICONS[w.status] || ''}<span class="collab-dot"></span>${esc(t(ST_KEYS[w.status] || 'collab.stPaused'))}${w.updatedAt ? `<span class="collab-card-time">${esc(relTime(w.updatedAt))}</span>` : ''}</div>
+        <div class="collab-card-st">${collabStatusMark(w.status)}${esc(t(ST_KEYS[w.status] || 'collab.stPaused'))}${w.updatedAt ? `<span class="collab-card-time">${esc(relTime(w.updatedAt))}</span>` : ''}</div>
         <div class="collab-card-title">${esc(w.title)}</div>
         <div class="collab-card-sum">${esc(w.summary)}</div>
       </article>`).join('');
@@ -4324,7 +5097,7 @@ window.ga.startBridge && window.ga.startBridge();
       stats.hidden = !has;
       if (has) {
         stats.innerHTML = [
-          running > 0 ? `<span class="collab-stat collab-stat--running"><span class="collab-rail-spin" aria-hidden="true"></span><span class="n">${running}</span> ${esc(t('collab.statRunning'))}</span>` : '',
+          running > 0 ? `<span class="collab-stat collab-stat--running">${GA_STATUS_BREATHE_SM}<span class="n">${running}</span> ${esc(t('collab.statRunning'))}</span>` : '',
           done > 0 ? `<span class="collab-stat collab-stat--done"><span class="collab-rail-dot" aria-hidden="true"></span><span class="n">${done}</span> ${esc(t('collab.statDone'))}</span>` : '',
         ].filter(Boolean).join('');
       }

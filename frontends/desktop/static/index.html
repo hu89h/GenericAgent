@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>GenericAgent</title>
 <link rel="stylesheet" href="assets/fonts/fonts.css">
-<link rel="stylesheet" href="styles.css?v=97">
+<link rel="stylesheet" href="styles.css?v=117">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
@@ -124,25 +124,40 @@
               <span data-i18n="chat.interrupting"></span>
             </div>
           </div>
-          <div class="composer">
-            <div class="composer-top">
-              <button class="ic-btn" id="upload-btn" data-i18n-title="upload.button" title="">
-                <span data-ga-icon="paperclip"></span>
-              </button>
-              <button class="ic-btn" id="preset-btn">
-                <span data-ga-icon="lightning"></span>
-              </button>
+          <div class="composer-anchor" id="chat-composer-anchor">
+            <div class="composer" id="chat-composer">
+            <div class="composer-slot">
+            <div class="plan-card" id="plan-bar" hidden aria-live="polite"></div>
+            <div class="composer-inset">
+              <div class="thumb-strip" id="thumb-strip" hidden></div>
+              <div class="input" id="chat-input" contenteditable="true" role="textbox" aria-multiline="true" data-i18n-ph="composer.placeholder"></div>
+              <div class="composer-bot">
+                <div class="composer-plus-wrap">
+                  <button type="button" class="ic-btn composer-plus" id="chat-plus-btn" aria-haspopup="menu" aria-expanded="false" data-i18n-title="collab.plusMenu" title="">
+                    <span data-ga-icon="plus"></span>
+                  </button>
+                  <div class="ga-menu composer-menu" id="chat-menu" hidden role="menu">
+                    <button type="button" class="ga-menu-item" id="chat-menu-upload" role="menuitem">
+                      <span data-ga-icon="paperclip"></span>
+                      <span data-i18n="upload.button"></span>
+                    </button>
+                    <button type="button" class="ga-menu-item" id="chat-menu-preset" role="menuitem">
+                      <span data-ga-icon="lightning"></span>
+                      <span data-i18n="modal.preset"></span>
+                    </button>
+                  </div>
+                </div>
+                <span class="spacer"></span>
+                <button type="button" class="chip" id="model-chip" data-i18n-title="model.menuLabel" title=""><span class="model-name"></span> <span class="chip-ic" data-ga-icon="caretDown"></span></button>
+                <button type="button" class="send" id="send-btn" aria-label="send">
+                  <span data-ga-icon="paperPlaneTilt"></span>
+                </button>
+              </div>
             </div>
-            <div class="input" contenteditable="true" role="textbox" aria-multiline="true" data-i18n-ph="composer.placeholder"></div>
-            <input type="file" id="img-input" multiple hidden>
-            <div class="thumb-strip" id="thumb-strip" hidden></div>
-            <div class="composer-bot">
-              <button class="chip" id="model-chip" data-i18n-title="model.menuLabel" title=""><span class="model-name"></span> <span class="chip-ic" data-ga-icon="caretDown"></span></button>
-              <button class="send" id="send-btn" type="button">
-                <span data-ga-icon="paperPlaneTilt"></span>
-              </button>
             </div>
             <div class="ga-menu" id="model-menu" hidden></div>
+            <input type="file" id="chat-file-input" multiple hidden>
+            </div>
           </div>
         </section>
 
@@ -233,6 +248,10 @@
                     <span class="collab-rail-dot" aria-hidden="true"></span>
                     <span class="n" id="collab-rail-done-n">0</span>
                   </span>
+                  <span class="collab-rail-badge collab-rail-issue" id="collab-rail-issue" hidden>
+                    <span class="collab-rail-dot collab-rail-dot--danger" aria-hidden="true"></span>
+                    <span class="n" id="collab-rail-issue-n">0</span>
+                  </span>
                 </button>
               </div>
               <aside class="collab-prog-panel" id="collab-prog-panel">
@@ -254,12 +273,12 @@
               <button type="button" class="pill" data-prompt-key="collab.chipPause" data-i18n="collab.chipPause"></button>
               <button type="button" class="pill" data-prompt-key="collab.chipSummary" data-i18n="collab.chipSummary"></button>
             </div>
-            <div class="cdb-inset">
+            <div class="composer-inset cdb-inset">
               <div class="thumb-strip" id="cdb-thumb-strip" hidden></div>
               <div class="input" id="cdb-input" contenteditable="true" role="textbox" aria-multiline="true" data-i18n-ph="collab.placeholder"></div>
               <div class="composer-bot">
-                <div class="cdb-plus-wrap">
-                  <button type="button" class="ic-btn cdb-plus" id="cdb-plus-btn" aria-haspopup="menu" aria-expanded="false" data-i18n-title="collab.plusMenu" title="">
+                <div class="composer-plus-wrap cdb-plus-wrap">
+                  <button type="button" class="ic-btn composer-plus cdb-plus" id="cdb-plus-btn" aria-haspopup="menu" aria-expanded="false" data-i18n-title="collab.plusMenu" title="">
                     <span data-ga-icon="plus"></span>
                   </button>
                   <div class="ga-menu cdb-menu" id="cdb-menu" hidden role="menu">
@@ -569,6 +588,6 @@
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
 <script src="phosphor-icons.js"></script>
-<script src="app.js?v=88"></script>
+<script src="app.js?v=159"></script>
 </body>
 </html>

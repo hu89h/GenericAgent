@@ -20,7 +20,7 @@ Supported task-line shapes (all matched by `extract`):
 """
 from __future__ import annotations
 import os, re
-from typing import Optional
+from typing import Any, Optional
 
 _DONE_CHARS = set("xX✓✔√☑")
 # Newline-insert before a bullet stuck to JSON debris (`{"content": "- [ ] …`).
@@ -178,3 +178,158 @@ def summary(items: list[tuple[str, str]]) -> tuple[int, int]:
 
 def is_complete(items: list[tuple[str, str]]) -> bool:
     return not items or all(st == "done" for _, st in items)
+
+
+# --- Desktop bridge only (APIs above unchanged) ---
+_ENTER_PLAN_RE = re.compile(r"""enter_plan_mode\s*\(\s*["']([^"']+)["']""", re.I)
+
+
+def _msg_content(m) -> str:
+    if isinstance(m, str): return m
+    c = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+    return c if isinstance(c, str) else ""
+
+
+def plan_path_mention_in_messages(messages, start_idx: int = 0) -> Optional[str]:
+    for m in reversed(_slice(messages, start_idx)):
+        text = _msg_content(m)
+        if not text: continue
+        if "enter_plan_mode" in text and (hit := _ENTER_PLAN_RE.search(text)):
+            return hit.group(1).strip().strip("\"'")
+        if "plan.md" in text and (hits := _PATH_RE.findall(text)):
+            return hits[-1].strip().strip("\"'")
+    return None
+
+
+def _resolve_stashed_at(p: str, root: str) -> Optional[str]:
+    if not p or not root: return None
+    rel = p.lstrip("./\\")
+    cwd = root.rstrip("/\\")
+    for c in (p, os.path.join(cwd, "temp", rel), os.path.join(cwd, rel)):
+        if os.path.isfile(c) and os.path.getsize(c) > 0: return c
+    return None
+
+
+def _find_path_at(messages, start_idx: int, root: str) -> Optional[str]:
+    for m in reversed(_slice(messages, start_idx)):
+        text = _msg_content(m)
+        if not text or "plan.md" not in text: continue
+        for hit in reversed(_PATH_RE.findall(text)):
+            if p := _resolve_stashed_at(hit.strip().strip("\"'"), root): return p
+    return None
+
+
+def default_session_plan_path(session_id: str) -> str:
+    sid = (session_id or "sess").replace("/", "_")
+    return f"temp/plan_{sid}/plan.md"
+
+
+def is_session_scoped_plan_path(path: str, session_id: str) -> bool:
+    """Desktop: only bind/adopt paths under this session's plan_{id}/ tree."""
+    if not path:
+        return False
+    sid = (session_id or "sess").replace("/", "_")
+    norm = path.replace("\\", "/").lstrip("./")
+    return f"plan_{sid}/" in norm or norm.endswith(f"plan_{sid}/plan.md")
+
+
+def is_plan_preset_prompt(prompt: str) -> bool:
+    p = (prompt or "").lower()
+    return "plan_sop" in p or "plan 模式" in p or "plan mode" in p
+
+
+def bind_plan_session(sess: Any, prompt: str = "", path: Optional[str] = None) -> str:
+    """Bind plan card to this session only (avoids sharing plan_demo/ across sessions)."""
+    rel = (path or "").strip() or default_session_plan_path(getattr(sess, "id", "") or "")
+    sess.plan_path = rel
+    msgs = list(getattr(sess, "messages", []) or [])
+    sess.plan_scan_baseline = len(msgs)
+    return rel
+
+
+def sync_plan_path_from_text(sess: Any, text: str, root: str) -> None:
+    """If agent emits enter_plan_mode(...), keep session bound path in sync."""
+    if not text:
+        return
+    m = _ENTER_PLAN_RE.search(text)
+    if not m:
+        return
+    raw = m.group(1).strip().strip("\"'")
+    if not raw:
+        return
+    sess.plan_path = raw.lstrip("./")
+
+
+def session_plan_active(sess: Any, agent, messages, start_idx: int, root: str) -> bool:
+    """Desktop: active when this session has a bound plan_path (not global plan_*/ scan)."""
+    bound = (getattr(sess, "plan_path", None) or "").strip()
+    if not bound:
+        return False
+    if _stashed_plan_path(agent):
+        return True
+    if _resolve_stashed_at(bound, root):
+        return True
+    if getattr(sess, "status", "") == "running":
+        return True
+    # Plan preset bound this session — keep placeholder until plan.md appears or path changes
+    if is_session_scoped_plan_path(bound, getattr(sess, "id", "")):
+        return True
+    return False
+
+
+def session_plan_resolve(bound: str, root: str) -> Optional[str]:
+    if not bound:
+        return None
+    return _resolve_stashed_at(bound.strip(), root)
+
+
+def _desktop_resolve_plan_file(sess: Any, bound: str, root: str, agent, messages, base: int) -> Optional[str]:
+    """Desktop read path: bound → agent stash → per-session message scan."""
+    path = session_plan_resolve(bound, root)
+    if path:
+        return path
+    if agent and (stash := _stashed_plan_path(agent)):
+        if p := _resolve_stashed_at(stash, root):
+            return p
+    return _find_path_at(messages, base, root)
+
+
+def desktop_plan_payload_from_session(sess: Any, ga_root: str = "") -> dict:
+    """Per-session plan card — bound plan_path + tuiapp_v2-style item/placeholder/complete."""
+    raw = list(getattr(sess, "messages", []) or [])
+    base = max(0, int(getattr(sess, "plan_scan_baseline", 0) or 0))
+    if base > len(raw):
+        base = len(raw)
+    root = (getattr(sess, "cwd", None) or ga_root or "").strip()
+    agent = getattr(sess, "agent", None)
+    partial = getattr(sess, "partial", None)
+    if isinstance(partial, dict) and isinstance(partial.get("content"), str):
+        sync_plan_path_from_text(sess, partial["content"], root)
+    sid = getattr(sess, "id", "") or ""
+    if not (getattr(sess, "plan_path", None) or "").strip():
+        mentioned = plan_path_mention_in_messages(raw, base)
+        if mentioned and is_session_scoped_plan_path(mentioned, sid):
+            sess.plan_path = mentioned.lstrip("./")
+        else:
+            return {"active": False}
+    if not session_plan_active(sess, agent, raw, base, root):
+        return {"active": False}
+    bound = getattr(sess, "plan_path", "") or ""
+    path = _desktop_resolve_plan_file(sess, bound, root, agent, raw, base)
+    items = []
+    if path:
+        try:
+            items = [{"content": c, "status": st} for c, st in extract(open(path, encoding="utf-8", errors="replace").read())]
+        except OSError:
+            pass
+    step_msgs = list(raw[base:])
+    if isinstance(p := getattr(sess, "partial", None), dict) and isinstance(c := p.get("content"), str) and c:
+        step_msgs.append({"content": c})
+    step = current_step(step_msgs, start_idx=0)
+    if not items:
+        hp = getattr(sess, "plan_path", "") or _stashed_plan_path(agent) or ""
+        hint = "/".join(hp.replace("\\", "/").rstrip("/").split("/")[-2:]) if hp else "plan.md"
+        return {"active": True, "placeholder": True, "done": 0, "total": 0, "complete": False, "step": step, "pathHint": hint, "items": []}
+    pairs = [(x["content"], x["status"]) for x in items]
+    n_done, n_total = summary(pairs)
+    return {"active": True, "placeholder": False, "done": n_done, "total": n_total, "complete": is_complete(pairs), "step": step, "items": items}
