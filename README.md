@@ -214,14 +214,6 @@ GenericAgent also supports IM frontends such as Telegram, Discord, and Lark.
 > WeChat, QQ, WeCom and DingTalk are also supported — see the Chinese section below.
 > For detailed setup, ask GenericAgent itself.
 
-### Common Chat Commands
-
-| Command | Description |
-| :--- | :--- |
-| `/new` | Start a fresh conversation and clear the current context |
-| `/continue` | List recoverable conversation snapshots |
-| `/continue N` | Restore the `N`-th recoverable conversation |
-
 ---
 
 ## 🔓 Unlocking Advanced Capabilities
@@ -620,14 +612,6 @@ GenericAgent 支持 Telegram、Discord、微信、QQ、飞书 / Lark、企业微
 | 钉钉 | `python frontends/dingtalkapp.py` |
 
 > 详细配置直接问 GenericAgent。
-
-### 通用聊天命令
-
-| 命令 | 说明 |
-| :--- | :--- |
-| `/new` | 开启新对话并清空当前上下文 |
-| `/continue` | 列出可恢复会话快照 |
-| `/continue N` | 恢复第 `N` 个可恢复会话 |
 
 ---
 
