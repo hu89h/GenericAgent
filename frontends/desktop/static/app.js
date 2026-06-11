@@ -2623,6 +2623,7 @@ function setActiveSession(id) {
   if (sessionNeedsHydrate(sess)) {
     runSessionHydrate(sess);
   } else {
+    restoreElapsedBadges(sess, ensureMsgs());
     planPoll(sess);
   }
 }
