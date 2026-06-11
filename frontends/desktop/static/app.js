@@ -3860,7 +3860,8 @@ if (chatPanel) {
 window.ga.onBridgeReady(async () => {
   state.bridgeReady = true;
   syncPlanPollTimer();
-  if (!state.activeId) { refreshStatusLabel(); refreshEmptyState(null); }
+  refreshStatusLabel();
+  if (!state.activeId) { refreshEmptyState(null); }
   await loadModelProfiles();
   await loadBridgeConfig();
   if (isServicesPageActive()) renderChannelList(gaServiceStore.list());
