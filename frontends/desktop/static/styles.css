@@ -551,8 +551,8 @@ html[data-appearance="dark"] .swatch[data-theme="8"].sel::after{
 .provider-quickstart{
   flex:0 0 auto; margin-top:8px;
   display:flex; flex-direction:column; gap:6px;
-  padding:10px; border:1px solid var(--line-soft); border-radius:var(--radius-sm);
-  background:var(--line-soft);
+  padding:10px; border:1px solid var(--line-base); border-radius:var(--radius-sm);
+  background:var(--card);
 }
 .pq-head{
   display:flex; align-items:center; justify-content:space-between; gap:6px;
@@ -570,8 +570,8 @@ html[data-appearance="dark"] .swatch[data-theme="8"].sel::after{
 .provider-quickstart.collapsed .pq-collapse{ transform:rotate(180deg); }
 .pq-btn{
   display:flex; align-items:center; gap:8px; width:100%;
-  padding:7px 8px; border:1px solid var(--line); border-radius:var(--radius-sm);
-  background:var(--panel); cursor:pointer; text-align:left;
+  padding:7px 8px; border:1px solid var(--line-base); border-radius:var(--radius-sm);
+  background:var(--bg-base); cursor:pointer; text-align:left;
   transition:border-color .15s, background .15s;
 }
 .pq-btn:hover{ background:var(--card); border-color:var(--accent); }
