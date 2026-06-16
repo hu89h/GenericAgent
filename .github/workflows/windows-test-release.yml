@@ -43,16 +43,26 @@ jobs:
         working-directory: frontends/desktop
         run: npm run tauri build -- --bundles nsis
 
-      - name: Collect Windows bundles
+      - name: Collect Windows executables and bundles
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts/windows | Out-Null
-          $bundleRoot = "frontends/desktop/src-tauri/target/release/bundle"
-          Get-ChildItem -Path $bundleRoot -Recurse -File | Where-Object {
-            $_.Extension -in ".exe", ".msi", ".zip" -or $_.FullName -match "nsis"
-          } | ForEach-Object {
-            Copy-Item $_.FullName -Destination "artifacts/windows/$($_.Name)" -Force
+
+          $portableExe = "frontends/desktop/src-tauri/target/release/ga-desktop.exe"
+          if (!(Test-Path $portableExe)) {
+            Write-Error "Portable executable not found: $portableExe"
           }
+          Copy-Item $portableExe -Destination "artifacts/windows/GenericAgent-Desktop-Windows-portable.exe" -Force
+
+          $bundleRoot = "frontends/desktop/src-tauri/target/release/bundle"
+          if (Test-Path $bundleRoot) {
+            Get-ChildItem -Path $bundleRoot -Recurse -File | Where-Object {
+              $_.Extension -in ".exe", ".msi", ".zip" -or $_.FullName -match "nsis"
+            } | ForEach-Object {
+              Copy-Item $_.FullName -Destination "artifacts/windows/$($_.Name)" -Force
+            }
+          }
+
           Get-ChildItem -Path artifacts/windows -File | ForEach-Object {
             $hash = Get-FileHash $_.FullName -Algorithm SHA256
             "{0}  {1}" -f $hash.Hash.ToLowerInvariant(), $_.Name
@@ -82,9 +92,11 @@ jobs:
           - Commit: `${{ github.sha }}`
           - Workflow run: `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
           - Platform built in this workflow: Windows only
-          - Bundle type: Tauri NSIS installer / Windows bundle
+          - Bundle type: Windows portable executable plus optional Tauri installer bundle
 
           Notes:
+          - Download `GenericAgent-Desktop-Windows-portable.exe` if you want the direct executable program shell.
+          - `*-setup.exe` files, if present, are installer bundles and are not the primary tester artifact.
           - This release is used to collect Windows desktop shell artifacts for testing.
           - macOS and Linux artifacts are intentionally not built by this first workflow.
           - Testers should still verify installation, startup, and core desktop functions on real Windows machines.
