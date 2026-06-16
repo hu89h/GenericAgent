@@ -2,18 +2,17 @@
 
 ## 目标
 
-本轮测试只关注两个结果：
+本轮测试主要关注三个结果：
 
 1. 当前系统能产出可用的环境配置脚本和桌面程序壳。
 2. 在干净环境/干净仓库中，测试员可以用脚本完成环境配置，并成功运行这个程序壳。
-
-不要求测试员填写复杂过程；只要证明结果可复现，并记录失败原因即可。
+3. 核心功能兼容性测试。
 
 ---
 
 ## 系统覆盖
 
-重点测试 Windows 和 Linux；macOS 由项目负责人自测。
+重点测试 Windows 和 Linux；
 
 | 优先级 | 系统 | 架构/版本 | 测试员 | 状态 | 备注 |
 |---|---|---|---|---|---|
@@ -36,7 +35,16 @@
 - 对应系统的环境配置脚本；
 - 对应系统的桌面程序壳（可执行程序）。
 
-脚本实现可以直接参考 Windows 版本：`release/scripts/windows/install_windows.ps1`。核心做法是由脚本准备运行环境，并写入用户级桌面配置（如 `~/.ga_desktop_settings.json`），让程序壳能找到 `project_dir`、`python_path` 和 bridge 脚本。
+脚本实现可以直接参考 Windows 版本：`desktop_release/scripts/windows/install_windows.ps1`。Linux 版本已有可用参考实现：`desktop_release/scripts/linux/install_linux.sh`，已在 Ubuntu 24.04.4 LTS x64 上做过初步试用，但仍需按清单做完整验证。核心做法是由脚本准备运行环境，并写入用户级桌面配置（如 `~/.ga_desktop_settings.json`），让程序壳能找到 `project_dir`、`python_path` 和 bridge 脚本。
+
+Linux 参考流程：
+
+```bash
+chmod +x desktop_release/scripts/linux/install_linux.sh
+./desktop_release/scripts/linux/install_linux.sh --mode PrepareOnly
+chmod +x GenericAgent_0.1.0_amd64.AppImage
+./GenericAgent_0.1.0_amd64.AppImage
+```
 
 
 
