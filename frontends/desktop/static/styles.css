@@ -39,8 +39,8 @@
   --txt-strong:#3b414f;     /* 标题 */
   --txt-2:#4a4f5c;          /* 常规可点文字 */
   --txt-3:#5b6170;
-  --muted:#8a90a0;
-  --muted2:#aab0be;
+  --muted:#656b7a;
+  --muted2:#767d8d;
   --placeholder:#c4cad6;
   --icon:#6b7180;
   --on-accent:#ffffff;      /* 彩色底上的字/图标 */
@@ -136,8 +136,8 @@ html[data-appearance="dark"]{
   --txt-strong:#ffffff;
   --txt-2:#c9d1d9;
   --txt-3:#afb8c1;
-  --muted:#7d8590;
-  --muted2:#656d76;
+  --muted:#9aa3af;
+  --muted2:#828b96;
   --placeholder:#656d76;
   --icon:#7d8590;
   --off-bg:#30363d;
@@ -473,7 +473,10 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; f
 .nav-item .ic{ opacity:.85; }
 .fr-l{ display:flex; align-items:center; gap:8px; }
 .nav-item:hover{ background:var(--line-soft); }
-.nav-item.active{ background:var(--accent-bg); color:var(--accent); font-weight:500; }
+/* 选中态保留"加粗"观感,但用 text-shadow 模拟而非 font-weight,
+   避免真正改变字重导致字形占位变宽、引起布局抖动 */
+.nav-item.active{ background:var(--accent-bg); color:var(--txt-strong); text-shadow:-.3px 0 currentColor, .3px 0 currentColor, 0 0 .5px currentColor; }
+.nav-item.active .ic{ opacity:1; }
 .beta{
   margin-left:auto; font-size:9px; font-weight:500; color:var(--accent);
   background:var(--accent-soft); padding:1px 6px; border-radius:10px;
@@ -888,8 +891,15 @@ html[data-boot-has-sessions] .chat-start{ display:none !important; }
 .fcard:hover{ border-color:var(--accent); box-shadow:var(--shadow); transform:translateY(-1px); }
 .fcard.add{ border-style:dashed; background:var(--accent-soft); }
 .fc-ic{ width:26px; height:26px; color:var(--txt-strong); }
-.fc-t{ font-weight:500; font-size:13px; margin-top:10px; font-family:var(--font-sans); }
-.fc-d{ font-size:11px; color:var(--muted); margin-top:3px; }
+.fc-t{
+  font-weight:500; font-size:13px; margin-top:10px; font-family:var(--font-sans);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.fc-d{
+  font-size:11px; color:var(--muted); margin-top:3px;
+  display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
+  overflow:hidden; text-overflow:ellipsis; word-break:break-word;
+}
 
 /* 后台服务页 — 下划线 Tab(消息通道 / 状态面板)。margin 与 .tok-tabs 对齐
    保证两个页面标题与 tab 之间间距一致 */
@@ -1042,7 +1052,8 @@ html[data-boot-has-sessions] .chat-start{ display:none !important; }
 .tok-filter{ display:flex; align-items:center; gap:8px; margin:12px 0; flex-wrap:wrap; }
 .tok-filter label{ font-size:12px; color:var(--muted); }
 .tok-date{
-  border:1px solid var(--line); border-radius:6px; padding:5px 8px;
+  box-sizing:border-box; height:30px;
+  border:1px solid var(--line); border-radius:6px; padding:0 8px;
   font-size:12px; background:var(--field-bg); color:var(--txt); cursor:pointer;
   width:160px;
 }
@@ -1076,7 +1087,8 @@ span.flatpickr-weekday{ color:var(--muted) !important; font-size:11px; }
 .flatpickr-months .flatpickr-prev-month:hover svg,
 .flatpickr-months .flatpickr-next-month:hover svg{ fill:var(--txt) !important; }
 .tok-reset{
-  border:1px solid var(--line); border-radius:4px; padding:5px 10px;
+  box-sizing:border-box; height:30px; display:inline-flex; align-items:center;
+  border:1px solid var(--line); border-radius:4px; padding:0 10px;
   font-size:12px; background:var(--field-bg); color:var(--muted); cursor:pointer;
 }
 .tok-reset:hover{ background:var(--hover-2); color:var(--txt-2); }
@@ -1352,14 +1364,14 @@ span.flatpickr-weekday{ color:var(--muted) !important; font-size:11px; }
 .ci-pin{ width:14px; height:14px; color:var(--accent); margin-right:3px; vertical-align:-3px; flex:0 0 auto; display:inline-block; }
 .ci-meta{ font-size:11px; color:var(--muted); margin-top:2px; }
 .ci-more{
-  flex:0 0 auto; width:22px; height:22px; border:none; background:transparent;
-  color:var(--muted2); border-radius:4px; cursor:pointer;
+  flex:0 0 auto; width:26px; height:26px; border:none; background:transparent;
+  color:var(--txt-3); border-radius:4px; cursor:pointer;
   display:flex; align-items:center; justify-content:center;
   opacity:0; transition:opacity .12s;
 }
-.ci-more svg{ width:16px; height:16px; }
+.ci-more svg{ width:20px; height:20px; }
 .conv-item:hover .ci-more, .conv-item.active .ci-more{ opacity:1; }
-.ci-more:hover{ background:var(--hover-dim); color:var(--txt-3); }
+.ci-more:hover{ background:var(--hover-dim); color:var(--txt-2); }
 
 .ctx-menu{
   position:fixed; z-index:200; min-width:124px; background:var(--card);
@@ -1906,6 +1918,21 @@ html[data-appearance="dark"] .plan-item--warn .plan-item-text{ color:#f0a020; }
 }
 .fcard:hover .fc-x{ display:flex; }
 .fcard .fc-x:hover{ color:var(--danger); }
+
+/* ─── 自定义预设：卡上的编辑按钮（删除按钮左侧）─── */
+.fcard .fc-edit{
+  position:absolute; top:6px; right:30px;
+  width:20px; height:20px;
+  border:0; border-radius:4px;
+  background:var(--card); color:var(--txt-2);
+  cursor:pointer;
+  box-shadow:var(--shadow);
+  display:none; align-items:center; justify-content:center;
+  padding:0;
+}
+.fcard .fc-edit svg{ width:13px; height:13px; }
+.fcard:hover .fc-edit{ display:flex; }
+.fcard .fc-edit:hover{ color:var(--txt-strong); }
 
 /* ─── 自定义预设 modal 表单 ─── */
 .cp-body{

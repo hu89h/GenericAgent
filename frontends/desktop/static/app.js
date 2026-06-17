@@ -270,10 +270,12 @@ const I18N = {
     'common.close': '关闭', 'common.more': '更多', 'common.optional': '选填', 'common.save': '保存',
     'modal.preset': '预设功能', 'modal.addModel': '添加模型', 'modal.editModel': '编辑模型', 'modal.settings': '配置',
     'modal.customPreset': '自定义预设',
+    'modal.editCustomPreset': '编辑任务',
     'customPreset.titlePh': '标题，例如「写周报」',
     'customPreset.promptPh': 'Prompt 内容，发送时会作为消息提交',
     'customPreset.empty': '标题和 Prompt 不能为空',
     'customPreset.removeTitle': '删除',
+    'customPreset.editTitle': '编辑',
     'builtinPreset.restoreBtn': '恢复默认预设',
     'set.appearance': '外观', 'set.plainUi': '素色', 'set.fontSize': '聊天字号', 'set.lang': '语言', 'set.model': '模型', 'set.addModel': '添加模型',
     'appearance.light': '浅色', 'appearance.dark': '深色',
@@ -353,7 +355,7 @@ const I18N = {
     'upload.button': '上传文件',
     'upload.tooLarge': '文件过大或数量超限', 'upload.empty': '跳过空文件',
     'upload.failed': '上传失败',
-    'err.charLimit': '已达字数上限（{n}），发送时将自动截断', 'err.numMax': '不能超过 {n}',
+    'err.charLimit': '已达字数上限（{n}），发送时将自动截断', 'err.charLimitReached': '已达字数上限（{n}）', 'err.numMax': '不能超过 {n}',
     'file.openFailed': '无法打开文件',
     'file.kindGeneric': '文件',
     'file.kindDoc': '文档',
@@ -431,10 +433,12 @@ const I18N = {
     'common.close': 'Close', 'common.more': 'More', 'common.optional': 'Optional', 'common.save': 'Save',
     'modal.preset': 'Presets', 'modal.addModel': 'Add model', 'modal.editModel': 'Edit model', 'modal.settings': 'Settings',
     'modal.customPreset': 'Custom preset',
+    'modal.editCustomPreset': 'Edit task',
     'customPreset.titlePh': 'Title, e.g. "Weekly report"',
     'customPreset.promptPh': 'Prompt body — sent as the message when clicked',
     'customPreset.empty': 'Title and Prompt cannot be empty',
     'customPreset.removeTitle': 'Delete',
+    'customPreset.editTitle': 'Edit',
     'builtinPreset.restoreBtn': 'Restore defaults',
     'set.appearance': 'Appearance', 'set.plainUi': 'Plain', 'set.fontSize': 'Chat font size', 'set.lang': 'Language', 'set.model': 'Model', 'set.addModel': 'Add model',
     'appearance.light': 'Light', 'appearance.dark': 'Dark',
@@ -514,7 +518,7 @@ const I18N = {
     'upload.button': 'Upload file',
     'upload.tooLarge': 'File too large or limit reached', 'upload.empty': 'Skipped empty file',
     'upload.failed': 'Upload failed',
-    'err.charLimit': 'Character limit reached ({n}), text will be truncated on send', 'err.numMax': 'Cannot exceed {n}',
+    'err.charLimit': 'Character limit reached ({n}), text will be truncated on send', 'err.charLimitReached': 'Character limit reached ({n})', 'err.numMax': 'Cannot exceed {n}',
     'file.openFailed': 'Cannot open file',
     'file.kindGeneric': 'File',
     'file.kindDoc': 'Document',
@@ -3207,6 +3211,13 @@ async function handleSlash(cmd) {
 // 预设卡：按 data-preset 解耦（与翻译后的标题无关）
 document.querySelectorAll('.feature-grid').forEach(grid => {
   grid.addEventListener('click', (e) => {
+    const editBtn = e.target.closest('.fc-edit');
+    if (editBtn) {
+      e.stopPropagation();
+      const cp = state.customPresets.find(p => p.id === editBtn.dataset.editId);
+      if (cp) openCustomPresetEditor(cp);
+      return;
+    }
     const xBtn = e.target.closest('.fc-x');
     if (xBtn) {
       e.stopPropagation();
@@ -4315,6 +4326,8 @@ const BUILTIN_PRESETS = [
     iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' },
 ];
 const ADD_ICON_SVG = GA_ICON('plus', 'fc-ic');
+// 自定义保存后生成的卡片图标（用户图标，表示"用户自定义的任务"）—— 与"添加"卡的 + 区分
+const CUSTOM_ICON_SVG = '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
 
 state.customPresets = [];
 state.hiddenBuiltins = new Set();
@@ -4340,11 +4353,22 @@ function saveHiddenBuiltins() {
   localStorage.setItem(HB_KEY, JSON.stringify([...state.hiddenBuiltins]));
 }
 
-function makeCardEl({ kind, dataAttrs, iconSvg, titleText, descText, removable }) {
+const EDIT_PENCIL_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+function makeCardEl({ kind, dataAttrs, iconSvg, titleText, descText, removable, editable }) {
   const card = document.createElement('div');
   card.className = 'fcard ' + kind;
   for (const [k, v] of Object.entries(dataAttrs || {})) card.dataset[k] = v;
   card.innerHTML = iconSvg;
+  if (editable) {
+    const ed = document.createElement('button');
+    ed.className = 'fc-edit';
+    ed.type = 'button';
+    ed.dataset.editId = dataAttrs?.id || '';
+    ed.dataset.i18nTitle = 'customPreset.editTitle';
+    ed.title = t('customPreset.editTitle');
+    ed.innerHTML = EDIT_PENCIL_SVG;
+    card.appendChild(ed);
+  }
   if (removable) {
     const x = document.createElement('button');
     x.className = 'fc-x';
@@ -4359,10 +4383,12 @@ function makeCardEl({ kind, dataAttrs, iconSvg, titleText, descText, removable }
   const titleEl = document.createElement('div');
   titleEl.className = 'fc-t';
   titleEl.textContent = titleText;
+  titleEl.title = titleText;        // 截断后悬停看完整标题
   card.appendChild(titleEl);
   const descEl = document.createElement('div');
   descEl.className = 'fc-d';
   descEl.textContent = descText;
+  descEl.title = descText;          // 截断后悬停看完整描述
   card.appendChild(descEl);
   return card;
 }
@@ -4385,10 +4411,11 @@ function renderAllPresets() {
       grid.appendChild(makeCardEl({
         kind: 'fcard-custom',
         dataAttrs: { id: cp.id },
-        iconSvg: ADD_ICON_SVG,
+        iconSvg: CUSTOM_ICON_SVG,
         titleText: cp.title,
         descText: cp.prompt,
         removable: true,
+        editable: true,
       }));
     }
     const addCard = makeCardEl({
@@ -4407,6 +4434,14 @@ function renderAllPresets() {
 function addCustomPreset(title, prompt) {
   const id = 'cp-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
   state.customPresets.push({ id, title, prompt });
+  saveCustomPresets();
+  renderAllPresets();
+}
+function updateCustomPreset(id, title, prompt) {
+  const cp = state.customPresets.find(p => p.id === id);
+  if (!cp) return;
+  cp.title = title;
+  cp.prompt = prompt;
   saveCustomPresets();
   renderAllPresets();
 }
@@ -4439,10 +4474,29 @@ const cpTitleInput = document.getElementById('cp-title');
 const cpPromptInput = document.getElementById('cp-prompt');
 const cpSaveBtn = document.getElementById('cp-save');
 const cpError = document.getElementById('cp-error');
+const cpModalTitle = cpModal?.querySelector('.modal-title');
+let cpEditId = null;   // null=新建模式; 否则为正在编辑的自定义预设 id
+function clearCpFieldHints() {
+  cpModal?.querySelectorAll('.field-limit-hint').forEach(h => { h.style.display = 'none'; });
+}
 function resetCustomPresetForm() {
+  cpEditId = null;
+  if (cpModalTitle) cpModalTitle.textContent = t('modal.customPreset');
   if (cpTitleInput) cpTitleInput.value = '';
   if (cpPromptInput) cpPromptInput.value = '';
   if (cpError) { cpError.hidden = true; cpError.textContent = ''; }
+  clearCpFieldHints();
+  setTimeout(() => { if (cpTitleInput) cpTitleInput.focus(); }, 0);
+}
+function openCustomPresetEditor(cp) {
+  closeModals();
+  openModal('custom-preset-modal');
+  cpEditId = cp.id;
+  if (cpModalTitle) cpModalTitle.textContent = t('modal.editCustomPreset');
+  if (cpTitleInput) cpTitleInput.value = cp.title;
+  if (cpPromptInput) cpPromptInput.value = cp.prompt;
+  if (cpError) { cpError.hidden = true; cpError.textContent = ''; }
+  clearCpFieldHints();
   setTimeout(() => { if (cpTitleInput) cpTitleInput.focus(); }, 0);
 }
 if (cpSaveBtn) cpSaveBtn.addEventListener('click', () => {
@@ -4452,7 +4506,9 @@ if (cpSaveBtn) cpSaveBtn.addEventListener('click', () => {
     if (cpError) { cpError.textContent = t('customPreset.empty'); cpError.hidden = false; }
     return;
   }
-  addCustomPreset(title, prompt);
+  if (cpEditId) updateCustomPreset(cpEditId, title, prompt);
+  else addCustomPreset(title, prompt);
+  cpEditId = null;
   if (cpModal) cpModal.hidden = true;
 });
 
@@ -4640,19 +4696,20 @@ function showChanToast(title, detail, kind) {
 (function initInputLimits() {
   let _toastTimer = null;
 
-  function limitToast(maxLen) {
+  // msgKey 默认用会截断的文案；硬上限输入框传 'err.charLimitReached'（只提醒不提截断）
+  function limitToast(maxLen, msgKey = 'err.charLimit') {
     clearTimeout(_toastTimer);
     _toastTimer = setTimeout(() => {
-      const msg = t('err.charLimit').replace('{n}', maxLen);
+      const msg = t(msgKey).replace('{n}', maxLen);
       showChanToast(msg, '', 'err');
     }, 300);
   }
 
-  // Toast-based: for elements with maxLength attribute (input/textarea)
+  // Toast-based: for elements with maxLength attribute (input/textarea) —— 硬上限,不会截断
   function bindToastLimit(el) {
     if (!el || !el.maxLength || el.maxLength < 0) return;
     el.addEventListener('input', () => {
-      if (el.value.length >= el.maxLength) limitToast(el.maxLength);
+      if (el.value.length >= el.maxLength) limitToast(el.maxLength, 'err.charLimitReached');
     });
   }
 
@@ -4703,22 +4760,36 @@ function showChanToast(title, detail, kind) {
     }
   }
 
-  // Per-field inline hint: creates a small red span right after the input
+  // Per-field inline hint: creates a small red span right after the input.
+  // 用 JS 管控长度(去掉原生 maxlength),以便"超限尝试"时可靠告警:
+  // 超出上限的字符先被键入,再由本逻辑截回上限并告警——每次超限都触发 input,
+  // 兼容打字/粘贴/中文 IME。到达上限本身合法、不告警。告警出现后自动消失,不常驻。
   function bindFieldInlineLimit(el) {
     if (!el || !el.maxLength || el.maxLength < 0) return;
+    const max = el.maxLength;
+    el.removeAttribute('maxlength');   // 转为 JS 管控
     const hint = document.createElement('span');
     hint.className = 'field-limit-hint';
     hint.style.cssText = 'color:var(--err,#dc2626);font-size:.75rem;display:none;margin-top:2px';
-    // Insert hint right after the input element
     el.insertAdjacentElement('afterend', hint);
-    el.addEventListener('input', () => {
-      if (el.value.length >= el.maxLength) {
-        hint.textContent = t('err.charLimit').replace('{n}', el.maxLength);
-        hint.style.display = 'block';
-      } else {
-        hint.style.display = 'none';
-      }
-    });
+    let hideTimer = null;
+    function warn() {
+      hint.textContent = t('err.charLimitReached').replace('{n}', max);
+      hint.style.display = 'block';
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => { hint.style.display = 'none'; }, 2500);
+    }
+    function enforce() {
+      if (el.value.length <= max) return;
+      const atEnd = el.selectionStart >= el.value.length;
+      el.value = el.value.slice(0, max);
+      if (atEnd) el.setSelectionRange(max, max);
+      warn();
+    }
+    let composing = false;
+    el.addEventListener('compositionstart', () => { composing = true; });
+    el.addEventListener('compositionend', () => { composing = false; enforce(); });
+    el.addEventListener('input', () => { if (!composing) enforce(); });
   }
 
   window.bindFieldInlineLimit = bindFieldInlineLimit;
@@ -4742,30 +4813,6 @@ function showChanToast(title, detail, kind) {
       const v = Number(el.value);
       if (el.value !== '' && v > max) el.value = max;
     });
-  }
-
-  // Shared inline error group (for preset form)
-  function createInlineGroup(errEl) {
-    const tracked = new Set();
-    function check(el) {
-      if (el.value.length >= el.maxLength) {
-        tracked.add(el);
-      } else {
-        tracked.delete(el);
-      }
-      if (tracked.size > 0) {
-        errEl.textContent = t('err.charLimit').replace('{n}', el.maxLength);
-        errEl.hidden = false;
-      } else {
-        errEl.hidden = true;
-      }
-    }
-    return {
-      addText(el) {
-        if (!el || !el.maxLength || el.maxLength < 0) return;
-        el.addEventListener('input', () => check(el));
-      }
-    };
   }
 
   // Wait for DOM ready
@@ -4792,13 +4839,9 @@ function showChanToast(title, detail, kind) {
       });
     }
 
-    // Preset form: shared inline error (user confirmed OK)
-    const cpErr = document.getElementById('cp-error');
-    if (cpErr) {
-      const group = createInlineGroup(cpErr);
-      group.addText(document.getElementById('cp-title'));
-      group.addText(document.getElementById('cp-prompt'));
-    }
+    // Preset form: 每字段独立内联提示（标题/Prompt 各自独立,互不串扰）
+    bindFieldInlineLimit(document.getElementById('cp-title'));
+    bindFieldInlineLimit(document.getElementById('cp-prompt'));
   }
 
   if (document.readyState === 'loading') {
