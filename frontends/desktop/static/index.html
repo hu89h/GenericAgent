@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>GenericAgent</title>
 <link rel="stylesheet" href="assets/fonts/fonts.css">
-<link rel="stylesheet" href="styles.css?v=137">
+<link rel="stylesheet" href="styles.css?v=146">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
@@ -81,12 +81,12 @@
 
       <!-- 快速接入官方模型（DeepSeek / 通义千问）：填好 API Key 即可使用 -->
       <div class="provider-quickstart" id="provider-quickstart">
-        <div class="pq-head" id="pq-toggle" role="button" tabindex="0" aria-expanded="true" data-i18n-title="pq.toggle" title="">
-          <span class="pq-head-text">
+        <div class="pq-head" id="pq-toggle" role="button" tabindex="0" aria-expanded="true">
+          <span class="fr-l">
+            <span class="ic" data-ga-icon="lightning"></span>
             <span class="pq-title" data-i18n="pq.title"></span>
-            <span class="pq-sub" data-i18n="pq.sub"></span>
           </span>
-          <span class="pq-collapse" data-ga-icon="caretDown" aria-hidden="true"></span>
+          <span class="pq-collapse chev" data-ga-icon="caretRight" aria-hidden="true"></span>
         </div>
         <div class="pq-body">
           <button type="button" class="pq-btn" data-provider="deepseek">
@@ -210,7 +210,6 @@
           </div>
           <div class="page-pad">
             <div class="page-title" data-i18n="page.services.title"></div>
-            <div class="page-sub" data-i18n="page.services.sub"></div>
             <div class="svc-tabs" id="svc-tabs">
               <button type="button" class="svc-tab active" data-tab="channels" data-i18n="page.channels.title"></button>
               <button type="button" class="svc-tab" data-tab="status" data-i18n="page.status.title"></button>
@@ -639,6 +638,6 @@
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
 <script src="phosphor-icons.js"></script>
-<script src="app.js?v=182"></script>
+<script src="app.js?v=184"></script>
 </body>
 </html>
