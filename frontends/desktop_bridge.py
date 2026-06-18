@@ -877,7 +877,7 @@ class ServiceManager:
 
     def list_panel_state(self) -> List[dict]:
         out = [self._bridge_state()]
-        for sid in sorted(self._catalog):
+        for sid in sorted(self._catalog, key=lambda s: (s in self._im_catalog, s)):
             item = self._state(sid)
             item["name"] = sid
             item["memMb"] = _mem_mb(item.get("pid"))

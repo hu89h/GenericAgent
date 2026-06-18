@@ -393,7 +393,7 @@ const I18N = {
     'st.online': '在线', 'st.offline': '离线', 'st.error': '错误', 'st.running': '运行', 'st.abnormal': '异常',
     'act.configure': '配置', 'act.logs': '日志', 'act.restart': '重启', 'act.stop': '停止', 'act.start': '启动',
     'act.copy': '复制', 'act.copied': '已复制', 'act.copyTex': 'TeX', 'act.send': '发送',
-    'proc.imbotWechat': 'imbot · 微信', 'proc.imbotDing': 'imbot · 钉钉', 'proc.scheduler': '定时任务调度',
+    'proc.imbotWechat': 'imbot · 微信', 'proc.imbotDing': 'imbot · 钉钉', 'proc.scheduler': '定时任务调度', 'proc.conductor': '指挥家',
     'cm.scheduling': '调度中', 'cm.running': '执行中', 'cm.idleSt': '空闲',
     'cm.master': '已派 3 子任务', 'cm.w1': '子任务：抓取数据', 'cm.w2': '子任务：复核结果', 'cm.sub': '等待派单',
     'tok.total': '累计', 'tok.cost': '缓存率', 'tok.today': '今日', 'tok.tabAll': '聊天', 'tok.tabConductor': '指挥家', 'tok.condTotal': '指挥家累计', 'tok.condCurrent': '指挥家本次', 'tok.condTip': '指挥家消耗不计入聊天累计', 'tok.condOffline': '指挥家服务离线', 'tok.disclaimer': '不同 API 网站的计费价格可能会有差异，请以实际网站为准。',
@@ -557,7 +557,7 @@ const I18N = {
     'st.online': 'Online', 'st.offline': 'Offline', 'st.error': 'Error', 'st.running': 'Running', 'st.abnormal': 'Error',
     'act.configure': 'Configure', 'act.logs': 'Logs', 'act.restart': 'Restart', 'act.stop': 'Stop', 'act.start': 'Start',
     'act.copy': 'Copy', 'act.copied': 'Copied', 'act.copyTex': 'TeX', 'act.send': 'Send',
-    'proc.imbotWechat': 'imbot · WeChat', 'proc.imbotDing': 'imbot · DingTalk', 'proc.scheduler': 'Scheduler',
+    'proc.imbotWechat': 'imbot · WeChat', 'proc.imbotDing': 'imbot · DingTalk', 'proc.scheduler': 'Scheduler', 'proc.conductor': 'Conductor',
     'cm.scheduling': 'Scheduling', 'cm.running': 'Running', 'cm.idleSt': 'Idle',
     'cm.master': 'Dispatched 3 subtasks', 'cm.w1': 'Subtask: fetch data', 'cm.w2': 'Subtask: review results', 'cm.sub': 'Waiting for tasks',
     'tok.total': 'Total', 'tok.cost': 'Cache rate', 'tok.today': 'Today', 'tok.tabAll': 'Chat', 'tok.tabConductor': 'Conductor', 'tok.condTotal': 'Conductor Total', 'tok.condCurrent': 'Conductor Current', 'tok.condTip': 'Conductor usage is not included in chat totals', 'tok.condOffline': 'Service offline', 'tok.disclaimer': 'Pricing may vary by API provider. Please refer to the actual website.',
@@ -4986,6 +4986,7 @@ function statusDisplayName(s) {
   if (!s) return '';
   if (s.id === '__bridge__') return s.name || 'bridge';
   if (s.id === 'reflect/scheduler.py') return t('proc.scheduler');
+  if (s.id === 'frontends/conductor.py') return t('proc.conductor');
   return channelDisplayName(s);
 }
 function fmtPid(pid) { return pid ? `PID ${pid}` : '—'; }
