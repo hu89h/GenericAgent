@@ -172,7 +172,9 @@ ensure_venv() {
   local venv="$root/.venv"
   local vpy="$venv/bin/python"
   if [[ ! -x "$vpy" ]]; then
-    printf 'GAPROGRESS|venv\n'
+    # NOTE: ensure_venv's stdout is captured by the caller as the python path
+    # (PY="$(ensure_venv ...)"), so progress markers must NOT be printed here —
+    # they go on the main-flow stdout instead. Only the venv path goes to stdout.
     log_step "Create virtual environment: $venv"
     "$base_py" -m venv "$venv" || fail "Failed to create venv. On Debian/Ubuntu install python3-venv."
   fi
@@ -391,6 +393,9 @@ log_step "Resolve Python"
 BASE_PY="$(find_python)"
 log_ok "Base Python: $BASE_PY"
 
+# Progress marker on the real stdout (the Rust shell reads it); must be outside the
+# command-substitution that captures ensure_venv's stdout as the python path.
+printf 'GAPROGRESS|venv\n'
 PY="$(ensure_venv "$ROOT" "$BASE_PY")"
 log_ok "Runtime Python: $PY"
 
