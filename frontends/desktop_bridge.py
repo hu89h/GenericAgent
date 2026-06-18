@@ -756,6 +756,15 @@ def discover_extra_services(ga_root: Path) -> List[dict]:
             "id": "reflect/scheduler.py",
             "cmd": [sys.executable, "agentmain.py", "--reflect", "reflect/scheduler.py"],
         })
+    # conductor 跟 scheduler 一样,bridge 启动时自动拉起。--no-browser 是关键:
+    # conductor.py 默认会用 webbrowser.open 在用户浏览器弹一个 8900 端口 UI,
+    # 桌面版自启时不需要这个独立 UI(用户从「指挥家」页直接访问)。
+    conductor = ga_root / "frontends" / "conductor.py"
+    if conductor.is_file():
+        out.append({
+            "id": "frontends/conductor.py",
+            "cmd": [sys.executable, "frontends/conductor.py", "--no-browser"],
+        })
     return out
 
 

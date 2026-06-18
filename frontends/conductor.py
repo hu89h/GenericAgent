@@ -479,6 +479,10 @@ async def websocket(ws: WebSocket):
     finally: ws_clients.discard(ws)
 
 if __name__ == "__main__":
-    import uvicorn, webbrowser, threading
-    threading.Timer(1.0, lambda: webbrowser.open(f"http://{HOST}:{PORT}")).start()
+    import uvicorn
+    # bridge 自启 conductor 时传 --no-browser:不在用户浏览器里弹一个独立 conductor UI,
+    # 用户从桌面版「指挥家」页直接连过来即可。手动跑 conductor.py(没带 flag)保持原行为。
+    if "--no-browser" not in sys.argv:
+        import webbrowser, threading
+        threading.Timer(1.0, lambda: webbrowser.open(f"http://{HOST}:{PORT}")).start()
     uvicorn.run("conductor:app", host=HOST, port=PORT, reload=False)

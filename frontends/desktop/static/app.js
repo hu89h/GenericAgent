@@ -305,7 +305,7 @@ const I18N = {
     'page.collab.title': '指挥家', 'page.collab.sub': '交代目标，自动拆活与跟进',
     'collab.progressTitle': '分工进度',
     'collab.progressEmpty': '还没有任务在执行。告诉指挥家你的目标后，这里会显示拆分后的处理进度。',
-    'collab.placeholder': '描述你想完成的目标，Enter 发送…',
+    'collab.placeholder': '请对指挥家描述你想完成的目标',
     'collab.guideTitle': '把要完成的事告诉指挥家',
     'collab.guideWhen': '适合需要多步处理、要花一些时间才能完成的目标。日常聊天和快问快答，请用左侧「聊天」。',
     'collab.guideStep1t': '描述目标',
@@ -325,8 +325,7 @@ const I18N = {
     'collab.plusMenu': '更多操作',
     'collab.switchMode': '切换模式',
     'collab.typing': '指挥家正在处理',
-    'collab.offline': '无法连接 Conductor（8900）。请确认服务已启动且本地已穿透 8900 端口。',
-    'collab.offlineShort': '无法连接 Conductor（8900）',
+    'collab.offline': '无法连接指挥家服务，请确认后端已启动。',
     'collab.retry': '重试',
     'collab.reconnect': '连接断开，正在重连… 已保留上次任务进度。',
     'collab.reconnectIn': '{n} 秒后重试',
@@ -340,10 +339,10 @@ const I18N = {
     'collab.timeHr': '{n} 小时前',
     'collab.timeDay': '{n} 天前',
     'page.token.title': '用量', 'page.token.sub': '每会话与累计用量及缓存率',
-    'status.connecting': '连接中…', 'status.ready': '就绪', 'status.running': '运行中',
-    'status.disconnected': '未连接', 'status.stopped': '已停止', 'status.idle': '空闲',
+    'status.connecting': '正在连接…', 'status.ready': '服务在线', 'status.running': '处理中',
+    'status.disconnected': '服务离线', 'status.stopped': '已停止', 'status.idle': '待命',
     'conv.emptyList': '暂无会话，点「＋ 新对话」开始', 'conv.defaultTitle': '新对话',
-    'err.bridge': 'bridge 未连接', 'err.newSession': '新建会话失败', 'err.poll': '轮询失败', 'err.stop': '停止失败',
+    'err.bridge': '服务未响应', 'err.newSession': '新建会话失败', 'err.poll': '轮询失败', 'err.stop': '停止失败',
     'err.interruptTimeout': '等待上一轮停止超时，请稍后再试',
     'sys.interruptPrev.hint': '已停止上一轮，正在处理新消息',
     'chat.interrupting': '正在停止上一轮…',
@@ -396,7 +395,7 @@ const I18N = {
     'proc.imbotWechat': 'imbot · 微信', 'proc.imbotDing': 'imbot · 钉钉', 'proc.scheduler': '定时任务调度',
     'cm.scheduling': '调度中', 'cm.running': '执行中', 'cm.idleSt': '空闲',
     'cm.master': '已派 3 子任务', 'cm.w1': '子任务：抓取数据', 'cm.w2': '子任务：复核结果', 'cm.sub': '等待派单',
-    'tok.total': '累计', 'tok.cost': '缓存率', 'tok.today': '今日', 'tok.tabAll': '聊天', 'tok.tabConductor': '指挥家', 'tok.condTotal': '指挥家累计', 'tok.condCurrent': '指挥家本次', 'tok.condTip': '指挥家消耗不计入聊天累计', 'tok.condOffline': '无法连接指挥家（8900）', 'tok.disclaimer': '不同 API 网站的计费价格可能会有差异，请以实际网站为准。', 'tok.chartToggle': '趋势图',
+    'tok.total': '累计', 'tok.cost': '缓存率', 'tok.today': '今日', 'tok.tabAll': '聊天', 'tok.tabConductor': '指挥家', 'tok.condTotal': '指挥家累计', 'tok.condCurrent': '指挥家本次', 'tok.condTip': '指挥家消耗不计入聊天累计', 'tok.condOffline': '指挥家服务离线', 'tok.disclaimer': '不同 API 网站的计费价格可能会有差异，请以实际网站为准。', 'tok.chartToggle': '趋势图',
     'tok.colSession': '会话', 'tok.colIn': '输入', 'tok.colOut': '输出', 'tok.colCacheW': '缓存写入', 'tok.colCache': '缓存读取', 'tok.colCost': '成本',
     'tok.from': '从', 'tok.to': '到', 'tok.reset': '重置', 'tok.noData': '暂无记录', 'tok.deleted': '此会话已删除',
     'tok.pricingUnknown': '⚠ 此模型计费规则尚未明确，按默认估算',
@@ -468,7 +467,7 @@ const I18N = {
     'page.collab.title': 'Conductor', 'page.collab.sub': 'Describe a goal — split, delegate, and follow up',
     'collab.progressTitle': 'Progress',
     'collab.progressEmpty': 'No tasks running yet. After you describe a goal to Conductor, split tasks will appear here.',
-    'collab.placeholder': 'Describe your goal, Enter to send…',
+    'collab.placeholder': 'Describe the goal you want to accomplish',
     'collab.guideTitle': 'Tell Conductor what you want done',
     'collab.guideWhen': 'Best for multi-step goals that take a while. For everyday chat and quick questions, use Chat in the sidebar.',
     'collab.guideStep1t': 'Describe your goal',
@@ -488,8 +487,7 @@ const I18N = {
     'collab.plusMenu': 'More actions',
     'collab.switchMode': 'Switch mode',
     'collab.typing': 'Conductor is working',
-    'collab.offline': 'Cannot reach Conductor (8900). Start the service and forward port 8900.',
-    'collab.offlineShort': 'Cannot reach Conductor (8900)',
+    'collab.offline': 'Cannot reach the service. Make sure the backend is running.',
     'collab.retry': 'Retry',
     'collab.reconnect': 'Disconnected — reconnecting… Your last progress is kept.',
     'collab.reconnectIn': 'Retry in {n}s',
@@ -503,10 +501,10 @@ const I18N = {
     'collab.timeHr': '{n}h ago',
     'collab.timeDay': '{n}d ago',
     'page.token.title': 'Usage', 'page.token.sub': 'Per-session and total usage & cache rate',
-    'status.connecting': 'Connecting…', 'status.ready': 'Ready', 'status.running': 'Running',
-    'status.disconnected': 'Disconnected', 'status.stopped': 'Stopped', 'status.idle': 'Idle',
+    'status.connecting': 'Connecting…', 'status.ready': 'Service online', 'status.running': 'Working…',
+    'status.disconnected': 'Service offline', 'status.stopped': 'Stopped', 'status.idle': 'Standby',
     'conv.emptyList': 'No chats yet — click “＋ New chat”', 'conv.defaultTitle': 'New chat',
-    'err.bridge': 'Bridge not connected', 'err.newSession': 'Failed to create session', 'err.poll': 'Polling failed', 'err.stop': 'Stop failed',
+    'err.bridge': 'Service not responding', 'err.newSession': 'Failed to create session', 'err.poll': 'Polling failed', 'err.stop': 'Stop failed',
     'err.interruptTimeout': 'Timed out waiting for the previous reply to stop — try again',
     'sys.interruptPrev.hint': 'Previous reply stopped — processing new message',
     'chat.interrupting': 'Stopping previous reply…',
@@ -559,7 +557,7 @@ const I18N = {
     'proc.imbotWechat': 'imbot · WeChat', 'proc.imbotDing': 'imbot · DingTalk', 'proc.scheduler': 'Scheduler',
     'cm.scheduling': 'Scheduling', 'cm.running': 'Running', 'cm.idleSt': 'Idle',
     'cm.master': 'Dispatched 3 subtasks', 'cm.w1': 'Subtask: fetch data', 'cm.w2': 'Subtask: review results', 'cm.sub': 'Waiting for tasks',
-    'tok.total': 'Total', 'tok.cost': 'Cache rate', 'tok.today': 'Today', 'tok.tabAll': 'Chat', 'tok.tabConductor': 'Conductor', 'tok.condTotal': 'Conductor Total', 'tok.condCurrent': 'Conductor Current', 'tok.condTip': 'Conductor usage is not included in chat totals', 'tok.condOffline': 'Cannot reach Conductor (8900)', 'tok.disclaimer': 'Pricing may vary by API provider. Please refer to the actual website.', 'tok.chartToggle': 'Trend',
+    'tok.total': 'Total', 'tok.cost': 'Cache rate', 'tok.today': 'Today', 'tok.tabAll': 'Chat', 'tok.tabConductor': 'Conductor', 'tok.condTotal': 'Conductor Total', 'tok.condCurrent': 'Conductor Current', 'tok.condTip': 'Conductor usage is not included in chat totals', 'tok.condOffline': 'Service offline', 'tok.disclaimer': 'Pricing may vary by API provider. Please refer to the actual website.', 'tok.chartToggle': 'Trend',
     'tok.colSession': 'Session', 'tok.colIn': 'Input', 'tok.colOut': 'Output', 'tok.colCacheW': 'Cache write', 'tok.colCache': 'Cache read', 'tok.colCost': 'Cost',
     'tok.from': 'From', 'tok.to': 'To', 'tok.reset': 'Reset', 'tok.noData': 'No records', 'tok.deleted': 'Session deleted',
     'tok.pricingUnknown': '⚠ Pricing not confirmed, using defaults',
@@ -868,7 +866,8 @@ if (pqEl && pqToggle) {
   let pqCollapsed = false;
   try { pqCollapsed = localStorage.getItem('ga_pq_collapsed') === '1'; } catch (_) {}
   applyPq(pqCollapsed);
-  const togglePq = () => {
+  const togglePq = (e) => {
+    if (e) e.stopPropagation();
     pqCollapsed = !pqEl.classList.contains('collapsed');
     applyPq(pqCollapsed);
     try { localStorage.setItem('ga_pq_collapsed', pqCollapsed ? '1' : '0'); } catch (_) {}
@@ -1472,8 +1471,8 @@ function syncAskUserUi() {
 /* ───────────── 统一复制 SVG Icon ───────────── */
 // Phosphor 图标助手：把 window.gaIcon(name) 包一层，给动态渲染的 UI 用，与静态 [data-ga-icon] 保持一致
 const GA_ICON = (name, className = '') => (typeof window.gaIcon === 'function' ? window.gaIcon(name, className) : '');
-const SVG_COPY_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
-const SVG_CHECK_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+const SVG_COPY_ICON = GA_ICON('copy');
+const SVG_CHECK_ICON = GA_ICON('check');
 
 function postRenderEnhance(containerEl) {
   if (!containerEl) return;
@@ -2136,7 +2135,7 @@ function msgNode(msg) {
       ? `<div class="user-files">${msg.files.map(f => {
           const name = f.name || 'file';
           const sub = fileSubLabel(name);
-          return `<div class="file-chip" data-path="${escapeHtml(f.path || '')}" data-name="${escapeHtml(name)}"><span class="fc-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span><span class="fc-meta"><span class="fc-name">${escapeHtml(name)}</span><span class="fc-sub">${escapeHtml(sub)}</span></span></div>`;
+          return `<div class="file-chip" data-path="${escapeHtml(f.path || '')}" data-name="${escapeHtml(name)}"><span class="fc-icon">${GA_ICON('fileText')}</span><span class="fc-meta"><span class="fc-name">${escapeHtml(name)}</span><span class="fc-sub">${escapeHtml(sub)}</span></span></div>`;
         }).join('')}</div>`
       : '';
     const chipText = renderMsgTextWithChips(shown, (kind, n) => {
@@ -3478,6 +3477,7 @@ function openModelMenu(chipEl, menuEl) {
   closeAllModelMenus();
   renderModelMenu(menuEl);
   menuEl.hidden = false;
+  chipEl.classList.add('open');
   const chipRect = chipEl.getBoundingClientRect();
   const composer = chipEl.closest('.composer');
   if (composer) {
@@ -3489,6 +3489,8 @@ function openModelMenu(chipEl, menuEl) {
 function closeAllModelMenus() {
   if (modelMenu) modelMenu.hidden = true;
   if (collabModelMenu) collabModelMenu.hidden = true;
+  if (modelChip) modelChip.classList.remove('open');
+  if (collabModelChip) collabModelChip.classList.remove('open');
 }
 function bindModelMenuItemClick(menuEl) {
   if (!menuEl) return;
@@ -3507,10 +3509,12 @@ bindModelMenuItemClick(modelMenu);
 bindModelMenuItemClick(collabModelMenu);
 if (modelChip) modelChip.addEventListener('click', (e) => {
   e.preventDefault(); e.stopPropagation();
+  if (modelMenu && !modelMenu.hidden) { closeAllModelMenus(); return; }
   openModelMenu(modelChip, modelMenu);
 });
 if (collabModelChip) collabModelChip.addEventListener('click', (e) => {
   e.preventDefault(); e.stopPropagation();
+  if (collabModelMenu && !collabModelMenu.hidden) { closeAllModelMenus(); return; }
   openModelMenu(collabModelChip, collabModelMenu);
 });
 document.addEventListener('click', (e) => {
@@ -3647,7 +3651,7 @@ function renderThumbStrip(ctx = activeFileComposer) {
     const sub = fileSubLabel(name).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
     const path = (f.path || '').replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
     const dataName = name.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
-    return `<div class="file-chip pending" data-sid="${f.sid}" data-path="${path}" data-name="${dataName}"><span class="fc-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span><span class="fc-meta"><span class="fc-name">${label}</span><span class="fc-sub">${sub}</span></span><button class="x" data-sid="${f.sid}" data-i18n-title="upload.removeTitle" title="">×</button></div>`;
+    return `<div class="file-chip pending" data-sid="${f.sid}" data-path="${path}" data-name="${dataName}"><span class="fc-icon">${GA_ICON('fileText')}</span><span class="fc-meta"><span class="fc-name">${label}</span><span class="fc-sub">${sub}</span></span><button class="x" data-sid="${f.sid}" data-i18n-title="upload.removeTitle" title="">×</button></div>`;
   }).join('');
   cfg.strip.hidden = false;
   applyI18n();
@@ -4230,7 +4234,7 @@ async function loadConductorTokens() {
   const hIn = hist.input + curIn, hOut = hist.output + curOut, hCc = hist.cacheCreate + curCc, hCr = hist.cacheRead + curCr, hCost = hist.cost + curCost;
   if (!tokTbody) return;
   const tip = t('tok.condTip');
-  const _ci = `<svg width="14" height="14" ${CONDUCTOR_SVG_ATTRS} style="vertical-align:-2px;margin-right:4px">${CONDUCTOR_SVG_INNER}</svg>`;
+  const _ci = GA_ICON('gitFork');
   const hCacheBase = hIn + hCr + hCc;
   const hCacheRate = hCacheBase > 0 ? (hCr / hCacheBase * 100).toFixed(1) + '%' : '0%';
   const curCacheBase = curIn + curCr + curCc;
@@ -4301,29 +4305,21 @@ nav.addEventListener('click',(e)=>{const item=e.target.closest('.nav-item');if(i
 const CP_KEY = 'ga_custom_presets';
 const HB_KEY = 'ga_hidden_builtins';
 
-const CONDUCTOR_SVG_INNER = '<path d="M0,0 L18,1 L38,5 L51,10 L66,18 L78,29 L82,37 L83,40 L83,57 L62,204 L59,220 L52,221 L23,220 L-20,220 L-53,221 L-55,219 L-71,108 L-78,57 L-78,41 L-75,33 L-69,25 L-59,17 L-44,9 L-29,4 L-13,1 Z" transform="translate(551,74)"/><path d="M0,0 L18,1 L30,4 L34,7 L36,31 L55,164 L57,179 L57,186 L56,187 L20,191 L-9,196 L-37,203 L-51,208 L-56,208 L-59,200 L-67,176 L-83,141 L-91,121 L-95,105 L-96,98 L-96,81 L-93,66 L-87,51 L-80,40 L-69,28 L-60,20 L-45,11 L-30,5 L-11,1 Z" transform="translate(426,109)"/><path d="M0,0 L9,0 L26,2 L41,6 L57,13 L71,22 L82,32 L91,44 L99,60 L103,74 L104,81 L104,98 L101,115 L93,137 L78,169 L70,190 L65,207 L64,208 L56,207 L38,201 L18,196 L-12,191 L-48,187 L-50,186 L-47,162 L-28,29 L-26,7 L-20,3 L-10,1 Z" transform="translate(673,109)"/><path d="M0,0 L35,0 L79,2 L117,6 L153,12 L180,19 L196,25 L201,30 L202,32 L203,42 L203,78 L201,86 L199,90 L219,97 L236,106 L252,118 L262,127 L273,136 L282,144 L299,155 L317,163 L335,168 L371,175 L380,178 L381,182 L371,203 L364,223 L359,243 L358,250 L356,252 L346,252 L326,249 L311,245 L296,239 L280,230 L267,219 L258,208 L249,194 L240,175 L232,156 L221,137 L209,124 L199,116 L193,113 L193,123 L201,130 L206,138 L209,150 L209,167 L206,185 L201,200 L195,211 L185,221 L177,225 L170,251 L163,271 L155,289 L145,308 L137,320 L125,336 L111,351 L100,361 L96,364 L95,391 L92,420 L87,448 L79,481 L68,516 L54,552 L38,587 L21,622 L16,624 L12,619 L0,595 L-15,562 L-27,534 L-40,498 L-50,462 L-56,433 L-60,404 L-61,391 L-62,364 L-77,351 L-85,343 L-94,332 L-103,320 L-114,302 L-123,285 L-134,257 L-141,232 L-142,224 L-147,223 L-156,216 L-162,208 L-168,196 L-173,177 L-174,171 L-174,147 L-170,135 L-163,126 L-159,123 L-159,111 L-160,93 L-165,89 L-168,82 L-168,34 L-165,28 L-157,23 L-135,16 L-108,10 L-83,6 L-43,2 Z M-1,70 L-38,72 L-64,75 L-91,80 L-110,85 L-116,88 L-119,95 L-124,121 L-126,144 L-126,172 L-123,202 L-117,231 L-109,257 L-100,278 L-89,299 L-77,316 L-66,328 L-65,330 L-63,330 L-62,333 L-57,336 L-50,315 L-42,300 L-35,291 L-26,282 L-12,274 L1,270 L7,269 L27,269 L43,273 L59,281 L70,291 L80,306 L88,326 L91,336 L98,331 L105,323 L114,312 L124,297 L136,274 L145,250 L152,226 L157,200 L159,184 L160,170 L160,144 L158,121 L153,95 L150,88 L141,84 L115,78 L90,74 L58,71 L35,70 Z" transform="translate(536,309)"/><path d="M0,0 L7,0 L20,4 L30,12 L38,24 L46,20 L57,19 L67,22 L77,30 L83,39 L87,47 L90,58 L101,59 L107,63 L114,71 L120,84 L124,97 L127,119 L135,123 L141,135 L144,151 L145,173 L143,198 L138,223 L133,240 L125,259 L116,275 L108,286 L97,299 L86,309 L76,316 L64,323 L55,327 L60,369 L60,372 L68,372 L78,375 L86,382 L90,391 L90,402 L86,410 L80,415 L76,416 L22,419 L19,421 L18,426 L20,430 L27,431 L65,429 L83,429 L90,433 L94,439 L95,442 L95,453 L92,459 L87,464 L83,466 L57,468 L27,470 L24,473 L25,480 L27,481 L46,481 L66,480 L86,480 L92,484 L96,492 L96,502 L92,510 L86,515 L82,517 L59,519 L52,519 L57,556 L60,563 L66,566 L74,565 L77,564 L79,559 L79,549 L78,540 L78,530 L89,527 L97,522 L104,514 L108,502 L108,491 L104,480 L99,473 L100,469 L104,463 L107,453 L107,442 L104,432 L100,426 L95,421 L97,416 L101,408 L102,404 L102,390 L99,380 L93,372 L89,368 L91,364 L104,352 L117,342 L133,331 L148,322 L170,310 L192,299 L226,284 L232,283 L234,287 L240,324 L246,353 L254,384 L266,420 L278,449 L291,477 L309,513 L322,543 L330,565 L335,584 L336,593 L334,595 L48,595 L38,592 L27,585 L17,576 L8,565 L-2,551 L-12,533 L-20,516 L-27,495 L-32,473 L-34,459 L-35,436 L-33,419 L-29,406 L-23,395 L-14,386 L-4,380 L7,376 L16,375 L13,356 L10,329 L1,328 L-20,321 L-36,313 L-48,306 L-64,294 L-82,276 L-92,263 L-103,245 L-112,226 L-118,209 L-123,190 L-126,171 L-126,149 L-123,137 L-119,131 L-114,128 L-111,128 L-112,121 L-112,107 L-109,88 L-104,76 L-98,68 L-92,63 L-87,61 L-79,61 L-78,50 L-73,37 L-66,28 L-57,22 L-51,20 L-41,20 L-30,24 L-25,15 L-18,7 L-9,2 Z" transform="translate(200,368)"/><path d="M0,0 L6,1 L42,17 L71,31 L100,46 L123,60 L140,72 L154,83 L167,95 L179,107 L190,121 L201,136 L210,151 L221,172 L230,195 L237,218 L243,247 L246,272 L247,289 L247,306 L245,310 L241,312 L-102,312 L-104,310 L-102,298 L-96,278 L-88,256 L-75,228 L-61,199 L-49,174 L-37,145 L-28,120 L-21,97 L-13,65 L-6,29 L-2,4 Z" transform="translate(674,651)"/>';
-const CONDUCTOR_SVG_ATTRS = 'viewBox="0 0 995 1037" fill="currentColor" stroke="none"';
-const CONDUCTOR_ICON_SVG = `<svg class="fc-ic" ${CONDUCTOR_SVG_ATTRS}>${CONDUCTOR_SVG_INNER}</svg>`;
-(() => {
-  const ic = document.querySelector('a.nav-item[data-page="collab"] > .ic');
-  if (ic) ic.innerHTML = `<svg ${CONDUCTOR_SVG_ATTRS} aria-hidden="true">${CONDUCTOR_SVG_INNER}</svg>`;
-})();
-
 const BUILTIN_PRESETS = [
   { key: 'butler', titleKey: 'preset.butler.t', descKey: 'preset.butler.d', navigate: 'collab',
-    iconSvg: CONDUCTOR_ICON_SVG },
+    get iconSvg() { return GA_ICON('gitFork', 'fc-ic'); } },
   { key: 'plan',   titleKey: 'preset.plan.t',   descKey: 'preset.plan.d',   promptKey: 'presetPrompt.plan',
-    iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="8" y1="18" x2="16" y2="18"/><circle cx="4" cy="6" r="1.5"/><circle cx="4" cy="12" r="1.5"/><circle cx="4" cy="18" r="1.5"/></svg>' },
+    get iconSvg() { return GA_ICON('listChecks', 'fc-ic'); } },
   { key: 'goal',    titleKey: 'preset.goal.t',    descKey: 'preset.goal.d',    promptKey: 'presetPrompt.goal',
-    iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/></svg>' },
+    get iconSvg() { return GA_ICON('crosshair', 'fc-ic'); } },
   { key: 'explore', titleKey: 'preset.explore.t', descKey: 'preset.explore.d', promptKey: 'presetPrompt.explore',
-    iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polygon points="16.2 7.8 14.1 14.1 7.8 16.2 9.9 9.9 16.2 7.8"/></svg>' },
+    get iconSvg() { return GA_ICON('compass', 'fc-ic'); } },
   { key: 'hive',    titleKey: 'preset.hive.t',    descKey: 'preset.hive.d',    promptKey: 'presetPrompt.hive',
-    iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 21 7 21 17 12 22 3 17 3 7"/><polygon points="12 8 16 10.3 16 14.7 12 17 8 14.7 8 10.3"/></svg>' },
+    get iconSvg() { return GA_ICON('hexagon', 'fc-ic'); } },
   { key: 'review',  titleKey: 'preset.review.t',  descKey: 'preset.review.d',  promptKey: 'presetPrompt.review',
-    iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>' },
+    get iconSvg() { return GA_ICON('magnifyingGlass', 'fc-ic'); } },
   { key: 'mine',    titleKey: 'preset.mine.t',    descKey: 'preset.mine.d',    promptKey: 'presetPrompt.mine',
-    iconSvg: '<svg class="fc-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' },
+    get iconSvg() { return GA_ICON('star', 'fc-ic'); } },
 ];
 const ADD_ICON_SVG = GA_ICON('plus', 'fc-ic');
 // 自定义保存后生成的卡片图标（用户图标，表示"用户自定义的任务"）—— 与"添加"卡的 + 区分

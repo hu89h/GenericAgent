@@ -65,7 +65,7 @@
           <span data-i18n="nav.chat"></span>
         </a>
         <a class="nav-item" data-page="collab">
-          <span class="ic" aria-hidden="true"></span>
+          <span class="ic" data-ga-icon="gitFork"></span>
           <span data-i18n="nav.collab"></span>
           <span id="collab-badge" class="collab-nav-badge" hidden></span>
         </a>
@@ -116,7 +116,9 @@
           </span>
           <span class="chev" data-ga-icon="caretRight"></span>
         </a>
-        <div class="foot-ver" data-i18n="foot.ver"></div>
+        <div class="foot-status" id="run-toggle">
+          <i class="dot"></i> <span class="rs-label"></span>
+        </div>
       </div>
     </aside>
     <div class="sb-resize" id="sb-resize"></div>
@@ -131,9 +133,6 @@
           <div class="page-top">
             <button type="button" class="pt-icon pt-sb-toggle" aria-label="toggle sidebar">
               <span data-ga-icon="caretLeft"></span>
-            </button>
-            <button class="run-state" id="run-toggle">
-              <i class="dot"></i> <span class="rs-label"></span>
             </button>
             <button type="button" class="pt-icon pt-rp-toggle" aria-label="toggle conversations">
               <span data-ga-icon="caretRight"></span>
@@ -253,19 +252,19 @@
                 </div>
                 <div class="collab-guide-steps">
                   <div class="collab-guide-step">
-                    <span class="collab-guide-ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+                    <span class="collab-guide-ic" aria-hidden="true"><span data-ga-icon="chatTeardropText"></span></span>
                     <span class="collab-guide-txt"><span class="collab-guide-label" data-i18n="collab.guideStep1t"></span><span class="collab-guide-desc" data-i18n="collab.guideStep1d"></span></span>
                   </div>
                   <div class="collab-guide-step">
-                    <span class="collab-guide-ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+                    <span class="collab-guide-ic" aria-hidden="true"><span data-ga-icon="gridFour"></span></span>
                     <span class="collab-guide-txt"><span class="collab-guide-label" data-i18n="collab.guideStep2t"></span><span class="collab-guide-desc" data-i18n="collab.guideStep2d"></span></span>
                   </div>
                   <div class="collab-guide-step">
-                    <span class="collab-guide-ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/></svg></span>
+                    <span class="collab-guide-ic" aria-hidden="true"><span data-ga-icon="listChecks"></span></span>
                     <span class="collab-guide-txt"><span class="collab-guide-label" data-i18n="collab.guideStep3t"></span><span class="collab-guide-desc" data-i18n="collab.guideStep3d"></span></span>
                   </div>
                   <div class="collab-guide-step">
-                    <span class="collab-guide-ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></span>
+                    <span class="collab-guide-ic" aria-hidden="true"><span data-ga-icon="pencilSimple"></span></span>
                     <span class="collab-guide-txt"><span class="collab-guide-label" data-i18n="collab.guideStep4t"></span><span class="collab-guide-desc" data-i18n="collab.guideStep4d"></span></span>
                   </div>
                 </div>
@@ -276,7 +275,7 @@
               <div class="collab-rail" id="collab-rail" hidden>
                 <button type="button" class="collab-rail-handle" id="collab-rail-toggle" data-i18n-title="collab.showProgressTitle" title="">
                   <span class="collab-rail-grip" aria-hidden="true"></span>
-                  <svg class="collab-rail-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+                  <svg class="collab-rail-chev" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M181.66,133.66l-80,80a8,8,0,0,1-11.32-11.32L164.69,128,90.34,53.66a8,8,0,0,1,11.32-11.32l80,80A8,8,0,0,1,181.66,133.66Z"/></svg>
                   <span class="collab-rail-badge collab-rail-run" id="collab-rail-run" hidden>
                     <span class="collab-rail-spin" aria-hidden="true"></span>
                     <span class="n" id="collab-rail-run-n">0</span>
@@ -295,7 +294,7 @@
                 <div class="collab-prog-panel-head">
                   <span data-i18n="collab.progressTitle"></span>
                   <button type="button" class="ic-btn collab-prog-close" id="collab-prog-close" aria-label="close">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M205.66,194.34a8,8,0,0,1-11.32,11.32L128,139.31,61.66,205.66a8,8,0,0,1-11.32-11.32L116.69,128,50.34,61.66A8,8,0,0,1,61.66,50.34L128,116.69l66.34-66.35a8,8,0,0,1,11.32,11.32L139.31,128Z"/></svg>
                   </button>
                 </div>
                 <div class="collab-prog-stats" id="collab-progress-stats" hidden></div>
@@ -420,7 +419,7 @@
           <span data-i18n="ctx.pin"></span>
         </div>
         <div class="ctx-item" data-act="rename">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          <span data-ga-icon="pencilSimple"></span>
           <span data-i18n="ctx.rename"></span>
         </div>
         <div class="ctx-item danger" data-act="del">
@@ -473,7 +472,7 @@
           <div class="model-guide-link-row">
             <a class="model-guide-link" id="model-guide-link" href="#" target="_blank" rel="noopener noreferrer"></a>
             <button type="button" class="model-guide-copy" id="model-guide-copy" data-i18n-title="guide.copy" title="" aria-label="copy">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span data-ga-icon="copy"></span>
             </button>
           </div>
           <p class="model-guide-tip" data-i18n="guide.prefillTip"></p>
@@ -637,7 +636,7 @@
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
-<script src="phosphor-icons.js"></script>
-<script src="app.js?v=185"></script>
+<script src="phosphor-icons.js?v=2"></script>
+<script src="app.js?v=186"></script>
 </body>
 </html>
