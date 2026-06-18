@@ -1517,6 +1517,25 @@ async def start_extras_handler(request):
     return json_ok({"ok": True})
 
 
+async def identity_handler(request):
+    # Identifies which install this bridge belongs to. A newly launched app compares
+    # ga_root against its own; a mismatch means an orphaned bridge from a different
+    # (e.g. previously downloaded) version is holding the port, and the app will ask it
+    # to shut down via /services/shutdown and then start its own.
+    return json_ok({"ga_root": str(DEFAULT_GA_ROOT), "app_dir": str(APP_DIR), "pid": os.getpid()})
+
+
+async def shutdown_handler(request):
+    if not _is_local_peer(request.remote or ""):
+        return json_ok({"ok": False, "error": "forbidden"}, status=403)
+    # Stop conductor/scheduler first (frees their ports too), then exit this bridge
+    # process right after the response flushes so the taking-over app can bind 14168.
+    with contextlib.suppress(Exception):
+        services.stop_all_extras()
+    threading.Timer(0.4, lambda: os._exit(0)).start()
+    return json_ok({"ok": True})
+
+
 async def token_stats_handler(request):
     try:
         sys.path.insert(0, str(APP_DIR)) if str(APP_DIR) not in sys.path else None
@@ -1600,6 +1619,8 @@ def create_app():
     app.router.add_post("/services/mykey", mykey_save_handler)
     app.router.add_post("/services/stop-extras", stop_extras_handler)
     app.router.add_post("/services/start-extras", start_extras_handler)
+    app.router.add_get("/services/identity", identity_handler)
+    app.router.add_post("/services/shutdown", shutdown_handler)
 
     # Serve static frontend (desktop/static/)
     static_dir = APP_DIR / "desktop" / "static"

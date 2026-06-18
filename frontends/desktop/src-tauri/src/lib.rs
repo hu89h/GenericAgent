@@ -442,6 +442,77 @@ fn request_start_extras() {
     let _ = stream.read(&mut [0u8; 512]);
 }
 
+/// GET /services/identity from a running bridge; returns the ga_root it serves (or None
+/// when the endpoint is absent — i.e. an older/foreign bridge).
+fn bridge_reported_ga_root() -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = TcpStream::connect_timeout(
+        &"127.0.0.1:14168".parse().unwrap(),
+        Duration::from_millis(800),
+    ).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(600)));
+    let req = b"GET /services/identity HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    stream.write_all(req).ok()?;
+    let mut buf = Vec::new();
+    let _ = stream.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let body = text.split("\r\n\r\n").nth(1)?;
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    v.get("ga_root")?.as_str().map(|s| s.to_string())
+}
+
+/// Normalize a path for comparison (canonicalize; fall back to the raw string).
+fn norm_path(p: &str) -> String {
+    std::fs::canonicalize(p)
+        .map(|c| c.to_string_lossy().to_string())
+        .unwrap_or_else(|_| p.to_string())
+}
+
+/// True when the bridge on 14168 belongs to the SAME install as this exe (safe to reuse).
+fn bridge_identity_matches(project_dir: &str) -> bool {
+    let Some(reported) = bridge_reported_ga_root() else { return false; };
+    let (a, b) = (norm_path(&reported), norm_path(project_dir));
+    #[cfg(windows)]
+    { a.eq_ignore_ascii_case(&b) }
+    #[cfg(not(windows))]
+    { a == b }
+}
+
+/// POST /services/shutdown to ask a running bridge to stop and free port 14168.
+fn request_bridge_shutdown() {
+    use std::io::{Read, Write};
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &"127.0.0.1:14168".parse().unwrap(),
+        Duration::from_millis(800),
+    ) else {
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(600)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(600)));
+    let req = b"POST /services/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let _ = stream.write_all(req);
+    let _ = stream.read(&mut [0u8; 512]);
+}
+
+/// If a bridge already holds 14168 but belongs to a DIFFERENT install (e.g. an orphaned
+/// bridge from a previously downloaded version, or this folder was moved), shut it down and
+/// wait for the port to free — otherwise the new exe would load the stale install's UI.
+fn takeover_stale_bridge(project_dir: &str) {
+    if project_dir.is_empty() || !is_bridge_running() {
+        return;
+    }
+    if bridge_identity_matches(project_dir) {
+        return; // same install -> reuse is correct
+    }
+    eprintln!("[tauri] a different/stale bridge holds 127.0.0.1:14168; taking over");
+    request_bridge_shutdown();
+    let start = Instant::now();
+    while is_bridge_running() && start.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn is_bridge_running() -> bool {
     TcpStream::connect(("127.0.0.1", 14168)).is_ok()
 }
@@ -563,6 +634,11 @@ pub fn run() {
     let project_dir = find_project_dir().unwrap_or_default();
     let needs_prepare = needs_first_run_prepare(&project_dir);
 
+    // Take over a stale/foreign bridge holding port 14168 (orphaned bridge from a previously
+    // downloaded version, or a moved folder) before we decide to reuse it — otherwise the new
+    // exe would just load the old install's UI from that bridge.
+    takeover_stale_bridge(&project_dir);
+
     let bridge_ok = is_bridge_running();
     let mut spawned_bridge = false;
     // Skip the early spawn when a first-run prepare is required (no venv yet);
@@ -606,7 +682,6 @@ pub fn run() {
             thread::spawn(move || {
                 // Progress reporter: push status into the loading window (window.gaProgress).
                 let main_win = handle.get_webview_window("main");
-                wait_until_extras_ports_free(main_win.as_ref());
 
                 let report = |pct: i32, msg: &str| {
                     if let Some(w) = &main_win {
@@ -656,8 +731,9 @@ pub fn run() {
                 let bridge_ready = wait_for_port(14168, wait);
 
                 if bridge_ready {
-                    wait_until_extras_ports_free(main_win.as_ref());
-                    request_start_extras();
+                    // The bridge auto-starts conductor + scheduler itself (on_startup), so we do
+                    // NOT probe their ports here: that would self-detect the bridge's own
+                    // just-started extras and falsely report "ports busy".
                     if !wait_for_port(14168, Duration::from_secs(15)) {
                         eprintln!("[tauri] bridge not reachable before navigate");
                         if let Some(w) = &main_win {
@@ -711,7 +787,10 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let label = window.label();
                 if label == "main" {
-                    request_stop_extras();
+                    // Model A (persistent backend): closing the window does NOT stop the
+                    // bridge or its conductor/scheduler, so IM bots / scheduled / in-flight
+                    // tasks keep running and a relaunch reuses the warm backend. Stale/foreign
+                    // bridges are handled on next start by takeover_stale_bridge.
                     window.app_handle().exit(0);
                 } else if label == "setup" {
                     // Setup closed -> exit if main is not visible
