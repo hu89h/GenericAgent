@@ -393,15 +393,6 @@ fn startup_log(msg: &str) {
     }
 }
 
-/// Run WebView/window updates on the UI thread (required on Windows WebView2).
-fn dispatch_ui<F>(handle: &tauri::AppHandle, f: F)
-where
-    F: FnOnce(&tauri::AppHandle) + Send + 'static,
-{
-    let app = handle.clone();
-    let _ = app.clone().run_on_main_thread(move || f(&app));
-}
-
 fn blocked_ports_label() -> Option<String> {
     let mut busy = Vec::new();
     if is_port_open(BRIDGE_PORT) {
@@ -502,7 +493,7 @@ fn spawn_bridge(py: &str, project_dir: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-fn show_port_busy(handle: &tauri::AppHandle, ports: &str) {
+fn port_busy_url(ports: &str) -> tauri::Url {
     let encoded: String = ports.chars().map(|c| match c {
         ' ' => "%20".to_string(),
         '(' => "%28".to_string(),
@@ -510,14 +501,20 @@ fn show_port_busy(handle: &tauri::AppHandle, ports: &str) {
         ',' => "%2C".to_string(),
         _ => c.to_string(),
     }).collect();
-    let url = tauri::Url::parse(&format!("port_busy.html?ports={}", encoded)).unwrap();
-    dispatch_ui(handle, move |app| {
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.navigate(url);
-            let _ = w.show();
-            let _ = w.set_focus();
-        }
-    });
+    tauri::Url::parse(&format!("port_busy.html?ports={}", encoded)).unwrap()
+}
+
+fn show_port_busy_window(w: &tauri::WebviewWindow, ports: &str) {
+    let url = port_busy_url(ports);
+    let _ = w.navigate(url);
+    let _ = w.show();
+    let _ = w.set_focus();
+}
+
+fn show_port_busy(handle: &tauri::AppHandle, ports: &str) {
+    if let Some(w) = handle.get_webview_window("main") {
+        show_port_busy_window(&w, ports);
+    }
 }
 
 /// True when required ports are taken. Shows port_busy on the main window when blocked.
@@ -532,34 +529,32 @@ fn ports_blocked_or_show(handle: &tauri::AppHandle) -> bool {
 }
 
 fn open_bridge_ui(handle: &tauri::AppHandle, dev_mode: bool) {
-    dispatch_ui(handle, move |app| {
-        if let Some(w) = app.get_webview_window("main") {
-            if let Ok(url) = tauri::Url::parse(&format!("http://127.0.0.1:{}/", BRIDGE_PORT)) {
-                let _ = w.navigate(url);
-            }
-            if dev_mode {
-                w.open_devtools();
-            } else {
-                let _ = w.eval(r#"
-                    document.addEventListener('keydown', function(e) {
-                        if (e.key === 'F12' || e.key === 'F5' ||
-                            (e.ctrlKey && e.key === 'r') ||
-                            (e.ctrlKey && e.shiftKey && e.key === 'I')) {
-                            e.preventDefault();
-                        }
-                    });
-                    document.addEventListener('contextmenu', function(e) {
+    if let Some(w) = handle.get_webview_window("main") {
+        if let Ok(url) = tauri::Url::parse(&format!("http://127.0.0.1:{}/", BRIDGE_PORT)) {
+            let _ = w.navigate(url);
+        }
+        if dev_mode {
+            w.open_devtools();
+        } else {
+            let _ = w.eval(r#"
+                document.addEventListener('keydown', function(e) {
+                    if (e.key === 'F12' || e.key === 'F5' ||
+                        (e.ctrlKey && e.key === 'r') ||
+                        (e.ctrlKey && e.shiftKey && e.key === 'I')) {
                         e.preventDefault();
-                    });
-                "#);
-            }
-            let _ = w.show();
-            let _ = w.set_focus();
+                    }
+                });
+                document.addEventListener('contextmenu', function(e) {
+                    e.preventDefault();
+                });
+            "#);
         }
-        if let Some(sw) = app.get_webview_window("setup") {
-            let _ = sw.hide();
-        }
-    });
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    if let Some(sw) = handle.get_webview_window("setup") {
+        let _ = sw.hide();
+    }
 }
 
 #[tauri::command]
@@ -636,7 +631,9 @@ pub fn run() {
 
             if let Some(ports) = &port_blocked {
                 startup_log(&format!("[tauri] ports blocked at setup: {}", ports));
-                show_port_busy(app.handle(), ports);
+                if let Some(w) = app.get_webview_window("main") {
+                    show_port_busy_window(&w, ports);
+                }
                 return Ok(());
             }
 
@@ -646,18 +643,16 @@ pub fn run() {
                 let mut spawned_bridge = spawned_bridge;
 
                 // Progress reporter: push status into the loading window (window.gaProgress).
-                let handle_report = handle.clone();
-                let report = move |pct: i32, msg: &str| {
-                    let js = format!(
-                        "window.gaProgress && window.gaProgress({}, {})",
-                        pct,
-                        serde_json::to_string(msg).unwrap_or_else(|_| "\"\"".to_string())
-                    );
-                    dispatch_ui(&handle_report, move |app| {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.eval(&js);
-                        }
-                    });
+                let main_win = handle.get_webview_window("main");
+                let report = |pct: i32, msg: &str| {
+                    if let Some(w) = &main_win {
+                        let js = format!(
+                            "window.gaProgress && window.gaProgress({}, {})",
+                            pct,
+                            serde_json::to_string(msg).unwrap_or_else(|_| "\"\"".to_string())
+                        );
+                        let _ = w.eval(&js);
+                    }
                 };
 
                 // First-run (self-contained bundle): prepare the embedded python env offline,
@@ -667,14 +662,12 @@ pub fn run() {
                     report(5, "start");
                     if let Err(e) = run_offline_prepare(&project_dir, &report) {
                         startup_log(&format!("[tauri] first-run prepare failed: {}", e));
-                        dispatch_ui(&handle, move |app| {
-                            if let Some(sw) = app.get_webview_window("setup") {
-                                let _ = sw.show();
-                            }
-                            if let Some(mw) = app.get_webview_window("main") {
-                                let _ = mw.hide();
-                            }
-                        });
+                        if let Some(sw) = handle.get_webview_window("setup") {
+                            let _ = sw.show();
+                        }
+                        if let Some(mw) = handle.get_webview_window("main") {
+                            let _ = mw.hide();
+                        }
                         return;
                     }
                     startup_log("[tauri] first-run prepare done");
@@ -724,18 +717,16 @@ pub fn run() {
                     startup_log("[tauri] showing port_busy");
                 } else {
                     startup_log("[tauri] showing setup fallback");
-                    dispatch_ui(&handle, move |app| {
-                        if let Some(sw) = app.get_webview_window("setup") {
-                            if dev_mode {
-                                let _ = sw.open_devtools();
-                            }
-                            let _ = sw.show();
-                            let _ = sw.set_focus();
+                    if let Some(sw) = handle.get_webview_window("setup") {
+                        if dev_mode {
+                            let _ = sw.open_devtools();
                         }
-                        if let Some(mw) = app.get_webview_window("main") {
-                            let _ = mw.hide();
-                        }
-                    });
+                        let _ = sw.show();
+                        let _ = sw.set_focus();
+                    }
+                    if let Some(mw) = handle.get_webview_window("main") {
+                        let _ = mw.hide();
+                    }
                 }
             });
             Ok(())
