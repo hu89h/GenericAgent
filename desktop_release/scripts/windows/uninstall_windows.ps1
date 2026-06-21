@@ -29,6 +29,9 @@ function Write-Ok([string]$m)   { Write-Host "[OK] $m" -ForegroundColor Green }
 function Write-Info([string]$m) { Write-Host "     $m" -ForegroundColor Gray }
 
 # Normalize the bundle dir to an absolute path with a trailing separator for prefix checks.
+# Defensive: strip stray quotes / trailing separators a caller may have leaked in (e.g. the
+# classic "%~dp0" trailing-backslash-before-quote bug).
+$BundleDir = $BundleDir.Trim().Trim('"').TrimEnd('\', '/')
 try { $bundle = (Resolve-Path -LiteralPath $BundleDir).Path } catch { $bundle = $BundleDir }
 $bundlePrefix = ($bundle.TrimEnd('\') + '\').ToLowerInvariant()
 

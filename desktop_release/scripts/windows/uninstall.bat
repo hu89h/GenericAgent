@@ -24,7 +24,12 @@ if /i not "%CONFIRM%"=="Y" (
 )
 
 echo.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\uninstall_windows.ps1" -BundleDir "%~dp0"
+rem %~dp0 ends with a backslash; passing "...\dir\" makes the trailing \" escape the closing
+rem quote, so PowerShell receives a path with a literal quote ("Illegal characters in path").
+rem Strip the trailing backslash before passing the bundle dir.
+set "BUNDLE=%~dp0"
+if "%BUNDLE:~-1%"=="\" set "BUNDLE=%BUNDLE:~0,-1%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0runtime\uninstall_windows.ps1" -BundleDir "%BUNDLE%"
 
 echo.
 echo You can close this window now.
