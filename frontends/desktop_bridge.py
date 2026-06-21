@@ -1050,21 +1050,6 @@ async def cors_middleware(request, handler):
     return resp
 
 
-@web.middleware
-async def no_cache_middleware(request, handler):
-    # WebView2 (Chromium) heuristically caches assets that ship only ETag/Last-Modified with no
-    # Cache-Control (aiohttp's static handler does exactly that), so a rebuilt app.js/index.html
-    # keeps serving stale from cache for ~10% of its age — users saw old UI after updates. Force
-    # revalidation on every GET so the desktop shell always loads the bundle's current frontend.
-    resp = await handler(request)
-    try:
-        if request.method in ("GET", "HEAD"):
-            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    except Exception:
-        pass
-    return resp
-
-
 def json_ok(data: dict, status: int = 200):
     return web.json_response(data, status=status, headers=cors_headers(), dumps=lambda x: json.dumps(x, ensure_ascii=False, default=str))
 
@@ -1600,7 +1585,7 @@ async def post_token_history_handler(request):
 
 
 def create_app():
-    app = web.Application(middlewares=[cors_middleware, no_cache_middleware], client_max_size=500 * 1024 * 1024)
+    app = web.Application(middlewares=[cors_middleware], client_max_size=500 * 1024 * 1024)
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/status", status_handler)
     app.router.add_get("/config", get_config_handler)
