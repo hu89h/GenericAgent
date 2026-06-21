@@ -4976,12 +4976,35 @@ function showChanToast(title, detail, kind) {
   }
 
   async function maybeAskDesktopShortcut() {
+    // ── TEMP DIAGNOSTIC (Bug 2): show a visible on-page banner reporting each step,
+    // so we can tell "should_ask returned false" vs "confirm got swallowed" without devtools.
+    const diag = (txt, color) => {
+      let b = document.getElementById('ga-diag-banner');
+      if (!b) {
+        b = document.createElement('div');
+        b.id = 'ga-diag-banner';
+        b.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:999999;padding:10px 14px;'
+          + 'font:13px/1.4 monospace;white-space:pre-wrap;background:#222;color:#0f0;'
+          + 'border-bottom:2px solid #0f0;max-height:50vh;overflow:auto';
+        document.body.appendChild(b);
+      }
+      if (color) b.style.color = color;
+      b.textContent += txt + '\n';
+    };
     try {
+      diag('[diag] start; __TAURI__=' + (typeof window.__TAURI__) + ' invoke='
+        + (typeof window.__TAURI__?.core?.invoke));
       const should = await window.ga.tauriInvoke('shortcut_should_ask');
-      if (!should) return;
+      diag('[diag] shortcut_should_ask = ' + JSON.stringify(should));
+      if (!should) { diag('[diag] should_ask is false -> not prompting', '#ff0'); return; }
+      diag('[diag] calling window.confirm now...');
       const create = window.confirm(t('shortcut.askConfirm'));
+      diag('[diag] confirm returned = ' + create, '#0ff');
       await window.ga.tauriInvoke('shortcut_decide', { create });
-    } catch (_) { /* not in tauri / not a bundle — ignore */ }
+      diag('[diag] shortcut_decide done (create=' + create + ')', '#0f0');
+    } catch (e) {
+      diag('[diag] EXCEPTION: ' + (e && e.message ? e.message : String(e)), '#f55');
+    }
   }
 
   if (document.readyState === 'loading') {
