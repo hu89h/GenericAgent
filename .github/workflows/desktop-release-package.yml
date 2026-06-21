@@ -193,7 +193,7 @@ jobs:
           set -euo pipefail
           TAG_NAME="${{ github.ref_name }}"
           TITLE="GenericAgent Desktop Portable ${TAG_NAME}"
-          NOTES=$(cat <<'EOF'
+          cat > "${RUNNER_TEMP:-/tmp}/ga_notes.md" <<'EOF'
           GenericAgent Desktop 便携版（自包含） / Portable (self-contained)
 
           下载对应平台的包，解压即可运行——无需装 Python、无需联网装依赖、无需源码。
@@ -213,14 +213,13 @@ jobs:
           - 便携包可整体移动到任意目录后继续使用。The whole folder can be moved anywhere and still works.
           - 各包内附「安装使用说明_Install_Guide.txt」（中英）。Each package ships a bilingual install guide.
           EOF
-          )
           # Create the shared release if it does not exist yet (another OS job may win the race).
           # Race-safe: the 3 OS jobs share ONE release. Retry create until the release
           # actually exists (a simultaneous create from another job can fail), so the
           # upload below never races a not-yet-created release.
           for _ in $(seq 1 15); do
             gh release view "$TAG_NAME" >/dev/null 2>&1 && break
-            gh release create "$TAG_NAME" --target "${{ github.sha }}" --title "$TITLE" --notes "$NOTES" --prerelease 2>/dev/null || true
+            gh release create "$TAG_NAME" --target "${{ github.sha }}" --title "$TITLE" --notes-file "${RUNNER_TEMP:-/tmp}/ga_notes.md" --prerelease 2>/dev/null || true
             sleep 3
           done
           gh release upload "$TAG_NAME" artifacts/windows/out/* --clobber
@@ -403,7 +402,7 @@ jobs:
           set -euo pipefail
           TAG_NAME="${{ github.ref_name }}"
           TITLE="GenericAgent Desktop Portable ${TAG_NAME}"
-          NOTES=$(cat <<'EOF'
+          cat > "${RUNNER_TEMP:-/tmp}/ga_notes.md" <<'EOF'
           GenericAgent Desktop 便携版（自包含） / Portable (self-contained)
 
           下载对应平台的包，解压即可运行——无需装 Python、无需联网装依赖、无需源码。
@@ -423,13 +422,12 @@ jobs:
           - 便携包可整体移动到任意目录后继续使用。The whole folder can be moved anywhere and still works.
           - 各包内附「安装使用说明_Install_Guide.txt」（中英）。Each package ships a bilingual install guide.
           EOF
-          )
           # Race-safe: the 3 OS jobs share ONE release. Retry create until the release
           # actually exists (a simultaneous create from another job can fail), so the
           # upload below never races a not-yet-created release.
           for _ in $(seq 1 15); do
             gh release view "$TAG_NAME" >/dev/null 2>&1 && break
-            gh release create "$TAG_NAME" --target "${{ github.sha }}" --title "$TITLE" --notes "$NOTES" --prerelease 2>/dev/null || true
+            gh release create "$TAG_NAME" --target "${{ github.sha }}" --title "$TITLE" --notes-file "${RUNNER_TEMP:-/tmp}/ga_notes.md" --prerelease 2>/dev/null || true
             sleep 3
           done
           gh release upload "$TAG_NAME" artifacts/linux/out/* --clobber
@@ -625,7 +623,7 @@ jobs:
           set -euo pipefail
           TAG_NAME="${{ github.ref_name }}"
           TITLE="GenericAgent Desktop Portable ${TAG_NAME}"
-          NOTES=$(cat <<'EOF'
+          cat > "${RUNNER_TEMP:-/tmp}/ga_notes.md" <<'EOF'
           GenericAgent Desktop 便携版（自包含） / Portable (self-contained)
 
           下载对应平台的包，解压即可运行——无需装 Python、无需联网装依赖、无需源码。
@@ -645,13 +643,12 @@ jobs:
           - 便携包可整体移动到任意目录后继续使用。The whole folder can be moved anywhere and still works.
           - 各包内附「安装使用说明_Install_Guide.txt」（中英）。Each package ships a bilingual install guide.
           EOF
-          )
           # Race-safe: the 3 OS jobs share ONE release. Retry create until the release
           # actually exists (a simultaneous create from another job can fail), so the
           # upload below never races a not-yet-created release.
           for _ in $(seq 1 15); do
             gh release view "$TAG_NAME" >/dev/null 2>&1 && break
-            gh release create "$TAG_NAME" --target "${{ github.sha }}" --title "$TITLE" --notes "$NOTES" --prerelease 2>/dev/null || true
+            gh release create "$TAG_NAME" --target "${{ github.sha }}" --title "$TITLE" --notes-file "${RUNNER_TEMP:-/tmp}/ga_notes.md" --prerelease 2>/dev/null || true
             sleep 3
           done
           gh release upload "$TAG_NAME" artifacts/macos/out/* --clobber
