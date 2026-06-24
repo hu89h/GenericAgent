@@ -99,6 +99,9 @@ class Session:
     plan_scan_baseline: int = 0
     plan_path: str = ""
     llm_history: Optional[List[dict]] = None
+    # 该会话绑定的模型下标(mykey.py 配置块顺序,== agent.llmclients 下标)。
+    # None = 未绑定,发消息时回退到全局默认 ui.llmNo,保持旧会话平滑迁移。
+    llm_no: Optional[int] = None
 
 
 def _load_plan_baseline(item: dict, msgs: list) -> int:
@@ -152,6 +155,7 @@ class AgentManager:
                                 "pinned": s.pinned, "untitled": s.untitled,
                                 "plan_scan_baseline": s.plan_scan_baseline,
                                 "plan_path": s.plan_path or "",
+                                "llm_no": s.llm_no,
                                 "llm_history": llm_hist})
             self._sessions_file.write_text(json.dumps(arr, ensure_ascii=False, default=str), encoding="utf-8")
         except Exception as e:
@@ -176,7 +180,8 @@ class AgentManager:
                                plan_path=_sanitize_desktop_plan_path(
                                    item["id"], item.get("plan_path") or ""),
                                status="idle", agent=None,
-                               llm_history=item.get("llm_history"))
+                               llm_history=item.get("llm_history"),
+                               llm_no=item.get("llm_no"))
                 self.sessions[sess.id] = sess
             if self.sessions:
                 self.active_session_id = max(self.sessions.values(), key=lambda s: s.updated_at).id
@@ -498,18 +503,20 @@ class AgentManager:
 
     @staticmethod
     def _live_model(sess: Session) -> Optional[dict]:
-        """该会话 agent 当前真正在用的模型（渠道组会随故障转移变化）。
-        agent 还没建（没跑过 turn）时返回 None，前端回退到静态显示。"""
+        """该会话 agent 当前真正在用的模型(渠道组会随故障转移变化)。
+        agent 还没建(没跑过 turn)时返回静态绑定信息,前端据 llmNo 回显选择器。
+        llmNo: agent 存活取 agent.llm_no(权威运行态),否则取 sess.llm_no(可能 None)。"""
         ag = getattr(sess, "agent", None)
         if ag is None:
-            return None
+            return {"current": None, "isMixin": False, "llmNo": sess.llm_no}
         try:
             back = ag.llmclient.backend
+            live_no = getattr(ag, "llm_no", sess.llm_no)
             if "Mixin" in type(back).__name__:
-                return {"current": back.current_name, "isMixin": True}
-            return {"current": back.name, "isMixin": False}
+                return {"current": back.current_name, "isMixin": True, "llmNo": live_no}
+            return {"current": back.name, "isMixin": False, "llmNo": live_no}
         except Exception:
-            return None
+            return {"current": None, "isMixin": False, "llmNo": sess.llm_no}
 
     def snapshot(self, sess: Session, include_messages: bool = True) -> dict:
         out = {
@@ -544,7 +551,7 @@ class AgentManager:
 
     def create_session(self, cwd: Optional[str] = None) -> Session:
         sid = "sess-" + uuid.uuid4().hex[:12]
-        sess = Session(id=sid, cwd=str(cwd or self.ga_root))
+        sess = Session(id=sid, cwd=str(cwd or self.ga_root), llm_no=_global_default_llm_no())
         with self.lock:
             self.sessions[sid] = sess
             self.active_session_id = sid
@@ -576,14 +583,15 @@ class AgentManager:
 
     def submit_prompt(self, sid: str, prompt: Any, images: Optional[list] = None, llm_no: Optional[int] = None, display: Optional[str] = None, files_meta: Optional[list] = None, image_metas: Optional[list] = None) -> dict:
         prompt, image_ids = normalize_prompt(prompt, images)
-        if llm_no is not None:
-            self.config["llmNo"] = int(llm_no)
         with self.lock:
             sess = self.sessions.get(sid)
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             if sess.status == "running":
                 raise web.HTTPConflict(text=json.dumps({"error": "session is already running"}, ensure_ascii=False), content_type="application/json")
+            # 模型绑定到会话(权威),不再写全局 config。前端带来的 llm_no 视为本会话的选择。
+            if llm_no is not None:
+                sess.llm_no = int(llm_no)
             extra = {}
             if image_ids:
                 extra["image_ids"] = image_ids
@@ -615,7 +623,10 @@ class AgentManager:
             if sess.agent is None:
                 sess.agent = self.make_agent(sess)
             agent = sess.agent
-            no = self.config.get("llmNo") if llm_no is None else llm_no
+            # 生效优先级:本次显式 llm_no > 会话绑定 sess.llm_no > 全局默认。
+            no = llm_no if llm_no is not None else sess.llm_no
+            if no is None:
+                no = _global_default_llm_no()
             if no is not None and hasattr(agent, "next_llm"):
                 with contextlib.suppress(Exception):
                     agent.next_llm(int(no))
@@ -772,6 +783,11 @@ class AgentManager:
             if sess.agent is not None:
                 return {"ok": True, "sessionId": sid, "restored": False, "reason": "agent already alive"}
         agent = self.make_agent(sess)
+        # 恢复 agent 时按会话绑定 seed 模型(未绑定则全局默认),保持显示/使用一致。
+        no = sess.llm_no if sess.llm_no is not None else _global_default_llm_no()
+        if no is not None and hasattr(agent, "next_llm"):
+            with contextlib.suppress(Exception):
+                agent.next_llm(int(no))
         if sess.llm_history:
             try:
                 agent.llmclient.backend.history = sess.llm_history
@@ -795,6 +811,21 @@ class AgentManager:
             sess.agent = agent
             sess.status = "idle"
         return {"ok": True, "sessionId": sid, "restored": True, "messageCount": len(sess.llm_history or sess.messages)}
+
+    def set_session_model(self, sid: str, llm_no: int) -> dict:
+        """前端申请切换某会话的模型(唯一入口)。写 sess.llm_no(权威)并持久化;
+        agent 存活时立即 next_llm 让运行态跟上。返回该会话的运行态模型快照。"""
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
+            sess.llm_no = int(llm_no)
+            if sess.agent is not None and hasattr(sess.agent, "next_llm"):
+                with contextlib.suppress(Exception):
+                    sess.agent.next_llm(int(llm_no))
+            sess.updated_at = time.time()
+        self._persist()
+        return {"ok": True, "sessionId": sid, "llmNo": sess.llm_no, "model": self._live_model(sess)}
 
 
 import base64
@@ -1231,6 +1262,16 @@ def _desktop_ui() -> dict:
         return {}
 
 
+def _global_default_llm_no() -> int:
+    """全局默认模型下标。会话未绑定(sess.llm_no is None)时回退到它;conductor 也读
+    同一个键(~/.ga_desktop_settings.json -> ui.llmNo)。缺省为 0。"""
+    no = _desktop_ui().get("llmNo")
+    try:
+        return int(no) if no is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 async def get_config_handler(request):
     profiles = manager.list_model_profiles()
     active = next((p["id"] for p in profiles if p.get("active")), manager.config.get("llmNo", 0))
@@ -1379,6 +1420,18 @@ async def cancel_handler(request):
 async def restore_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.restore_context(sid))
+
+
+async def session_model_handler(request):
+    sid = request.match_info["sid"]
+    data = await read_json(request)
+    no = data.get("llmNo", data.get("llm_no"))
+    if no is None:
+        return json_ok({"ok": False, "error": "missing llmNo"}, status=400)
+    try:
+        return json_ok(manager.set_session_model(sid, int(no)))
+    except (TypeError, ValueError):
+        return json_ok({"ok": False, "error": "invalid llmNo"}, status=400)
 
 
 async def plan_handler(request):
@@ -1776,6 +1829,7 @@ def create_app():
     app.router.add_get("/session/{sid}/plan", plan_handler)
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
     app.router.add_post("/session/{sid}/restore", restore_handler)
+    app.router.add_post("/session/{sid}/model", session_model_handler)
     app.router.add_post("/path/open", path_open_handler)
     app.router.add_post("/upload", upload_handler)
     app.router.add_delete("/upload", upload_delete_handler)

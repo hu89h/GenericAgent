@@ -651,7 +651,7 @@ const I18N = {
   },
 };
 const LANGS = ['zh', 'en'];
-const STORE = { lang: 'ga_lang', theme: 'ga_theme', appearance: 'ga_appearance', plain: 'ga_plain', fontSize: 'ga_font_size', llmNo: 'ga_llm_no' };
+const STORE = { lang: 'ga_lang', theme: 'ga_theme', appearance: 'ga_appearance', plain: 'ga_plain', fontSize: 'ga_font_size' };
 const APPEARANCE_IDS = ['light', 'dark'];
 const CHAT_FONT_MIN = 10;
 const CHAT_FONT_MAX = 20;
@@ -694,7 +694,6 @@ function syncBootCache() {
   localStorage.setItem(STORE.fontSize, String(chatFontSize));
   if (plainUi) localStorage.setItem(STORE.plain, '1');
   else localStorage.removeItem(STORE.plain);
-  localStorage.setItem(STORE.llmNo, String(state.llmNo));
 }
 async function persistUiPrefs() {
   try {
@@ -1756,7 +1755,8 @@ async function loadSessions() {
       state.sessions.set(s.id, {
         id: s.id, bridgeSessionId: s.id, title: s.title,
         messages: [], untitled: s.untitled ?? true,
-        pinned: s.pinned ?? false, lastActiveTs: s.updatedAt || s.createdAt
+        pinned: s.pinned ?? false, lastActiveTs: s.updatedAt || s.createdAt,
+        llmNo: s.model && s.model.llmNo != null ? s.model.llmNo : null
       });
     }
     // 刷新后固定恢复「上次正在看的会话」（前端持久化的 ga_active），而不是 bridge 的
@@ -2860,6 +2860,15 @@ function setActiveSession(id) {
   if (id) localStorage.setItem('ga_active', id);  // 持久化当前会话，刷新后固定恢复它
   const sess = state.sessions.get(id);
   if (!sess) return;
+  // 切会话:回显该会话绑定的模型(后端权威)。未绑定(null)则保持当前全局默认显示。
+  if (sess.llmNo != null && sess.llmNo !== state.llmNo) {
+    state.llmNo = sess.llmNo;
+    state.liveModel = null;
+    const p = (state.modelProfiles || []).find(x => (x.id ?? 0) === sess.llmNo);
+    if (p) state.modelName = modelDisplayName(p);
+    updateModelChip();
+    renderSettingsModels();
+  }
   if (msgsEl) msgsEl.innerHTML = '';
   const r = rt(sess);
   r.draftEl = null;
@@ -3107,13 +3116,32 @@ function applyPollResult(sess, result) {
   return busy;
 }
 
-/** 渠道组随故障转移变化时，用运行态当前子模型刷新 chip（非渠道组/无 agent 时不动，保持静态显示） */
+/** 用后端运行态模型刷新 chip + 选择器。后端是权威:
+ *  - 同步该会话绑定的 llmNo(live.llmNo)到 sess/state，切回会话能正确回显；
+ *  - mixin: 显示「渠道组（当前子模型）」，跟随故障转移；
+ *  - native: 显示后端真正在用的模型名(live.current)，而非前端静态选择。 */
 function applyLiveModel(live, sess = activeSess()) {
+  if (!live) return;
+  // 回写该会话绑定的模型下标(权威来自后端)。
+  if (live.llmNo != null && sess) sess.llmNo = live.llmNo;
+  if (isActive(sess) && live.llmNo != null && state.llmNo !== live.llmNo) {
+    state.llmNo = live.llmNo;
+    renderSettingsModels();
+  }
   const selected = (state.modelProfiles || []).find(p => (p.id ?? 0) === state.llmNo);
-  if (!selected || selected.kind !== 'mixin' || !live || !live.isMixin || !live.current) return;
-  state.liveModel = { ...live, sessionId: sess?.id || state.activeId };
-  const label = `${t('model.aggregationShort')}${lang === 'en' ? ' (' : '（'}${profileLabel(live.current) || live.current}${lang === 'en' ? ')' : '）'}`;
-  if (state.modelName !== label) { state.modelName = label; updateModelChip(); }
+  if (!isActive(sess)) return;
+  if (selected && selected.kind === 'mixin') {
+    if (!live.isMixin || !live.current) return;
+    state.liveModel = { ...live, sessionId: sess?.id || state.activeId };
+    const label = `${t('model.aggregationShort')}${lang === 'en' ? ' (' : '（'}${profileLabel(live.current) || live.current}${lang === 'en' ? ')' : '）'}`;
+    if (state.modelName !== label) { state.modelName = label; updateModelChip(); }
+    return;
+  }
+  // native: chip 跟随后端实际模型名(没拿到运行态时回退到选中 profile 的静态名)
+  state.liveModel = null;
+  const label = (live.current ? (profileLabel(live.current) || live.current) : null)
+    || (selected ? modelDisplayName(selected) : null);
+  if (label && state.modelName !== label) { state.modelName = label; updateModelChip(); }
 }
 
 /** hydrate 批量灌历史，避免逐条 appendMessage 触发全量重绘 */
@@ -3487,7 +3515,16 @@ async function selectModel(id, name) {
   state.modelName = modelDisplayName(p, name);
   updateModelChip();
   renderSettingsModels();
-  await persistUiPrefs();
+  // 申请切换:有活跃会话 -> 绑定到该会话(后端权威);同时更新全局默认(供 conductor /
+  // 新建会话初始值)。后端是真相源,前端只发请求。
+  const sess = activeSess();
+  if (sess) sess.llmNo = id;
+  if (sess && sess.bridgeSessionId) {
+    try {
+      await bridgeFetch(`/session/${encodeURIComponent(sess.bridgeSessionId)}/model`, { method: 'POST', body: { llmNo: id } });
+    } catch (_) {}
+  }
+  await persistUiPrefs();  // 写 ui.llmNo 全局默认
 }
 async function addToMixin(id) {
   try {
