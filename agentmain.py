@@ -202,6 +202,7 @@ if __name__ == '__main__':
     parser.add_argument('--llm_no', type=int, default=0)
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--nobg', action='store_true')
+    parser.add_argument('--nolog', action='store_true')
     args, _unknown = parser.parse_known_args()
     _reflect_args = dict(zip([k.lstrip('-') for k in _unknown[::2]], _unknown[1::2])) if _unknown else {}
 
@@ -219,6 +220,7 @@ if __name__ == '__main__':
         print('PID:', p.pid); sys.exit(0)
 
     agent = GeneraticAgent()
+    if args.nolog: agent.log_path = False
     agent.next_llm(args.llm_no)
     agent.verbose = args.verbose
     threading.Thread(target=agent.run, daemon=True).start()
