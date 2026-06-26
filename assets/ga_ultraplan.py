@@ -125,7 +125,7 @@ def parallel(tasks, max_workers=None, _label=None, **data):
     tasks = list(tasks); label = _label or f"parallel: {len(tasks)} tasks"
     with _lock: _current = label
     _op(label); _note(label)
-    with ThreadPoolExecutor(max_workers=max_workers or len(tasks) or 1) as ex:
+    with ThreadPoolExecutor(max_workers=max_workers or min(3, len(tasks) or 1)) as ex:
         return list(ex.map(lambda t: _run(t, data), tasks))
 
 def mapchain(items, *steps, max_workers=None, **data):
