@@ -387,13 +387,13 @@ def _stream_with_retry(sess, url, headers, payload, parse_fn):
                 except StopIteration as e:
                     if not e.value and not streamed: raise requests.ConnectionError("empty response")
                     return e.value or []
-        except (requests.Timeout, requests.ConnectionError) as e:
+        except (requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
             #pathlib.Path(__file__).parent.joinpath('temp','bad_requests.json').write_text(json.dumps({"url":url,"headers":headers,"payload":payload,"err":str(e),"t":time.time()},ensure_ascii=False),encoding='utf-8')
             err = f"!!!Error: {type(e).__name__}: {e}" if str(e) else f"!!!Error: {type(e).__name__}"
             if attempt < sess.max_retries:
                 d = _delay(None, attempt)
                 print(f"[LLM Retry] {type(e).__name__}, retry in {d:.1f}s ({attempt+1}/{sess.max_retries+1})")
-                yield err; time.sleep(d); continue
+                time.sleep(d); continue
             yield err; return [{"type": "text", "text": err}]
         except Exception as e:
             err = f"\n\n[!!! 流异常中断 {type(e).__name__}: {e} !!!]" if streamed else f"!!!Error: {type(e).__name__}: {e}"
