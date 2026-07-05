@@ -436,7 +436,7 @@ const I18N = {
     'plan.header': '计划 ({done}/{total})', 'plan.complete': '✓ 计划完成 ({n}/{n})',
     'plan.running': '计划执行中', 'plan.completeTitle': '计划完成',
     'plan.placeholder': '计划模式已激活', 'plan.waiting': '等待写入 {path} …', 'plan.overflow': '还有 {n} 项',
-    'plan.current': '当前', 'plan.collapse': '收起', 'plan.expand': '展开', 'plan.details': '详情',
+    'plan.current': '当前', 'plan.fold': '折叠', 'plan.collapse': '收起', 'plan.expand': '展开', 'plan.details': '详情',
     'plan.capsuleRunning': '运行中', 'plan.capsuleComplete': '已完成',
     'timing.elapsed': '已运行 {t}',
     'model.auto': '自动选择',
@@ -609,7 +609,7 @@ const I18N = {
     'plan.header': 'Plan ({done}/{total})', 'plan.complete': '✓ Plan complete ({n}/{n})',
     'plan.running': 'Running plan', 'plan.completeTitle': 'Plan complete',
     'plan.placeholder': 'Plan mode activated', 'plan.waiting': 'waiting for {path} …', 'plan.overflow': '+{n} more',
-    'plan.current': 'Now', 'plan.collapse': 'Collapse', 'plan.expand': 'Expand', 'plan.details': 'Details',
+    'plan.current': 'Now', 'plan.fold': 'Fold', 'plan.collapse': 'Collapse', 'plan.expand': 'Expand', 'plan.details': 'Details',
     'plan.capsuleRunning': 'Running', 'plan.capsuleComplete': 'Done',
     'timing.elapsed': 'Elapsed {t}',
     'model.auto': 'Auto',
@@ -2132,7 +2132,7 @@ function refreshPlanBar(plan) {
   collapseBtn.type = 'button';
   collapseBtn.className = 'plan-btn';
   collapseBtn.dataset.planCollapse = '1';
-  collapseBtn.textContent = t('plan.collapse');
+  collapseBtn.textContent = t('plan.fold');
   actions.append(collapseBtn);
   head.append(actions);
   frag.append(head);
