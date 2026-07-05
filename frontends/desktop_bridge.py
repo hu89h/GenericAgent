@@ -113,14 +113,14 @@ def _load_plan_baseline(item: dict, msgs: list) -> int:
 
 
 def _sanitize_desktop_plan_path(session_id: str, plan_path: str) -> str:
-    """Desktop: drop shared plan_demo paths so sessions do not read the same file."""
+    """Keep only real plan-mode paths; never invent a placeholder path on load."""
     import plan_state
     p = (plan_path or "").strip()
     if not p:
         return ""
-    if plan_state.is_session_scoped_plan_path(p, session_id):
-        return p
-    return plan_state.default_session_plan_path(session_id)
+    if plan_state.is_plan_mode_path(p):
+        return p.lstrip("./\\")
+    return ""
 
 
 class AgentManager:
@@ -606,10 +606,6 @@ class AgentManager:
             if image_metas:
                 extra["images"] = image_metas
             user_msg = self.add_message(sess, "user", prompt, **extra)
-            import plan_state
-            if plan_state.is_plan_preset_prompt(prompt):
-                plan_state.bind_plan_session(sess, prompt)
-                self._persist()
             sess.status = "running"
             sess.cancel_requested = False
             sess.last_error = ""

@@ -1788,10 +1788,6 @@ const POLL_MSG_LIMIT = 200;
 const PLAN_LOST_GRACE_MS = 1500;  // tuiapp_v2._PLAN_LOST_GRACE_SEC
 const PLAN_COMPLETE_GRACE_MS = 3000;  // tuiapp_v2._PLAN_GRACE_SEC
 
-function isPlanPresetPrompt(text) {
-  const p = String(text || '').toLowerCase();
-  return p.includes('plan_sop') || p.includes('plan 模式') || p.includes('plan mode');
-}
 let _submitInFlight = false;
 const runToggle  = document.getElementById('run-toggle');
 const chatStatus = pageStatusBar(runToggle);
@@ -3343,16 +3339,6 @@ async function sendPrompt(text) {
   const previewFiles = usedFiles.filter(f => !f.isImage).map(f => ({ id: 'f-' + f.sid, name: f.name, path: f.path }));
   if (previewFiles.length) userMsg.files = previewFiles;
   sess.messages.push(userMsg); appendMessage(sess, userMsg);
-  if (isPlanPresetPrompt(text)) {
-    const pr = rt(sess);
-    pr.planCollapsed = false;
-    pr.planShowAll = false;
-    const sidHint = (sess.bridgeSessionId || sess.id || 'sess').replace(/\//g, '_');
-    applyPlanPayload(sess, {
-      active: true, placeholder: true, done: 0, total: 0, complete: false,
-      step: '', pathHint: `plan_${sidHint}/plan.md`, items: [],
-    });
-  }
   sess.lastActiveTs = Date.now();
   // 仿 TUI:不再从首条消息自动改名 —— 标题在 newSession 时已设为 agent-N,
   // 之后只接受用户手动 rename。
