@@ -875,6 +875,70 @@ fn get_ga_source() -> String {
         .to_string()
 }
 
+/// Recursively copy a directory tree (src into dst, creating dst).
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Push the shell's own (bundled/new) desktop files into an external 本体 so that connecting
+/// to it serves the new frontend + bridge instead of the source's older copies. Backs up the
+/// source's originals first. Only the runtime-relevant files are synced — NOT src-tauri (the
+/// shell runs its own Rust) or build/packaging artifacts.
+fn sync_desktop_files(src_root: &std::path::Path, dst_root: &std::path::Path) -> Result<(), String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = dst_root.join("temp").join(format!("desktop_sync_backup_{}", ts));
+
+    // Individual files: bridge + the local modules it imports.
+    for rel in ["frontends/desktop_bridge.py", "frontends/plan_state.py", "frontends/cost_tracker.py"] {
+        let s = src_root.join(rel);
+        if !s.exists() {
+            continue;
+        }
+        let d = dst_root.join(rel);
+        if d.exists() {
+            let b = backup.join(rel);
+            if let Some(parent) = b.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::copy(&d, &b).map_err(|e| format!("backup {} failed: {}", rel, e))?;
+        }
+        if let Some(parent) = d.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(&s, &d).map_err(|e| format!("copy {} failed: {}", rel, e))?;
+    }
+
+    // The served frontend directory (index.html, app.js, assets, ...).
+    let s_static = src_root.join("frontends").join("desktop").join("static");
+    if s_static.is_dir() {
+        let d_static = dst_root.join("frontends").join("desktop").join("static");
+        if d_static.exists() {
+            let b_static = backup.join("frontends").join("desktop").join("static");
+            copy_dir_all(&d_static, &b_static).map_err(|e| format!("backup static failed: {}", e))?;
+            std::fs::remove_dir_all(&d_static).map_err(|e| format!("clear static failed: {}", e))?;
+        }
+        copy_dir_all(&s_static, &d_static).map_err(|e| format!("copy static failed: {}", e))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn set_ga_source(app_handle: tauri::AppHandle, dir: String) -> Result<String, String> {
     let p = PathBuf::from(&dir);
@@ -883,6 +947,14 @@ fn set_ga_source(app_handle: tauri::AppHandle, dir: String) -> Result<String, St
     }
     if !p.join("frontends").join("desktop_bridge.py").exists() {
         return Err("frontends/desktop_bridge.py not found in the selected directory".into());
+    }
+    // Sync this shell's own (new) desktop files into 本体 so it serves the new UI + bridge.
+    // Skip when the source IS our own code location (dev tree / same dir) — nothing to push.
+    if let Some(self_src) = find_project_dir() {
+        let self_path = PathBuf::from(&self_src);
+        if norm_path(&self_src) != norm_path(&dir) {
+            sync_desktop_files(&self_path, &p)?;
+        }
     }
     merge_settings(serde_json::json!({ "ga_source_override": dir }));
     switch_bridge(&app_handle)
