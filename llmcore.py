@@ -117,6 +117,10 @@ def auto_make_url(base, path):
     return f"{b}/{p}" if re.search(r'/v\d+(/|$)', b) else f"{b}/v1/{p}"
 
 def _parse_claude_json(data):
+    if data.get("stop_reason") == "refusal":
+        err = "[Error: Claude refusal]"
+        yield err
+        return [{"type": "text", "text": err}]
     content_blocks = data.get("content", [])
     _record_usage(data.get("usage", {}), "messages")
     for b in content_blocks:
@@ -182,6 +186,7 @@ def _parse_claude_sse(resp_lines):
     if not warn:
         if not got_message_stop and not stop_reason: warn = "\n\n[!!! 流异常中断，未收到完整响应 !!!]"
         elif stop_reason == "max_tokens": warn = "\n\n[!!! Response truncated: max_tokens !!!]"
+        elif stop_reason == "refusal": warn = "\n\n[Error: Claude refusal]"
     if current_block:
         if current_block["type"] == "tool_use":
             try: current_block["input"] = json.loads(tool_json_buf) if tool_json_buf else {}
@@ -552,6 +557,7 @@ class BaseSession:
         self.service_tier = _enum('service_tier', {'auto', 'default', 'priority', 'flex'})
         self.thinking_type = _enum('thinking_type', {'adaptive', 'enabled', 'disabled'})
         self.thinking_budget_tokens = cfg.get('thinking_budget_tokens')
+        self.omit_thinking = cfg.get('omit_thinking', False)  # Exclude thinking from session history
         mode = str(cfg.get('api_mode', 'chat_completions')).strip().lower().replace('-', '_')
         self.api_mode = 'responses' if mode in ('responses', 'response') else 'chat_completions'
         self.temperature = cfg.get('temperature', 1)
@@ -730,7 +736,9 @@ class NativeClaudeSession(BaseSession):
         except StopIteration as e: content_blocks = e.value or []
         if content_blocks and (_injected := _ensure_text_block(content_blocks)): yield _injected
         if content_blocks and not (len(content_blocks) == 1 and content_blocks[0].get("text", "").startswith("!!!Error:")):
-            self.history.append({"role": "assistant", "content": content_blocks})
+            history_blocks = content_blocks
+            if self.omit_thinking: history_blocks = [b for b in content_blocks if b.get("type") != "thinking"]
+            self.history.append({"role": "assistant", "content": history_blocks})
         text_parts = [b["text"] for b in content_blocks if b.get("type") == "text"]
         content = "\n".join(text_parts).strip()
         tool_calls = [MockToolCall(b["name"], b.get("input", {}), id=b.get("id", "")) for b in content_blocks if b.get("type") == "tool_use"]
@@ -743,7 +751,8 @@ class NativeClaudeSession(BaseSession):
             if think_match:
                 thinking = think_match.group(1).strip()
                 content = re.sub(think_pattern, "", content, flags=re.DOTALL)
-        return MockResponse(thinking, content, tool_calls, str(content_blocks))
+        raw = "[" + ",\n".join(repr(b) for b in content_blocks) + "]"
+        return MockResponse(thinking, content, tool_calls, raw)
 
 class NativeOAISession(NativeClaudeSession):
     native_ua = "codex_exec/0.139.0 (Windows 10.0.26200; x86_64) unknown (codex_exec; 0.139.0)"
@@ -1055,7 +1064,8 @@ class NativeToolClient:
         final_content = tool_result_blocks + filtered_content
         if not final_content: final_content = [{"type": "text", "text": "."}]
         merged = {"role": "user", "content": final_content}
-        _write_llm_log('Prompt', json.dumps(merged, ensure_ascii=False, indent=2), self.log_path)
+        prompt_raw = '{"role": "user", "content": [\n' + ",\n".join(json.dumps(b, ensure_ascii=False) for b in final_content) + "]}"
+        _write_llm_log('Prompt', prompt_raw, self.log_path)
         gen = self.backend.ask(merged)
         try:
             while True: 
