@@ -443,7 +443,7 @@ class GenericAgentHandler(BaseHandler):
             next_prompt += "\n[SYSTEM TIPS] 正在读取记忆或SOP文件，若决定按sop执行请提取sop中的关键点（特别是靠后的）update working memory."
         return StepOutcome(result, next_prompt=next_prompt)
     
-    def export_history(self, fn): 
+    def export_history(self, fn):
         with open(fn, 'w', encoding='utf-8') as f: json.dump(self.parent.llmclient.backend.history, f, ensure_ascii=False)
     def enter_project_mode(self, name): self.parent._ga_project_mode_name = name
     def _in_plan_mode(self): return self.working.get('in_plan_mode')
@@ -480,9 +480,11 @@ class GenericAgentHandler(BaseHandler):
         二次确认仅在回复几乎只包含<thinking>/<summary>和一段大代码块时触发。'''
         content = getattr(response, 'content', '') or ""
         thinking = getattr(response, 'thinking', '') or ""
-        if not response or (not content.strip() and not thinking.strip()):
-            yield "[Warn] LLM returned an empty response. Retrying...\n"
-            return self._retry_or_exit("[System] Blank response, regenerate and tooluse")
+        visible_content = re.sub(r"<thinking>[\s\S]*?</thinking>", "", content, flags=re.IGNORECASE)
+        visible_content = re.sub(r"<summary>[\s\S]*?</summary>", "", visible_content, flags=re.IGNORECASE)
+        if not response or not visible_content.strip():
+            yield "[Warn] LLM returned no user-visible response. Retrying...\n"
+            return self._retry_or_exit("[System] Blank response. Regenerate with a user-visible answer or call a tool.")
         if '[!!! 流异常中断' in content[-100:] or '!!!Error:' in content[-100:]:
             return self._retry_or_exit("[System] Incomplete response. Regenerate and tooluse.")
         if 'max_tokens !!!]' in content[-100:]:
