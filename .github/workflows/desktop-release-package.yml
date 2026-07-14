@@ -149,6 +149,7 @@ jobs:
 
           说明
           - 想真正对话，仍需在程序里配置模型 / API Key。
+          - 如果 Windows Defender 防火墙拦截 `127.0.0.1` / `localhost` 回环连接，程序可能无法启动或连接本机服务。请允许 `GenericAgent.exe` 和 `runtime\python\python.exe` 通过防火墙，然后重启桌面端。
           - 首次准备完成后不要移动本文件夹；若已移动，删除 runtime\app\.venv 后重新启动即可重建。
           - runtime\ 是内置运行环境与源码，正常使用无需改动。
 
@@ -170,6 +171,7 @@ jobs:
 
           Notes
           - To actually chat, configure a model / API key inside the app.
+          - If Windows Defender Firewall blocks the `127.0.0.1` / `localhost` loopback connection, the app may fail to start or reach its local service. Allow `GenericAgent.exe` and `runtime\python\python.exe` through the firewall, then restart the desktop app.
           - Do not move this folder after the first setup; if you did, delete runtime\app\.venv and relaunch to rebuild.
           - runtime\ holds the bundled runtime and source; no need to touch it.
           EOF
@@ -227,6 +229,7 @@ jobs:
 
           ## 说明 / Notes
           - 想真正对话需在程序内配置模型 / API Key。Configure a model / API key in-app to start chatting.
+          - Windows Defender 防火墙可能会拦截 `127.0.0.1` / `localhost` 回环连接，导致程序无法启动或连接本机服务；请允许 `GenericAgent.exe` 和随包的 `python.exe` 通过防火墙后重启。Windows Defender Firewall may block the local loopback connection; allow `GenericAgent.exe` and the bundled `python.exe` through the firewall, then restart the app.
           - Windows/Linux 为便携包，可整体移动到任意目录后继续使用。Windows/Linux packages are portable and can be moved as a whole folder.
           - Windows/Linux 包内附 `readme.txt`（中英）。Windows/Linux packages include a bilingual `readme.txt`.
           EOF
@@ -439,6 +442,7 @@ jobs:
 
           ## 说明 / Notes
           - 想真正对话需在程序内配置模型 / API Key。Configure a model / API key in-app to start chatting.
+          - Windows Defender 防火墙可能会拦截 `127.0.0.1` / `localhost` 回环连接，导致程序无法启动或连接本机服务；请允许 `GenericAgent.exe` 和随包的 `python.exe` 通过防火墙后重启。Windows Defender Firewall may block the local loopback connection; allow `GenericAgent.exe` and the bundled `python.exe` through the firewall, then restart the app.
           - Windows/Linux 为便携包，可整体移动到任意目录后继续使用。Windows/Linux packages are portable and can be moved as a whole folder.
           - Windows/Linux 包内附 `readme.txt`（中英）。Windows/Linux packages include a bilingual `readme.txt`.
           EOF
@@ -702,6 +706,7 @@ jobs:
 
           ## 说明 / Notes
           - 想真正对话需在程序内配置模型 / API Key。Configure a model / API key in-app to start chatting.
+          - Windows Defender 防火墙可能会拦截 `127.0.0.1` / `localhost` 回环连接，导致程序无法启动或连接本机服务；请允许 `GenericAgent.exe` 和随包的 `python.exe` 通过防火墙后重启。Windows Defender Firewall may block the local loopback connection; allow `GenericAgent.exe` and the bundled `python.exe` through the firewall, then restart the app.
           - Windows/Linux 为便携包，可整体移动到任意目录后继续使用。Windows/Linux packages are portable and can be moved as a whole folder.
           - Windows/Linux 包内附 `readme.txt`（中英）。Windows/Linux packages include a bilingual `readme.txt`.
           EOF
