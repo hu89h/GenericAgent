@@ -21,12 +21,9 @@ import os
 import re
 import sys
 import json
-import time
-import socket
 import math
 import hashlib
 import shutil
-import traceback
 import threading
 import urllib.request
 import urllib.error
@@ -34,7 +31,6 @@ import urllib.error
 try:
     from .documents import (
         chunk_document_records,
-        chunk_document_text,
         chunking_meta as _chunking_meta,
         extract_text,
         fingerprint as _fingerprint,
@@ -44,7 +40,6 @@ try:
 except ImportError:  # pragma: no cover - supports direct CLI execution
     from documents import (
         chunk_document_records,
-        chunk_document_text,
         chunking_meta as _chunking_meta,
         extract_text,
         fingerprint as _fingerprint,
@@ -69,6 +64,7 @@ try:
 
     from .usage import UsageTracker as _UsageTracker
     from .assets import ImageAssetProcessor as _ImageAssetProcessor
+    from .build import BuildCoordinator as _BuildCoordinator, BuildServices as _BuildServices
     from .retrieval import KnowledgeBaseRetriever as _KnowledgeBaseRetriever
     from .zvec import ZvecIndex as _ZvecIndex
 except ImportError:  # pragma: no cover - supports direct CLI execution
@@ -88,6 +84,7 @@ except ImportError:  # pragma: no cover - supports direct CLI execution
 
     from usage import UsageTracker as _UsageTracker
     from assets import ImageAssetProcessor as _ImageAssetProcessor
+    from build import BuildCoordinator as _BuildCoordinator, BuildServices as _BuildServices
     from retrieval import KnowledgeBaseRetriever as _KnowledgeBaseRetriever
     from zvec import ZvecIndex as _ZvecIndex
 
@@ -110,9 +107,31 @@ IMAGE_ANALYSIS_CONCURRENCY = max(1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY"
 
 _local = threading.local()
 _build_lock = threading.Lock()
+_build_state_lock = threading.Lock()
 _LOCK_PORT = 45764                  # 跨进程单飞锁端口（与 indexer 45763 / scheduler 45762 错开）
 # 构建态：供前端/服务端查询进度
-build_state = {"running": False, "result": None, "started_at": None, "kb": None}
+build_state = {
+    "running": False,
+    "result": None,
+    "last_build_summary": None,
+    "started_at": None,
+    "finished_at": None,
+    "kb": None,
+    "phase": "idle",
+    "message": "",
+    "processed": 0,
+    "total": 0,
+}
+
+
+def _update_build_state(**changes):
+    with _build_state_lock:
+        build_state.update(changes)
+
+
+def _build_state_snapshot():
+    with _build_state_lock:
+        return dict(build_state)
 
 
 def clear_last_hits():
@@ -355,6 +374,20 @@ def _calculate_build_cost(usage):
     return _usage_tracker().calculate_cost(usage)
 
 
+def _build_usage_summary(usage):
+    return {
+        "image_calls": usage.get("image_analysis", {}).get("calls", 0),
+        "image_cached": usage.get("image_analysis", {}).get("cached", 0),
+        "image_models": usage.get("image_analysis", {}).get("models", {}),
+        "image_cached_models": usage.get("image_analysis", {}).get("cached_models", {}),
+        "embedding_calls": usage.get("embedding", {}).get("calls", 0),
+        "embedding_estimated_input_tokens": usage.get("embedding", {}).get("estimated_input_tokens", 0),
+        "sparse_embedding_calls": usage.get("sparse_embedding", {}).get("calls", 0),
+        "sparse_embedding_estimated_input_tokens": usage.get("sparse_embedding", {}).get("estimated_input_tokens", 0),
+        "cost": _calculate_build_cost(usage),
+    }
+
+
 # ───────────────────────────── 图片资产 ─────────────────────────────
 
 def _truthy_env(name, default="0"):
@@ -466,206 +499,72 @@ def _analyze_image_jobs(kb, image_jobs, log):
 
 # ───────────────────────────── 构建 ─────────────────────────────
 
-def _records(kb, scanned, log, include_text=True, include_images=True):
-    """生成 indexer.build_index 所需的记录流。"""
-    kb_id = kb["id"]
-    n_files = len(scanned)
-    n_ok = n_empty = 0
-    image_assets = []
-    parent_chunks = []
-    records = []
-    image_jobs = {}
-    image_count = 0
-    for i, (rel, ap, _mt, _sz) in enumerate(scanned, 1):
-        ext = os.path.splitext(rel)[1].lower().lstrip(".")
-        top = rel.split("/")[0] if "/" in rel else ""
-        data_id = f"{kb_id}::{rel}"
-        title = os.path.basename(rel)
-        try:
-            text = extract_text(ap)
-        except Exception as e:
-            log(f"  [warn] 抽取失败 {rel}: {e}")
-            text = ""
-        related_index = _build_image_related_index(text) if include_images else {}
-        try:
-            chunk_records = chunk_document_records(text, ext=ext, file_name=rel)
-        except Exception as e:
-            log(f"  [warn] Markdown 分块失败 {rel}: {e}")
-            chunk_records = []
-        text_chunk_records = [c for c in chunk_records if c.get("chunk_role") != "parent"]
-        for c in chunk_records:
-            if c.get("chunk_role") == "parent":
-                parent_chunks.append({
-                    "data_id": data_id,
-                    "parent_chunk_index": int(c.get("parent_chunk_index", -1)),
-                    "title": title,
-                    "file_name": rel,
-                    "header_path": c.get("header_path", ""),
-                    "body": c.get("body", ""),
-                })
-        if not text_chunk_records:
-            n_empty += 1
-        else:
-            n_ok += 1
-        for ci, chunk in enumerate(text_chunk_records):
-            body = chunk.get("body", "")
-            rec = {
-                "data_id": data_id,
-                "_chunk_index": ci,
-                "title": title,
-                "file_name": rel,
-                "source_type": kb_id,
-                "country": top,           # 复用列存顶层目录，便于分类统计
-                "format": ext,
-                "source_file": kb_id,
-                "kind": "text",
-                "image_path": "",
-                "parent_data_id": "",
-                "parent_chunk_index": int(chunk.get("parent_chunk_index", -1)),
-                "header_path": chunk.get("header_path", ""),
-                "chunk_role": chunk.get("chunk_role", "leaf"),
-                "raw_chunk": body,
-            }
-            if include_text:
-                records.append(rec)
-            if include_images:
-                imgs = _image_records_for_chunk(
-                    kb, rel, ap, data_id, ci, body, title, top, ext, log,
-                    image_jobs=image_jobs,
-                    related_index=related_index,
-                )
-                for img_rec in imgs:
-                    image_assets.append(img_rec)
-                    image_count += 1
-                    records.append(img_rec)
-        if i % 100 == 0 or i == n_files:
-            log(f"  进度 {i}/{n_files} 文件（有效 {n_ok}，空 {n_empty}）...")
-    image_results = _analyze_image_jobs(kb, image_jobs, log) if include_images else {}
-    if image_results:
-        for rec in records:
-            if rec.get("kind") == "image":
-                _apply_image_analysis(rec, image_results.get(rec.get("image_id")))
-    stored_assets = [
-        {k: v for k, v in rec.items() if not k.startswith("_") and k != "raw_chunk"}
-        for rec in records if rec.get("kind") == "image"
-    ]
-    _write_image_assets(kb["path"], stored_assets)
-    _write_parent_chunks(kb["path"], parent_chunks)
-    log(f"  抽取完成：{n_files} 文件，有效 {n_ok}，无正文 {n_empty}，图片资产 {image_count}")
-    for rec in records:
-        yield rec
+_build_coordinator_instance = None
+
+
+def _build_coordinator():
+    global _build_coordinator_instance
+    if _build_coordinator_instance is None:
+        _build_coordinator_instance = _BuildCoordinator(
+            _BuildServices(
+                scan_documents=_scan,
+                extract_text=extract_text,
+                chunk_document_records=chunk_document_records,
+                build_sources=_build_sources,
+                write_parent_chunks=_write_parent_chunks,
+                build_image_related_index=_build_image_related_index,
+                image_records_for_chunk=_image_records_for_chunk,
+                analyze_image_jobs=_analyze_image_jobs,
+                apply_image_analysis=_apply_image_analysis,
+                write_image_assets=_write_image_assets,
+                load_image_assets=_load_image_assets,
+                zvec_path=_zvec_path,
+                require_zvec=_require_zvec,
+                zvec_meta=_zvec_meta,
+                zvec_is_quickly_fresh=_zvec_is_quickly_fresh,
+                build_zvec_index=_build_zvec_index,
+                append_zvec_image_index=_append_zvec_image_index,
+                set_usage=_set_usage,
+                empty_usage=_empty_usage,
+                usage=_usage,
+                write_build_usage=_write_build_usage,
+                build_usage_summary=_build_usage_summary,
+                update_build_state=_update_build_state,
+                load_config=load_config,
+            ),
+            lock_port=_LOCK_PORT,
+            build_lock=_build_lock,
+        )
+    return _build_coordinator_instance
+
+
+def _records(kb, scanned, log, include_text=True, include_images=True, progressfn=None):
+    return _build_coordinator().records(
+        kb,
+        scanned,
+        log,
+        include_text=include_text,
+        include_images=include_images,
+        progressfn=progressfn,
+    )
 
 
 def build_kb(kb, force=False, verbose=True, logfn=None, mode="full"):
-    """构建单个知识库索引。返回 (status, stats)。"""
-    def log(m):
-        if logfn:
-            logfn(m)
-        elif verbose:
-            print(f"[kb:{kb['id']}] {m}", flush=True)
-
-    if not kb.get("exists"):
-        log(f"路径不存在，跳过：{kb['path']}")
-        return ("missing", {"error": f"path not found: {kb['path']}"})
-
-    scanned = _scan(kb["path"])
-    if not scanned:
-        log("未发现可索引文档")
-        return ("empty", {"n_docs": 0, "n_chunks": 0})
-    mode = mode if mode in ("full", "text", "images") else "full"
-    _set_usage(_empty_usage(kb["id"], kb["path"]))
-    sources = _build_sources(kb["path"], scanned, mode="text" if mode == "text" else "full")
-    mode_label = {"full": "完整", "text": "文本", "images": "图片资产"}[mode]
-    try:
-        _require_zvec()
-    except Exception as exc:
-        log(f"Zvec 不可用，无法建立索引：{exc}")
-        return ("unavailable", {"error": str(exc), "index_backend": "zvec"})
-    log(f"发现 {len(scanned)} 个文档，开始建立 {mode_label} Zvec 索引 → "
-        f"{_zvec_path(kb['path'])}")
-    records = _records(
-        kb, scanned, log,
-        include_text=mode in ("full", "text"),
-        include_images=mode in ("full", "images"),
+    """Compatibility facade for the build coordinator."""
+    return _build_coordinator().build_kb(
+        kb, force=force, verbose=verbose, logfn=logfn, mode=mode
     )
-    if mode == "images":
-        z_status, z_stats = _append_zvec_image_index(kb, records, sources, force=force, logfn=log)
-    else:
-        z_status, z_stats = _build_zvec_index(kb, records, sources, force=force, logfn=log)
-    n_images = len(_load_image_assets(kb["path"]))
-    stats = dict(z_stats or {})
-    stats["zvec"] = z_stats or {}
-    stats["index_backend"] = "zvec"
-    stats["zvec_status"] = z_status
-    done = "已最新" if z_status == "up-to-date" else "完成"
-    stats["image_assets"] = n_images
-    log(f"索引{done}：{stats.get('n_docs', 0)} 文档 / "
-        f"{stats.get('n_chunks', 0)} chunk / 图片 {n_images} / zvec={z_status}")
-    if z_status == "unavailable":
-        log(f"  [error] zvec 不可用：{z_stats.get('error')}")
-    usage = _usage()
-    usage["stats"] = {"n_docs": stats.get("n_docs", 0), "n_chunks": stats.get("n_chunks", 0), "image_assets": n_images}
-    _write_build_usage(kb["path"], usage)
-    stats["usage"] = {
-        "image_calls": usage.get("image_analysis", {}).get("calls", 0),
-        "image_cached": usage.get("image_analysis", {}).get("cached", 0),
-        "image_models": usage.get("image_analysis", {}).get("models", {}),
-        "image_cached_models": usage.get("image_analysis", {}).get("cached_models", {}),
-        "embedding_calls": usage.get("embedding", {}).get("calls", 0),
-        "embedding_estimated_input_tokens": usage.get("embedding", {}).get("estimated_input_tokens", 0),
-        "sparse_embedding_calls": usage.get("sparse_embedding", {}).get("calls", 0),
-        "sparse_embedding_estimated_input_tokens": usage.get("sparse_embedding", {}).get("estimated_input_tokens", 0),
-        "cost": _calculate_build_cost(usage),
-    }
-    return (z_status if z_status in ("built", "up-to-date") else "unavailable", stats)
+
+
+def _build_summary(results):
+    return _BuildCoordinator.build_summary(results)
 
 
 def build_all(force=False, verbose=True, logfn=None, kb_id=None, mode="full"):
-    """构建配置的知识库（进程内 + 跨进程单飞锁）。返回 {kb_id: (status, stats)}。"""
-    if not _build_lock.acquire(blocking=False):
-        return {"_": ("locked", {})}
-    proc_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        proc_lock.bind(("127.0.0.1", _LOCK_PORT))   # 已有其它进程在构建则跳过
-    except OSError:
-        proc_lock.close()
-        _build_lock.release()
-        if logfn:
-            logfn("[build] 已有其它进程在构建索引，跳过本次。")
-        return {"_": ("locked", {})}
-    build_state.update(running=True, result=None, started_at=int(time.time()), kb=None)
-    results = {}
-    try:
-        for kb in load_config():
-            if kb_id and kb["id"] != kb_id:
-                continue
-            build_state["kb"] = kb["id"]
-            try:
-                kb_log = None
-                if callable(logfn):
-                    kb_log = lambda message, current_kb=kb["id"]: logfn(f"[kb:{current_kb}] {message}")
-                results[kb["id"]] = build_kb(kb, force=force, verbose=verbose, logfn=kb_log, mode=mode)
-            except Exception as e:
-                results[kb["id"]] = ("error", {"error": str(e)})
-                lines = [f"[kb:{kb['id']}] 构建异常: {type(e).__name__}: {e}", traceback.format_exc()]
-                if logfn:
-                    for line in lines:
-                        logfn(line)
-                elif verbose:
-                    for line in lines:
-                        print(line, flush=True)
-        build_state["result"] = {k: v[0] for k, v in results.items()}
-        if kb_id and not results:
-            results[kb_id] = ("missing", {"error": f"unknown kb_id: {kb_id}"})
-            build_state["result"] = {kb_id: "missing"}
-    finally:
-        build_state.update(running=False, kb=None)
-        try:
-            proc_lock.close()
-        except Exception:
-            pass
-        _build_lock.release()
-    return results
+    """Compatibility facade for building configured knowledge bases."""
+    return _build_coordinator().build_all(
+        force=force, verbose=verbose, logfn=logfn, kb_id=kb_id, mode=mode
+    )
 
 
 # ───────────────────────────── 检索 ─────────────────────────────
@@ -686,6 +585,8 @@ def _zvec_store():
             sparse_embedding_fn=_embed_sparse_texts,
             embedding_meta_fn=_embedding_meta,
             sparse_embedding_meta_fn=_sparse_embedding_meta,
+            chunking_meta_fn=_chunking_meta,
+            image_analysis_meta_fn=_image_analysis_meta,
             usage_fn=_usage,
             load_assets_fn=_load_image_assets,
             document_fingerprint_fn=_fingerprint,
@@ -759,8 +660,8 @@ def _zvec_is_fresh(kb_path, sources, required_kinds=None):
     return _zvec_store().is_fresh(kb_path, sources, required_kinds=required_kinds)
 
 
-def _zvec_is_quickly_fresh(kb_path, scanned, meta=None):
-    return _zvec_store().is_quickly_fresh(kb_path, scanned, meta=meta)
+def _zvec_is_quickly_fresh(kb_path, scanned, meta=None, mode="full"):
+    return _zvec_store().is_quickly_fresh(kb_path, scanned, meta=meta, mode=mode)
 
 
 def _embedding_fingerprint(meta):
@@ -884,9 +785,23 @@ def kb_status(kb):
 
 def status():
     kbs = [kb_status(kb) for kb in load_config()]
-    return {"knowledge_bases": kbs, "building": build_state["running"],
-            "build_kb": build_state.get("kb"), "last_build": build_state.get("result"),
-            "configured": bool(kbs)}
+    state = _build_state_snapshot()
+    return {
+        "knowledge_bases": kbs,
+        "building": state["running"],
+        "build_kb": state.get("kb"),
+        "last_build": state.get("result"),
+        "last_build_summary": state.get("last_build_summary"),
+        "build_progress": {
+            "phase": state.get("phase"),
+            "message": state.get("message", ""),
+            "processed": state.get("processed", 0),
+            "total": state.get("total", 0),
+            "started_at": state.get("started_at"),
+            "finished_at": state.get("finished_at"),
+        },
+        "configured": bool(kbs),
+    }
 
 
 def _folder_breakdown(kb, limit=8):
@@ -907,7 +822,7 @@ def preload_context():
         return ""
     lines = ["[本地知识库已加载]（preload）"]
     if not ready:
-        if build_state["running"]:
+        if _build_state_snapshot()["running"]:
             lines.append("索引正在后台构建中，稍候即可检索。")
         else:
             lines.append("索引尚未就绪（可在客户端「知识库」重建，或运行 python -m knowledge_base.backend --build）。")
@@ -1039,8 +954,11 @@ def resolve_source_document(kb_id=None, data_id=None, file_name=None, ref=None):
 def build(kb_id=None, force=False, mode="full", logfn=None):
     """Desktop bridge wrapper around the original same-stack Zvec builder."""
     results = build_all(force=force, verbose=not callable(logfn), logfn=logfn, kb_id=kb_id, mode=mode)
+    summary = _build_summary(results)
     return {
         "ok": True,
+        "summary": summary,
+        "has_failures": bool(summary["failed"]),
         "results": [
             {"kb_id": k, "status": v[0], "stats": v[1]}
             for k, v in results.items()

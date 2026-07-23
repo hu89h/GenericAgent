@@ -32,6 +32,8 @@ class ZvecIndex:
         sparse_embedding_fn: Callable[..., list[dict[int, float]]],
         embedding_meta_fn: Callable[[], Dict[str, Any]],
         sparse_embedding_meta_fn: Callable[[], Dict[str, Any]],
+        chunking_meta_fn: Callable[[], Dict[str, Any]],
+        image_analysis_meta_fn: Callable[[], Dict[str, Any]],
         usage_fn: Callable[[], Dict[str, Any]],
         load_assets_fn: Callable[[str], list],
         document_fingerprint_fn: Callable[[list], Dict[str, Any]],
@@ -45,6 +47,8 @@ class ZvecIndex:
         self._sparse_embedding_fn = sparse_embedding_fn
         self._embedding_meta_fn = embedding_meta_fn
         self._sparse_embedding_meta_fn = sparse_embedding_meta_fn
+        self._chunking_meta_fn = chunking_meta_fn
+        self._image_analysis_meta_fn = image_analysis_meta_fn
         self._usage_fn = usage_fn
         self._load_assets_fn = load_assets_fn
         self._document_fingerprint_fn = document_fingerprint_fn
@@ -159,21 +163,33 @@ class ZvecIndex:
             and os.path.isdir(self._path_fn(kb_path))
         )
 
-    def is_quickly_fresh(self, kb_path: str, scanned: list, meta=None) -> bool:
+    def is_quickly_fresh(self, kb_path: str, scanned: list, meta=None, mode: str = "full") -> bool:
         meta = meta or self.meta(kb_path)
         sources = meta.get("sources") or {}
         if not meta or meta.get("schema_version") != self.schema_version:
             return False
+        mode = mode if mode in ("full", "text", "images") else "full"
+        required_kinds = {"text"} if mode != "images" else {"image"}
+        indexed_kinds = set(meta.get("indexed_kinds") or [])
+        if not required_kinds.issubset(indexed_kinds):
+            return False
+        if "images" not in sources and mode != "text":
+            return False
         if sources.get("documents") != self._document_fingerprint_fn(scanned):
             return False
-        for rel, expected in (sources.get("images") or {}).items():
-            path = os.path.realpath(os.path.join(kb_path, rel))
-            try:
-                stat = os.stat(path)
-            except OSError:
+        if sources.get("chunking") != self._chunking_meta_fn():
+            return False
+        if mode != "text":
+            if sources.get("image_analysis") != self._image_analysis_meta_fn():
                 return False
-            if {"mtime": int(stat.st_mtime), "size": stat.st_size} != expected:
-                return False
+            for rel, expected in (sources.get("images") or {}).items():
+                path = os.path.realpath(os.path.join(kb_path, rel))
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    return False
+                if {"mtime": int(stat.st_mtime), "size": stat.st_size} != expected:
+                    return False
         return bool(
             self._embedding_fingerprint(meta.get("embedding"))
             == self._embedding_fingerprint(self._embedding_meta_fn())
@@ -287,6 +303,28 @@ class ZvecIndex:
             "image_chunks": n_image_chunks,
         }, embedding_used, sparse_embedding_used
 
+    @staticmethod
+    def _write_json_temp(path: str, payload: Dict[str, Any]) -> str:
+        temp_path = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+            return temp_path
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
+            raise
+
+    @classmethod
+    def _write_json_atomic(cls, path: str, payload: Dict[str, Any]) -> None:
+        temp_path = cls._write_json_temp(path, payload)
+        try:
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
+
     def build(self, kb, records, sources, force: bool = False, logfn=None):
         path = self._path_fn(kb["path"])
         meta_path = self._meta_path_fn(kb["path"])
@@ -294,66 +332,101 @@ class ZvecIndex:
             return "up-to-date", (self.meta(kb["path"]) or {}).get("stats", {})
 
         temp_path = path + ".tmp"
-        if os.path.exists(temp_path):
-            shutil.rmtree(temp_path, ignore_errors=True)
-        os.makedirs(os.path.dirname(temp_path), exist_ok=True)
-        self.clear_cache(path)
-        self.clear_cache(temp_path)
-        try:
-            collection = self.connect(temp_path, create=True)
-        except Exception as exc:
-            return "unavailable", {"error": str(exc)}
-
-        started = time.time()
-        stats, embedding_used, sparse_embedding_used = self.insert_records(kb, collection, records, logfn=logfn)
-        collection.flush()
-        if os.environ.get("GA_KB_ZVEC_OPTIMIZE", "0").strip().lower() in ("1", "true", "yes", "on"):
-            try:
-                collection.optimize()
-            except Exception as exc:
-                if logfn:
-                    logfn(f"  [warn] zvec optimize 跳过：{exc}")
-        self.clear_cache(temp_path)
-        del collection
-        gc.collect()
-
         backup_path = ""
-        if os.path.exists(path):
-            backup_path = f"{path}.bak.{os.getpid()}.{int(time.time())}"
-            os.rename(path, backup_path)
+        meta_temp_path = ""
+        collection = None
+        published = False
+        started = time.time()
         try:
-            os.rename(temp_path, path)
-        except Exception:
+            if os.path.exists(temp_path):
+                shutil.rmtree(temp_path, ignore_errors=True)
+            os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+            self.clear_cache(path)
+            self.clear_cache(temp_path)
+            try:
+                collection = self.connect(temp_path, create=True)
+            except Exception as exc:
+                return "unavailable", {"error": str(exc)}
+
+            stats, embedding_used, sparse_embedding_used = self.insert_records(
+                kb, collection, records, logfn=logfn
+            )
+            collection.flush()
+            if os.environ.get("GA_KB_ZVEC_OPTIMIZE", "0").strip().lower() in ("1", "true", "yes", "on"):
+                try:
+                    collection.optimize()
+                except Exception as exc:
+                    if logfn:
+                        logfn(f"  [warn] zvec optimize 跳过：{exc}")
+
+            self.clear_cache(temp_path)
+            with contextlib.suppress(Exception):
+                del collection
+            collection = None
+            gc.collect()
+
+            stats = {
+                **stats,
+                "image_assets": sum(1 for _asset in self._load_assets_fn(kb["path"])),
+                "zvec_bytes": self.dir_size(temp_path),
+                "build_seconds": round(time.time() - started, 1),
+            }
+            meta = {
+                "schema_version": self.schema_version,
+                "built_at": int(time.time()),
+                "sources": sources,
+                "embedding": embedding_used,
+                "sparse_embedding": sparse_embedding_used,
+                "vector_index": {"type": "hnsw", "metric": "cosine"},
+                "sparse_index": {"field": "sparse_embedding", "type": "SPARSE_VECTOR_FP32"},
+                "indexed_kinds": ["text"] if stats.get("image_chunks", 0) == 0 else ["text", "image"],
+                "stats": stats,
+            }
+            meta_temp_path = self._write_json_temp(meta_path, meta)
+
             if os.path.exists(path):
-                shutil.rmtree(path, ignore_errors=True)
-            if backup_path and os.path.exists(backup_path):
+                backup_path = f"{path}.bak.{os.getpid()}.{int(time.time())}"
+                os.rename(path, backup_path)
+            try:
+                os.rename(temp_path, path)
+                os.replace(meta_temp_path, meta_path)
+                meta_temp_path = ""
+            except Exception:
+                self.clear_cache(path)
+                if os.path.exists(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                if backup_path and os.path.exists(backup_path):
+                    os.rename(backup_path, path)
+                    backup_path = ""
+                raise
+
+            published = True
+            if backup_path:
+                shutil.rmtree(backup_path, ignore_errors=True)
+                backup_path = ""
+            self.clear_cache(path)
+            if logfn:
+                logfn(f"  zvec dense+sparse 索引完成：{stats['n_chunks']} chunk / {stats['zvec_bytes']//1024//1024}MB")
+            return "built", stats
+        except Exception:
+            if not published and backup_path and os.path.exists(backup_path):
+                self.clear_cache(path)
+                if os.path.exists(path):
+                    shutil.rmtree(path, ignore_errors=True)
                 os.rename(backup_path, path)
+                backup_path = ""
             raise
-        if backup_path:
-            shutil.rmtree(backup_path, ignore_errors=True)
-        self.clear_cache(path)
-        stats = {
-            **stats,
-            "image_assets": sum(1 for _asset in self._load_assets_fn(kb["path"])),
-            "zvec_bytes": self.dir_size(path),
-            "build_seconds": round(time.time() - started, 1),
-        }
-        meta = {
-            "schema_version": self.schema_version,
-            "built_at": int(time.time()),
-            "sources": sources,
-            "embedding": embedding_used,
-            "sparse_embedding": sparse_embedding_used,
-            "vector_index": {"type": "hnsw", "metric": "cosine"},
-            "sparse_index": {"field": "sparse_embedding", "type": "SPARSE_VECTOR_FP32"},
-            "indexed_kinds": ["text"] if stats.get("image_chunks", 0) == 0 else ["text", "image"],
-            "stats": stats,
-        }
-        with open(meta_path, "w", encoding="utf-8") as handle:
-            json.dump(meta, handle, ensure_ascii=False, indent=2)
-        if logfn:
-            logfn(f"  zvec dense+sparse 索引完成：{stats['n_chunks']} chunk / {stats['zvec_bytes']//1024//1024}MB")
-        return "built", stats
+        finally:
+            self.clear_cache(temp_path)
+            if os.path.exists(temp_path):
+                shutil.rmtree(temp_path, ignore_errors=True)
+            if collection is not None:
+                with contextlib.suppress(Exception):
+                    del collection
+            with contextlib.suppress(OSError):
+                if meta_temp_path:
+                    os.remove(meta_temp_path)
+            gc.collect()
 
     def append_images(self, kb, records, sources, force: bool = False, logfn=None):
         path = self._path_fn(kb["path"])
@@ -422,8 +495,7 @@ class ZvecIndex:
             "indexed_kinds": ["text", "image"],
             "stats": merged_stats,
         })
-        with open(meta_path, "w", encoding="utf-8") as handle:
-            json.dump(meta, handle, ensure_ascii=False, indent=2)
+        self._write_json_atomic(meta_path, meta)
         if logfn:
             logfn(f"  zvec 图片资产追加完成：{merged_stats['image_chunks']} image chunk / 总 {merged_stats['n_chunks']} chunk")
         return "built", merged_stats
