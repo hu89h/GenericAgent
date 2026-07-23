@@ -205,7 +205,7 @@ install_dependencies() {
     # sys.path itself (ensure_ga_import_path), so no install of the project is needed.
     # shellcheck disable=SC2086
     "$py" -m pip install --no-index --find-links "$WHEEL_DIR" \
-      "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil $EXTRA_PACKAGES \
+      "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil "llama-index-core==0.12.52.post1" "zvec>=0.6,<0.7" $EXTRA_PACKAGES \
       || fail "Offline pip install failed (check wheel dir)."
   else
     log_step "Install/refresh minimal Python dependencies"

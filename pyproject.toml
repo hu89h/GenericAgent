@@ -15,6 +15,8 @@ dependencies = [
     "simple-websocket-server>=0.4",
     "aiohttp>=3.9",
     "psutil>=5.9",
+    "llama-index-core==0.12.52.post1",
+    "zvec>=0.6,<0.7",
 ]
 
 [project.optional-dependencies]
@@ -46,7 +48,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = []
-packages = ["ga_cli"]
+packages = ["ga_cli", "knowledge_base"]
 
 [project.scripts]
 ga = "ga_cli.cli:main"

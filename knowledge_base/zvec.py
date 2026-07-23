@@ -1,0 +1,458 @@
+"""Zvec collection lifecycle, metadata, and index construction."""
+from __future__ import annotations
+
+import contextlib
+import gc
+import hashlib
+import json
+import os
+import shutil
+import threading
+import time
+from typing import Any, Callable, Dict
+
+
+class ZvecIndex:
+    """Own one knowledge-base Zvec collection lifecycle.
+
+    The indexer receives provider, usage, document-fingerprint, and asset
+    callbacks from the orchestration layer.  It therefore owns storage and
+    native-handle cleanup without importing the backend module.
+    """
+
+    def __init__(
+        self,
+        *,
+        dimension: int,
+        batch_size: int,
+        schema_version: int,
+        path_fn: Callable[[str], str],
+        meta_path_fn: Callable[[str], str],
+        embedding_fn: Callable[[list[str]], list[list[float]]],
+        sparse_embedding_fn: Callable[..., list[dict[int, float]]],
+        embedding_meta_fn: Callable[[], Dict[str, Any]],
+        sparse_embedding_meta_fn: Callable[[], Dict[str, Any]],
+        usage_fn: Callable[[], Dict[str, Any]],
+        load_assets_fn: Callable[[str], list],
+        document_fingerprint_fn: Callable[[list], Dict[str, Any]],
+    ) -> None:
+        self.dimension = int(dimension)
+        self.batch_size = max(1, int(batch_size))
+        self.schema_version = int(schema_version)
+        self._path_fn = path_fn
+        self._meta_path_fn = meta_path_fn
+        self._embedding_fn = embedding_fn
+        self._sparse_embedding_fn = sparse_embedding_fn
+        self._embedding_meta_fn = embedding_meta_fn
+        self._sparse_embedding_meta_fn = sparse_embedding_meta_fn
+        self._usage_fn = usage_fn
+        self._load_assets_fn = load_assets_fn
+        self._document_fingerprint_fn = document_fingerprint_fn
+        self._local = threading.local()
+
+    @staticmethod
+    def require():
+        try:
+            import zvec
+        except Exception as exc:
+            raise RuntimeError("Zvec 是知识库索引的必需依赖，请检查运行时 wheel 安装") from exc
+        return zvec
+
+    def connect(self, path: str, *, create: bool = False, read_only: bool = True):
+        cache = getattr(self._local, "connections", None)
+        if cache is None:
+            cache = self._local.connections = {}
+        key = (path, create, read_only)
+        collection = cache.get(key)
+        if collection is not None:
+            return collection
+
+        zvec = self.require()
+        if create:
+            schema = zvec.CollectionSchema(
+                name="kb_chunks",
+                fields=[
+                    zvec.FieldSchema("data_id", zvec.DataType.STRING),
+                    zvec.FieldSchema("chunk_index", zvec.DataType.INT64),
+                    zvec.FieldSchema("kb_id", zvec.DataType.STRING),
+                    zvec.FieldSchema("file_name", zvec.DataType.STRING),
+                    zvec.FieldSchema("title", zvec.DataType.STRING),
+                    zvec.FieldSchema("kind", zvec.DataType.STRING),
+                    zvec.FieldSchema("image_path", zvec.DataType.STRING),
+                    zvec.FieldSchema("parent_data_id", zvec.DataType.STRING),
+                    zvec.FieldSchema("parent_chunk_index", zvec.DataType.INT64),
+                    zvec.FieldSchema("header_path", zvec.DataType.STRING),
+                    zvec.FieldSchema("chunk_role", zvec.DataType.STRING),
+                    zvec.FieldSchema("body", zvec.DataType.STRING),
+                ],
+                vectors=[
+                    zvec.VectorSchema(
+                        "embedding",
+                        zvec.DataType.VECTOR_FP32,
+                        self.dimension,
+                        index_param=zvec.HnswIndexParam(metric_type=zvec.MetricType.COSINE),
+                    ),
+                    zvec.VectorSchema("sparse_embedding", zvec.DataType.SPARSE_VECTOR_FP32),
+                ],
+            )
+            collection = zvec.create_and_open(path=path, schema=schema)
+        else:
+            try:
+                option = zvec.CollectionOption(read_only=bool(read_only))
+            except Exception:
+                option = zvec.CollectionOption()
+                with contextlib.suppress(Exception):
+                    option.read_only = bool(read_only)
+            collection = zvec.open(path=path, option=option)
+        cache[key] = collection
+        return collection
+
+    @staticmethod
+    def _release_collection(collection) -> None:
+        """Release Zvec native handles before replacing a collection on Windows."""
+        for attr in ("_querier", "_obj", "_schema"):
+            with contextlib.suppress(Exception):
+                setattr(collection, attr, None)
+
+    def clear_cache(self, path: str | None = None) -> None:
+        cache = getattr(self._local, "connections", None)
+        if not cache:
+            return
+        for key in list(cache.keys()):
+            if path is None or key[0] == path:
+                collection = cache.pop(key, None)
+                if collection is not None:
+                    self._release_collection(collection)
+                    del collection
+        gc.collect()
+
+    def meta(self, kb_path: str) -> Dict[str, Any]:
+        try:
+            with open(self._meta_path_fn(kb_path), encoding="utf-8") as handle:
+                value = json.load(handle)
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _embedding_fingerprint(meta: Dict[str, Any] | None) -> Dict[str, Any]:
+        meta = meta or {}
+        return {
+            key: meta.get(key)
+            for key in ("provider", "base_url", "model", "dimension", "output_type")
+            if meta.get(key) is not None
+        }
+
+    def is_fresh(self, kb_path: str, sources: Dict[str, Any], required_kinds=None) -> bool:
+        meta = self.meta(kb_path)
+        indexed = set(meta.get("indexed_kinds") or ["text", "image"])
+        if required_kinds and not set(required_kinds).issubset(indexed):
+            return False
+        return bool(
+            meta
+            and meta.get("schema_version") == self.schema_version
+            and meta.get("sources") == sources
+            and self._embedding_fingerprint(meta.get("embedding"))
+            == self._embedding_fingerprint(self._embedding_meta_fn())
+            and self._embedding_fingerprint(meta.get("sparse_embedding"))
+            == self._embedding_fingerprint(self._sparse_embedding_meta_fn())
+            and os.path.isdir(self._path_fn(kb_path))
+        )
+
+    def is_quickly_fresh(self, kb_path: str, scanned: list, meta=None) -> bool:
+        meta = meta or self.meta(kb_path)
+        sources = meta.get("sources") or {}
+        if not meta or meta.get("schema_version") != self.schema_version:
+            return False
+        if sources.get("documents") != self._document_fingerprint_fn(scanned):
+            return False
+        for rel, expected in (sources.get("images") or {}).items():
+            path = os.path.realpath(os.path.join(kb_path, rel))
+            try:
+                stat = os.stat(path)
+            except OSError:
+                return False
+            if {"mtime": int(stat.st_mtime), "size": stat.st_size} != expected:
+                return False
+        return bool(
+            self._embedding_fingerprint(meta.get("embedding"))
+            == self._embedding_fingerprint(self._embedding_meta_fn())
+            and self._embedding_fingerprint(meta.get("sparse_embedding"))
+            == self._embedding_fingerprint(self._sparse_embedding_meta_fn())
+            and os.path.isdir(self._path_fn(kb_path))
+        )
+
+    @staticmethod
+    def doc_id(data_id: str, chunk_index: int) -> str:
+        return hashlib.sha1(f"{data_id}#{chunk_index}".encode("utf-8")).hexdigest()
+
+    def insert_records(self, kb, collection, records, logfn=None, operation: str = "insert"):
+        zvec = self.require()
+        batch = []
+        n_chunks = 0
+        n_text_chunks = 0
+        n_image_chunks = 0
+        docs_seen = set()
+        embedding_used = self._embedding_meta_fn()
+        sparse_embedding_used = self._sparse_embedding_meta_fn()
+
+        def flush():
+            nonlocal batch
+            if not batch:
+                return
+            texts = [item["body"] for item in batch]
+            usage = self._usage_fn()["embedding"]
+            usage["calls"] += 1
+            usage["texts"] += len(texts)
+            chars = sum(len(text or "") for text in texts)
+            usage["input_chars"] += chars
+            usage["estimated_input_tokens"] += max(1, chars // 2)
+            try:
+                vectors = self._embedding_fn(texts)
+            except Exception:
+                usage["failed"] += 1
+                raise
+
+            sparse_usage = self._usage_fn()["sparse_embedding"]
+            sparse_usage["calls"] += 1
+            sparse_usage["texts"] += len(texts)
+            sparse_usage["input_chars"] += chars
+            sparse_usage["estimated_input_tokens"] += max(1, chars // 2)
+            try:
+                sparse_vectors = self._sparse_embedding_fn(texts, text_type="document")
+            except Exception:
+                sparse_usage["failed"] += 1
+                raise
+
+            docs = []
+            for item, vector, sparse_vector in zip(batch, vectors, sparse_vectors):
+                docs.append(zvec.Doc(
+                    id=self.doc_id(item["data_id"], item["chunk_index"]),
+                    vectors={"embedding": vector, "sparse_embedding": sparse_vector},
+                    fields={
+                        "data_id": item["data_id"],
+                        "chunk_index": int(item["chunk_index"]),
+                        "kb_id": kb["id"],
+                        "file_name": item["file_name"],
+                        "title": item["title"],
+                        "kind": item.get("kind", "text"),
+                        "image_path": item.get("image_path", ""),
+                        "parent_data_id": item.get("parent_data_id", ""),
+                        "parent_chunk_index": int(item.get("parent_chunk_index", -1)),
+                        "header_path": item.get("header_path", ""),
+                        "chunk_role": item.get("chunk_role", "leaf"),
+                        "body": item["body"],
+                    },
+                ))
+            writer = collection.upsert if operation == "upsert" else collection.insert
+            writer(docs)
+            if logfn:
+                verb = "upsert" if operation == "upsert" else "写入"
+                logfn(f"  zvec 已{verb} {n_chunks} chunk...")
+            batch = []
+
+        for record in records:
+            body = record.get("raw_chunk", "") or ""
+            data_id = record.get("data_id") or ""
+            if not body or not data_id:
+                continue
+            chunk_index = int(record.get("_chunk_index", 0))
+            kind = record.get("kind", "text") or "text"
+            if kind == "image":
+                n_image_chunks += 1
+            else:
+                n_text_chunks += 1
+                docs_seen.add(data_id)
+            batch.append({
+                "data_id": data_id,
+                "chunk_index": chunk_index,
+                "file_name": record.get("file_name", "") or "",
+                "title": record.get("title", "") or "",
+                "kind": kind,
+                "image_path": record.get("image_path", "") or "",
+                "parent_data_id": record.get("parent_data_id", "") or "",
+                "parent_chunk_index": int(record.get("parent_chunk_index", -1)),
+                "header_path": record.get("header_path", "") or "",
+                "chunk_role": record.get("chunk_role", "leaf") or "leaf",
+                "body": body,
+            })
+            n_chunks += 1
+            if len(batch) >= self.batch_size:
+                flush()
+        flush()
+        return {
+            "n_docs": len(docs_seen),
+            "n_chunks": n_chunks,
+            "text_chunks": n_text_chunks,
+            "image_chunks": n_image_chunks,
+        }, embedding_used, sparse_embedding_used
+
+    def build(self, kb, records, sources, force: bool = False, logfn=None):
+        path = self._path_fn(kb["path"])
+        meta_path = self._meta_path_fn(kb["path"])
+        if not force and self.is_fresh(kb["path"], sources):
+            return "up-to-date", (self.meta(kb["path"]) or {}).get("stats", {})
+
+        temp_path = path + ".tmp"
+        if os.path.exists(temp_path):
+            shutil.rmtree(temp_path, ignore_errors=True)
+        os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+        self.clear_cache(path)
+        self.clear_cache(temp_path)
+        try:
+            collection = self.connect(temp_path, create=True)
+        except Exception as exc:
+            return "unavailable", {"error": str(exc)}
+
+        started = time.time()
+        stats, embedding_used, sparse_embedding_used = self.insert_records(kb, collection, records, logfn=logfn)
+        collection.flush()
+        if os.environ.get("GA_KB_ZVEC_OPTIMIZE", "0").strip().lower() in ("1", "true", "yes", "on"):
+            try:
+                collection.optimize()
+            except Exception as exc:
+                if logfn:
+                    logfn(f"  [warn] zvec optimize 跳过：{exc}")
+        self.clear_cache(temp_path)
+        del collection
+        gc.collect()
+
+        backup_path = ""
+        if os.path.exists(path):
+            backup_path = f"{path}.bak.{os.getpid()}.{int(time.time())}"
+            os.rename(path, backup_path)
+        try:
+            os.rename(temp_path, path)
+        except Exception:
+            if os.path.exists(path):
+                shutil.rmtree(path, ignore_errors=True)
+            if backup_path and os.path.exists(backup_path):
+                os.rename(backup_path, path)
+            raise
+        if backup_path:
+            shutil.rmtree(backup_path, ignore_errors=True)
+        self.clear_cache(path)
+        stats = {
+            **stats,
+            "image_assets": sum(1 for _asset in self._load_assets_fn(kb["path"])),
+            "zvec_bytes": self.dir_size(path),
+            "build_seconds": round(time.time() - started, 1),
+        }
+        meta = {
+            "schema_version": self.schema_version,
+            "built_at": int(time.time()),
+            "sources": sources,
+            "embedding": embedding_used,
+            "sparse_embedding": sparse_embedding_used,
+            "vector_index": {"type": "hnsw", "metric": "cosine"},
+            "sparse_index": {"field": "sparse_embedding", "type": "SPARSE_VECTOR_FP32"},
+            "indexed_kinds": ["text"] if stats.get("image_chunks", 0) == 0 else ["text", "image"],
+            "stats": stats,
+        }
+        with open(meta_path, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, ensure_ascii=False, indent=2)
+        if logfn:
+            logfn(f"  zvec dense+sparse 索引完成：{stats['n_chunks']} chunk / {stats['zvec_bytes']//1024//1024}MB")
+        return "built", stats
+
+    def append_images(self, kb, records, sources, force: bool = False, logfn=None):
+        path = self._path_fn(kb["path"])
+        meta_path = self._meta_path_fn(kb["path"])
+        if not os.path.isdir(path):
+            return "unavailable", {"error": "text Zvec index missing; run --text-only first"}
+        if not force and self.is_fresh(kb["path"], sources, required_kinds=["text", "image"]):
+            return "up-to-date", (self.meta(kb["path"]) or {}).get("stats", {})
+
+        meta = self.meta(kb["path"])
+        if meta.get("schema_version") != self.schema_version:
+            return "unavailable", {"error": f"schema mismatch: {meta.get('schema_version')} != {self.schema_version}"}
+        if self._embedding_fingerprint(meta.get("embedding")) != self._embedding_fingerprint(self._embedding_meta_fn()):
+            return "unavailable", {"error": "embedding config changed; rebuild text index first"}
+        if self._embedding_fingerprint(meta.get("sparse_embedding")) != self._embedding_fingerprint(self._sparse_embedding_meta_fn()):
+            return "unavailable", {"error": "sparse embedding config changed; rebuild text index first"}
+
+        self.clear_cache(path)
+        try:
+            collection = self.connect(path, read_only=False)
+        except Exception as exc:
+            return "unavailable", {"error": str(exc)}
+
+        started = time.time()
+        try:
+            try:
+                collection.delete_by_filter("kind = 'image'")
+            except Exception as exc:
+                if logfn:
+                    logfn(f"  [warn] zvec 删除旧图片资产失败，改用 upsert 覆盖：{exc}")
+            stats, embedding_used, sparse_embedding_used = self.insert_records(
+                kb, collection, records, logfn=logfn, operation="upsert"
+            )
+            collection.flush()
+            if os.environ.get("GA_KB_ZVEC_OPTIMIZE", "0").strip().lower() in ("1", "true", "yes", "on"):
+                try:
+                    collection.optimize()
+                except Exception as exc:
+                    if logfn:
+                        logfn(f"  [warn] zvec optimize 跳过：{exc}")
+        finally:
+            self.clear_cache(path)
+            with contextlib.suppress(Exception):
+                del collection
+            gc.collect()
+
+        previous = meta.get("stats") or {}
+        text_chunks = int(previous.get("text_chunks") or max(0, int(previous.get("n_chunks") or 0) - int(previous.get("image_chunks") or 0)))
+        merged_stats = {
+            "n_docs": int(previous.get("n_docs") or stats.get("n_docs") or 0),
+            "n_chunks": text_chunks + int(stats.get("image_chunks") or 0),
+            "text_chunks": text_chunks,
+            "image_chunks": int(stats.get("image_chunks") or 0),
+            "image_assets": sum(1 for _asset in self._load_assets_fn(kb["path"])),
+            "zvec_bytes": self.dir_size(path),
+            "build_seconds": round(time.time() - started, 1),
+        }
+        meta.update({
+            "schema_version": self.schema_version,
+            "built_at": int(time.time()),
+            "sources": sources,
+            "embedding": embedding_used,
+            "sparse_embedding": sparse_embedding_used,
+            "vector_index": {"type": "hnsw", "metric": "cosine"},
+            "sparse_index": {"field": "sparse_embedding", "type": "SPARSE_VECTOR_FP32"},
+            "indexed_kinds": ["text", "image"],
+            "stats": merged_stats,
+        })
+        with open(meta_path, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, ensure_ascii=False, indent=2)
+        if logfn:
+            logfn(f"  zvec 图片资产追加完成：{merged_stats['image_chunks']} image chunk / 总 {merged_stats['n_chunks']} chunk")
+        return "built", merged_stats
+
+    @staticmethod
+    def dir_size(path: str) -> int:
+        total = 0
+        for directory, _dirnames, filenames in os.walk(path):
+            for filename in filenames:
+                try:
+                    total += os.path.getsize(os.path.join(directory, filename))
+                except OSError:
+                    pass
+        return total
+
+    def fetch(self, kb, data_id: str, chunk_index: int, output_fields=None):
+        if not kb or not data_id:
+            return None
+        path = self._path_fn(kb["path"])
+        if not os.path.isdir(path):
+            return None
+        try:
+            collection = self.connect(path)
+            document_id = self.doc_id(data_id, int(chunk_index))
+            got = collection.fetch(
+                document_id,
+                output_fields=output_fields,
+                include_vector=False,
+            )
+            return got.get(document_id) if isinstance(got, dict) else None
+        except Exception:
+            return None

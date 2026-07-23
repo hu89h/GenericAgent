@@ -167,7 +167,7 @@ function Install-Dependencies([string]$root, [string]$py) {
         # project's absolute path into a .pth. With -NoVenv (deps go into the relocatable embedded
         # python) this keeps the portable bundle movable. The bridge adds the source to sys.path
         # itself (ensure_ga_import_path), so the project itself need not be installed.
-        & $py -m pip install --no-index --find-links $wd "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil @extra
+        & $py -m pip install --no-index --find-links $wd "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil "llama-index-core==0.12.52.post1" "zvec>=0.6,<0.7" @extra
         if ($LASTEXITCODE -ne 0) { Fail "offline pip install failed (check wheels dir)." }
         Write-Host "GAPROGRESS|done"
         return
