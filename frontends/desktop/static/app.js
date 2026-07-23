@@ -1554,6 +1554,10 @@ async function loadSessions() {
     const data = await res.json();
     if (!data.sessions) return;
     for (const s of data.sessions) {
+      if (Number(s.msgSeq || 0) <= 0) {
+        fetch(`${BRIDGE_ORIGIN}/session/${encodeURIComponent(s.id)}`, { method: 'DELETE' }).catch(() => {});
+        continue;
+      }
       state.sessions.set(s.id, {
         id: s.id, bridgeSessionId: s.id, title: s.title,
         messages: [], untitled: s.untitled ?? true,
@@ -2616,7 +2620,7 @@ function sortedSessions() {
 function renderSessionList() {
   convListEl.innerHTML = '';
   const query = (searchInput ? searchInput.value : '').trim().toLowerCase();
-  const all = sortedSessions();
+  const all = sortedSessions().filter(sess => sess.bridgeSessionId || (sess.messages && sess.messages.length));
   const filtered = query
     ? all.filter(s => {
         const title = displayTitle(s).toLowerCase();
@@ -2649,8 +2653,25 @@ async function ensureBridgeSession(sess) {
   if (sess.bridgeSessionId) return sess.bridgeSessionId;
   const res = await window.ga.rpc('session/new', { cwd: '', mcp_servers: [] });
   if (res?.error) throw new Error(res.error.message || res.error);
-  sess.bridgeSessionId = res.sessionId || res.result?.sessionId;
-  return sess.bridgeSessionId;
+  const sid = res.sessionId || res.result?.sessionId;
+  if (!sid) throw new Error('session/new did not return a session id');
+  sess.bridgeSessionId = sid;
+  if (sess.id !== sid) {
+    const oldId = sess.id;
+    const runtime = state.runtime.get(oldId);
+    state.sessions.delete(oldId);
+    sess.id = sid;
+    state.sessions.set(sid, sess);
+    if (runtime) {
+      state.runtime.delete(oldId);
+      state.runtime.set(sid, runtime);
+    }
+    if (state.activeId === oldId) {
+      state.activeId = sid;
+      localStorage.setItem('ga_active', sid);
+    }
+  }
+  return sid;
 }
 // 仿 TUI(continue_cmd.py 的 _preview_text 思路):sess.title 只在用户手动 rename 时被填,
 // 平时为空;sidebar 显示名实时从消息派生 —— 优先取最后一段 assistant 输出里的 <summary>...</summary>,
@@ -2685,19 +2706,31 @@ function displayTitle(sess) {
   }
   return t('conv.defaultTitle');
 }
-async function newSession() {
+function discardEmptyDraftSessions() {
+  for (const [id, sess] of state.sessions) {
+    if (sess.bridgeSessionId || (sess.messages && sess.messages.length)) continue;
+    state.sessions.delete(id);
+    state.runtime.delete(id);
+    if (state.activeId === id) {
+      state.activeId = null;
+      localStorage.removeItem('ga_active');
+    }
+  }
+}
+function newSession() {
+  const current = activeSess();
+  if (current && !current.bridgeSessionId && !(current.messages && current.messages.length)) {
+    setActiveSession(current.id);
+    renderSessionList();
+    return current;
+  }
+  discardEmptyDraftSessions();
   const localId = 'local-' + Date.now() + '-' + Math.random().toString(16).slice(2);
   const sess = { id: localId, bridgeSessionId: null, title: '', messages: [], untitled: true, lastActiveTs: Date.now() };
   state.sessions.set(localId, sess);
-  try {
-    await ensureBridgeSession(sess);
-    state.sessions.delete(localId);
-    sess.id = sess.bridgeSessionId;
-    state.sessions.set(sess.id, sess);
-  } catch (e) { showError(t('err.newSession') + ': ' + (e.message || e)); }
   setActiveSession(sess.id);
-  saveSessions();
   renderSessionList();
+  return sess;
 }
 function sessionNeedsHydrate(sess) {
   return !!(sess?.bridgeSessionId && state.bridgeReady && !sess.messages.length);
@@ -3237,8 +3270,8 @@ async function sendPrompt(text) {
   if (previewFiles.length) userMsg.files = previewFiles;
   sess.messages.push(userMsg); appendMessage(sess, userMsg);
   sess.lastActiveTs = Date.now();
-  // 仿 TUI:不再从首条消息自动改名 —— 标题在 newSession 时已设为 agent-N,
-  // 之后只接受用户手动 rename。
+  // 草稿阶段不落盘标题；首条消息提交后由后端建立会话并生成标题，
+  // 前端列表优先从消息内容派生显示名。
   saveSessions();
   setBusy(sess, true);
   try {
@@ -3316,15 +3349,9 @@ async function submitInput() {
     syncAskUserUi();
   }
 }
-sendBtn.addEventListener('click', (e) => {
-  e.preventDefault();
-  const sess = activeSess();
-  if (sess && rt(sess).busy) { cancelPrompt(); return; }  // 运行中：发送键是录制键 → 纯停止
-  submitInput();
-});
-inputEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submitInput(); }
-});
+// 聊天 composer 的发送按钮和回车行为统一由 bindComposerInRoot 绑定。
+// 这里不要重复绑定：首条消息的 session/new 尚未完成时，重复 click 处理器
+// 会把刚进入 busy 的本地草稿误当成可取消的 bridge 会话，向 local-* ID 发 cancel。
 // 输入框的 input/paste 监听统一在 bindComposerUpload(ctx) 里绑(chat + collab 通用)
 function showSystem(text) {
   const sess = activeSess(); if (!sess) return;
@@ -4257,8 +4284,7 @@ async function addFiles(fileList) {
   } else {
     let upSess = activeSess();
     if (!upSess) { await newSession(); upSess = activeSess(); }
-    if (upSess && !upSess.bridgeSessionId) { try { await ensureBridgeSession(upSess); } catch (_) {} }
-    uploadSid = (upSess && upSess.bridgeSessionId) || '';
+    uploadSid = (upSess && (upSess.bridgeSessionId || upSess.id)) || '';
   }
   for (const f of accepted) {
     try {
