@@ -184,6 +184,11 @@ def delete_kb(kb_id, delete_data=False, config_path=CONFIG_PATH):
 
         managed_root = _managed_kb_root(kb)
         data_deleted = False
+        # Search and Agent tool calls may have opened the same Zvec collection
+        # from worker threads.  Release those native handles before removing
+        # the package-local index, especially on Windows where IPC files cannot
+        # be unlinked while a collection is still alive.
+        _clear_zvec_cache(_zvec_path(kb["path"]))
         if delete_data and managed_root and os.path.lexists(managed_root):
             # Do not follow a symlink/junction supplied through a package-local path.
             if not os.path.islink(managed_root):

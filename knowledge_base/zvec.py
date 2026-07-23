@@ -53,6 +53,8 @@ class ZvecIndex:
         self._load_assets_fn = load_assets_fn
         self._document_fingerprint_fn = document_fingerprint_fn
         self._local = threading.local()
+        self._cache_lock = threading.RLock()
+        self._connection_caches = []
 
     @staticmethod
     def require():
@@ -66,6 +68,8 @@ class ZvecIndex:
         cache = getattr(self._local, "connections", None)
         if cache is None:
             cache = self._local.connections = {}
+            with self._cache_lock:
+                self._connection_caches.append(cache)
         key = (path, create, read_only)
         collection = cache.get(key)
         if collection is not None:
@@ -119,15 +123,24 @@ class ZvecIndex:
                 setattr(collection, attr, None)
 
     def clear_cache(self, path: str | None = None) -> None:
-        cache = getattr(self._local, "connections", None)
-        if not cache:
-            return
-        for key in list(cache.keys()):
-            if path is None or key[0] == path:
-                collection = cache.pop(key, None)
-                if collection is not None:
-                    self._release_collection(collection)
-                    del collection
+        # Tool calls run in worker threads while Bridge requests usually run
+        # on the event-loop thread.  Releasing only the current thread's cache
+        # leaves Windows IPC handles alive and makes KB deletion fail with
+        # WinError 32.  Drain every thread cache for the requested collection.
+        with self._cache_lock:
+            caches = list(self._connection_caches)
+        for cache in caches:
+            for key in list(cache.keys()):
+                if path is None or key[0] == path:
+                    collection = cache.pop(key, None)
+                    if collection is not None:
+                        self._release_collection(collection)
+                        del collection
+        with self._cache_lock:
+            self._connection_caches = [cache for cache in self._connection_caches if cache]
+        current = getattr(self._local, "connections", None)
+        if current is not None and not current:
+            self._local.connections = {}
         gc.collect()
 
     def meta(self, kb_path: str) -> Dict[str, Any]:
