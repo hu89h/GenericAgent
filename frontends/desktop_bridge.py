@@ -163,6 +163,47 @@ def find_default_ga_root() -> Path:
 
 DEFAULT_GA_ROOT = find_default_ga_root()
 
+# The knowledge-base package resolves its registry from this environment
+# variable.  Keep it aligned with the effective GA source tree when Desktop
+# is pointed at an external checkout.
+os.environ.setdefault("GA_KB_CONFIG", str(DEFAULT_GA_ROOT / "data" / "kb.yaml"))
+
+
+def normalize_knowledge_scope(value: Any) -> dict:
+    """Normalize the scope carried by a Desktop chat session."""
+    raw = value if isinstance(value, dict) else {}
+    mode = str(raw.get("mode") or raw.get("kind") or raw.get("type") or "all").strip().lower()
+    if mode not in {"all", "kb", "document"}:
+        mode = "all"
+    scope = {"mode": mode}
+    if mode in {"kb", "document"}:
+        kb_id = str(raw.get("kb_id") or raw.get("kbId") or "").strip()
+        if not kb_id:
+            return {"mode": "all"}
+        scope["kb_id"] = kb_id
+        kb_name = str(raw.get("kb_name") or raw.get("kbName") or "").strip()
+        if kb_name:
+            scope["kb_name"] = kb_name
+    if mode == "document":
+        for target, aliases in {
+            "data_id": ("data_id", "dataId"),
+            "file_name": ("file_name", "fileName"),
+            "ref": ("ref",),
+            "title": ("title",),
+        }.items():
+            item = next((raw.get(alias) for alias in aliases if raw.get(alias)), "")
+            if item:
+                scope[target] = str(item).strip()
+        if not any(scope.get(key) for key in ("data_id", "file_name", "ref")):
+            return {"mode": "all"}
+    return scope
+
+
+_kb_import_jobs: Dict[str, dict] = {}
+_kb_import_jobs_lock = threading.Lock()
+_kb_build_jobs: Dict[str, dict] = {}
+_kb_build_jobs_lock = threading.Lock()
+
 
 def _desktop_parent_pid() -> Optional[int]:
     raw = str(os.environ.get("GA_DESKTOP_PARENT_PID", "")).strip()
@@ -238,6 +279,7 @@ class Session:
     # 该会话绑定的模型下标(mykey.py 配置块顺序,== agent.llmclients 下标)。
     # None = 未绑定,发消息时回退到全局默认 ui.llmNo,保持旧会话平滑迁移。
     llm_no: Optional[int] = None
+    knowledge_scope: dict = field(default_factory=lambda: {"mode": "all"})
 
 
 def _load_plan_baseline(item: dict, msgs: list) -> int:
@@ -289,6 +331,7 @@ class AgentManager:
                 "plan_scan_baseline": s.plan_scan_baseline,
                 "plan_path": s.plan_path or "",
                 "llm_no": s.llm_no,
+                "knowledge_scope": normalize_knowledge_scope(s.knowledge_scope),
                 "llm_history": llm_hist}
 
     def _session_file(self, sid: str) -> Path:
@@ -336,7 +379,9 @@ class AgentManager:
                        plan_path=_sanitize_desktop_plan_path(item["id"], item.get("plan_path") or ""),
                        status="idle", agent=None,
                        llm_history=item.get("llm_history"),
-                       llm_no=item.get("llm_no"))
+                       llm_no=item.get("llm_no"),
+                       knowledge_scope=normalize_knowledge_scope(
+                           item.get("knowledge_scope") or item.get("knowledgeScope")))
 
     def _load_sessions(self):
         # New format: one file per session under temp/desktop_sessions/.
@@ -787,6 +832,7 @@ class AgentManager:
             "pinned": sess.pinned,
             "untitled": sess.untitled,
             "model": self._live_model(sess),
+            "knowledgeScope": normalize_knowledge_scope(sess.knowledge_scope),
         }
         if include_messages:
             out["messages"] = list(sess.messages)
@@ -804,9 +850,14 @@ class AgentManager:
         self._persist_session(sess)
         return msg
 
-    def create_session(self, cwd: Optional[str] = None) -> Session:
+    def create_session(self, cwd: Optional[str] = None, knowledge_scope: Optional[dict] = None) -> Session:
         sid = "sess-" + uuid.uuid4().hex[:12]
-        sess = Session(id=sid, cwd=str(cwd or self.ga_root), llm_no=_global_default_llm_no())
+        sess = Session(
+            id=sid,
+            cwd=str(cwd or self.ga_root),
+            llm_no=_global_default_llm_no(),
+            knowledge_scope=normalize_knowledge_scope(knowledge_scope),
+        )
         with self.lock:
             self.sessions[sid] = sess
             self.active_session_id = sid
@@ -877,6 +928,7 @@ class AgentManager:
             if sess.agent is None:
                 sess.agent = self.make_agent(sess)
             agent = sess.agent
+            agent.knowledge_scope = normalize_knowledge_scope(sess.knowledge_scope)
             # 模型取会话绑定 sess.llm_no,未绑定回退全局默认。切换走 set_session_model。
             no = sess.llm_no if sess.llm_no is not None else _global_default_llm_no()
             if no is not None and hasattr(agent, "next_llm"):
@@ -1730,7 +1782,10 @@ async def list_sessions_handler(request):
 
 async def new_session_handler(request):
     data = await read_json(request)
-    sess = manager.create_session(cwd=data.get("cwd") or data.get("path"))
+    sess = manager.create_session(
+        cwd=data.get("cwd") or data.get("path"),
+        knowledge_scope=data.get("knowledgeScope") or data.get("knowledge_scope"),
+    )
     return json_ok({"ok": True, "sessionId": sess.id, "session": manager.snapshot(sess)}, status=201)
 
 
@@ -1758,6 +1813,10 @@ async def patch_session_handler(request):
         sess.untitled = bool(data["untitled"])
     if "plan_scan_baseline" in data:
         sess.plan_scan_baseline = int(data["plan_scan_baseline"])
+    if "knowledgeScope" in data or "knowledge_scope" in data:
+        sess.knowledge_scope = normalize_knowledge_scope(
+            data.get("knowledgeScope") or data.get("knowledge_scope")
+        )
     sess.updated_at = time.time()
     manager._persist_session(sess)
     return json_ok({"ok": True, "session": manager.snapshot(sess, include_messages=False)})
