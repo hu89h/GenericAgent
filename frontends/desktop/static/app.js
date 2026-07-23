@@ -218,6 +218,25 @@ let bridgeUiOffline = false;
         if (!sid) throw new Error('session/cancel missing sessionId');
         return http(`/session/${encodeURIComponent(sid)}/cancel`, { method: 'POST', body: params || {} });
       }
+      case 'kb/status': return http('/kb/status');
+      case 'kb/docs': {
+        const id = params.kbId || params.id || '';
+        return http(`/kb/docs${id ? `?kbId=${encodeURIComponent(id)}` : ''}`);
+      }
+      case 'kb/search': return http('/kb/search', { method: 'POST', body: params || {} });
+      case 'kb/read': return http('/kb/read', { method: 'POST', body: params || {} });
+      case 'kb/image': return http('/kb/image', { method: 'POST', body: params || {} });
+      case 'kb/source': return http('/kb/source', { method: 'POST', body: params || {} });
+      case 'kb/open': return http('/kb/open', { method: 'POST', body: params || {} });
+      case 'kb/import': return http('/kb/import', { method: 'POST', body: params || {} });
+      case 'kb/import/status': return http(`/kb/import/${encodeURIComponent(params.jobId || params.id || '')}`);
+      case 'kb/build': return http('/kb/build', { method: 'POST', body: params || {} });
+      case 'kb/build/status': return http(`/kb/build/${encodeURIComponent(params.jobId || params.id || '')}`);
+      case 'kb/delete': {
+        const id = params.kbId || params.id;
+        if (!id) throw new Error('kb/delete missing kbId');
+        return http(`/kb/${encodeURIComponent(id)}`, { method: 'DELETE', body: params || {} });
+      }
       case 'app/path/open': return http('/path/open', { method: 'POST', body: params || {} });
       case 'services/start': {
         const id = params.id;
@@ -309,6 +328,18 @@ let bridgeUiOffline = false;
     getMykeyContent: () => rpc('services/mykey/get', {}),
     saveMykeyContent: (content) => rpc('services/mykey/save', { content }),
     importMemory: (sourceDir) => rpc('memory/import', { sourceDir }),
+    kbStatus: () => rpc('kb/status', {}),
+    kbDocs: (params = {}) => rpc('kb/docs', params),
+    kbSearch: (params = {}) => rpc('kb/search', params),
+    kbRead: (params = {}) => rpc('kb/read', params),
+    kbImage: (params = {}) => rpc('kb/image', params),
+    kbSource: (params = {}) => rpc('kb/source', params),
+    kbOpen: (params = {}) => rpc('kb/open', params),
+    kbImport: (params = {}) => rpc('kb/import', params),
+    kbImportStatus: (jobId) => rpc('kb/import/status', { jobId }),
+    kbBuild: (params = {}) => rpc('kb/build', params),
+    kbBuildStatus: (jobId) => rpc('kb/build/status', { jobId }),
+    kbDelete: (kbId, params = {}) => rpc('kb/delete', Object.assign({}, params, { kbId })),
     getGaSource: () => tauriInvoke('get_ga_source'),
     setGaSource: (dir) => tauriInvoke('set_ga_source', { dir }),
     clearGaSource: () => tauriInvoke('clear_ga_source'),
@@ -616,6 +647,7 @@ function gaGoPage(key) {
   renderSessionList();
   window.gaSetActiveFileComposer?.(key === 'collab' ? 'collab' : 'chat');
   if (key === 'collab') window.collabInit?.();
+  if (key === 'kb') window.gaKbShowLibraries?.();
 }
 window.gaGoPage = gaGoPage;
 nav.addEventListener('click', (e) => {
@@ -623,6 +655,354 @@ nav.addEventListener('click', (e) => {
   if (!item) return;
   gaGoPage(item.dataset.page);
 });
+
+/* ═══════════════ 知识库工作区 ═══════════════
+   页面只管理知识范围和展示状态；问答仍走现有 session/prompt/poll 链路，
+   这样知识库对话与历史会话使用同一份后端状态，不会出现两套消息生命周期。 */
+const kbState = {
+  status: null, view: 'libraries', activeKb: null, documents: [], activeDoc: null,
+  qaTimer: null, jobTimer: null, jobKind: '', jobId: '', qaBusy: false,
+};
+const kbEl = id => document.getElementById(id);
+const kbPageEls = {
+  library: kbEl('kb-library-view'), grid: kbEl('kb-library-grid'),
+  documents: kbEl('kb-documents-view'), docTitle: kbEl('kb-active-kb-title'), docs: kbEl('kb-doc-list'),
+  reader: kbEl('kb-reader-view'), title: kbEl('kb-doc-title'), source: kbEl('kb-md-view'),
+  qaLog: kbEl('kb-qa-log'), question: kbEl('kb-question'), ask: kbEl('kb-ask-btn'), open: kbEl('kb-open-doc'),
+  importRow: kbEl('kb-import-row'), importPath: kbEl('kb-import-path'),
+  task: kbEl('kb-task-modal'), taskTitle: kbEl('kb-task-title'), taskPhase: kbEl('kb-task-phase'),
+  taskCurrent: kbEl('kb-task-current'), taskCounts: kbEl('kb-task-counts'), taskSuccess: kbEl('kb-task-successes'),
+  taskFailure: kbEl('kb-task-failures'), taskClose: kbEl('kb-task-close'), build: kbEl('kb-build-modal'),
+  buildForm: kbEl('kb-build-form'), buildScope: kbEl('kb-build-scope'),
+};
+
+function kbScopeForDoc(doc) {
+  return normalizeKnowledgeScope({ mode: 'document', kb_id: doc.kb_id, data_id: doc.data_id,
+    file_name: doc.file_name, ref: doc.ref, title: doc.title });
+}
+
+function kbSetSessionScope(scope) {
+  const sess = activeSess();
+  if (!sess) return;
+  sess.knowledgeScope = normalizeKnowledgeScope(scope);
+  if (sess.bridgeSessionId) patchSession(sess, { knowledgeScope: sess.knowledgeScope });
+}
+
+function kbStatusKbs() {
+  return Array.isArray(kbState.status?.knowledge_bases) ? kbState.status.knowledge_bases : [];
+}
+
+function kbText(value) {
+  return String(value == null ? '' : value);
+}
+
+function kbRenderLibraries() {
+  const grid = kbPageEls.grid;
+  if (!grid) return;
+  const kbs = kbStatusKbs();
+  grid.innerHTML = '';
+  if (!kbs.length) {
+    grid.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.noData'))}</div>`;
+    return;
+  }
+  for (const kb of kbs) {
+    const card = document.createElement('article');
+    card.className = 'kb-library-card';
+    card.dataset.kbId = kb.id || '';
+    const stateText = kb.ready ? t('kb.ready') : t('kb.notReady');
+    card.innerHTML = `
+      <div class="kb-card-top"><div class="kb-card-icon"><span data-ga-icon="books"></span></div><span class="kb-status ${kb.ready ? 'ready' : 'pending'}">${escapeHtml(stateText)}</span></div>
+      <h3 class="kb-card-title"></h3>
+      <div class="kb-card-meta"></div>
+      <div class="kb-card-actions"><button type="button" class="kb-link-btn kb-open-library">${escapeHtml(t('kb.open'))}</button><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
+    card.querySelector('.kb-card-title').textContent = kb.name || kb.id || '';
+    card.querySelector('.kb-card-meta').textContent = `${kb.n_docs || 0} docs · ${kb.n_chunks || 0} chunks`;
+    card.querySelector('.kb-open-library').addEventListener('click', () => void kbOpenDocuments(kb));
+    card.querySelector('.kb-card-title').addEventListener('click', () => void kbOpenDocuments(kb));
+    card.querySelector('.kb-delete-library').addEventListener('click', () => void kbDeleteLibrary(kb));
+    grid.appendChild(card);
+    card.querySelectorAll('[data-ga-icon]').forEach(el => { if (typeof window.gaIcon === 'function') el.outerHTML = window.gaIcon(el.dataset.gaIcon, el.className || ''); });
+  }
+}
+
+function kbRenderDocuments() {
+  const docs = kbPageEls.docs;
+  if (!docs) return;
+  const query = kbText(kbEl('kb-doc-search')?.value).trim().toLowerCase();
+  const rows = kbState.documents.filter(doc => !query || `${doc.title} ${doc.file_name}`.toLowerCase().includes(query));
+  docs.innerHTML = '';
+  if (!rows.length) {
+    docs.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.noDocs'))}</div>`;
+    return;
+  }
+  for (const doc of rows) {
+    const row = document.createElement('button');
+    row.type = 'button'; row.className = 'kb-doc-card';
+    row.innerHTML = '<span class="kb-doc-icon" data-ga-icon="fileText"></span><span class="kb-doc-meta"><b></b><small></small></span>';
+    row.querySelector('b').textContent = doc.title || doc.file_name || doc.data_id;
+    row.querySelector('small').textContent = doc.file_name || '';
+    row.addEventListener('click', () => void kbOpenDocument(doc));
+    docs.appendChild(row);
+    row.querySelectorAll('[data-ga-icon]').forEach(el => { if (typeof window.gaIcon === 'function') el.outerHTML = window.gaIcon(el.dataset.gaIcon, el.className || ''); });
+  }
+}
+
+function kbRenderView() {
+  const view = kbState.view;
+  if (kbPageEls.library) kbPageEls.library.hidden = view !== 'libraries';
+  if (kbPageEls.documents) kbPageEls.documents.hidden = view !== 'documents';
+  if (kbPageEls.reader) kbPageEls.reader.hidden = view !== 'reader';
+  if (view === 'libraries') kbRenderLibraries();
+  if (view === 'documents') kbRenderDocuments();
+}
+
+async function kbRefresh() {
+  try {
+    kbState.status = await window.ga.kbStatus();
+    kbRenderView();
+  } catch (error) {
+    kbState.status = { knowledge_bases: [] };
+    kbRenderView();
+    showError(`${t('err.kbLoad')}: ${error.message || error}`);
+  }
+}
+
+async function kbOpenDocuments(kb) {
+  try {
+    kbState.activeKb = kb;
+    kbState.documents = (await window.ga.kbDocs({ kbId: kb.id })).documents || [];
+    kbState.view = 'documents';
+    if (kbPageEls.docTitle) kbPageEls.docTitle.textContent = kb.name || kb.id || '';
+    kbRenderView();
+  } catch (error) {
+    showError(`${t('err.kbLoad')}: ${error.message || error}`);
+  }
+}
+
+async function kbOpenDocument(doc) {
+  try {
+    kbState.activeDoc = doc;
+    kbState.view = 'reader';
+    const scope = kbScopeForDoc(doc);
+    kbSetSessionScope(scope);
+    if (kbPageEls.title) kbPageEls.title.textContent = doc.title || doc.file_name || '';
+    if (kbPageEls.source) kbPageEls.source.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.loading'))}</div>`;
+    if (kbPageEls.open) kbPageEls.open.disabled = false;
+    kbRenderView();
+    const result = await window.ga.kbRead({ kbId: doc.kb_id, dataId: doc.data_id, fileName: doc.file_name, ref: doc.ref, maxChars: 200000 });
+    if (result.error) throw new Error(result.error);
+    const content = result.content || '';
+    if (kbPageEls.source) kbPageEls.source.innerHTML = content ? renderMarkdown(content) : `<div class="kb-empty">${escapeHtml(t('kb.noData'))}</div>`;
+    kbRenderQa(activeSess());
+  } catch (error) {
+    if (kbPageEls.source) kbPageEls.source.innerHTML = `<div class="kb-empty kb-error">${escapeHtml(error.message || error)}</div>`;
+    showError(`${t('err.kbLoad')}: ${error.message || error}`);
+  }
+}
+
+function kbRenderQa(sess) {
+  const log = kbPageEls.qaLog;
+  if (!log) return;
+  log.innerHTML = '';
+  const messages = sess?.messages || [];
+  for (const msg of messages) {
+    if (!msg || !['user', 'assistant', 'error'].includes(msg.role)) continue;
+    const row = document.createElement('div');
+    row.className = `kb-qa-msg ${msg.role}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'kb-qa-bubble';
+    const text = msg.role === 'assistant' ? assistantStructuredText(msg) : (msg.display || msg.content || '');
+    if (msg.role === 'assistant') bubble.innerHTML = renderMarkdown(text || '');
+    else bubble.textContent = kbText(text);
+    row.appendChild(bubble);
+    if (msg.role === 'assistant' && Array.isArray(msg.citations) && msg.citations.length) {
+      const citations = document.createElement('div');
+      citations.className = 'kb-citations';
+      const title = document.createElement('div');
+      title.className = 'kb-citations-title';
+      title.textContent = t('kb.citations');
+      citations.appendChild(title);
+      for (const citation of msg.citations) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'kb-citation-btn';
+        button.textContent = citation.image_id
+          ? `🖼 ${citation.title || citation.file_name || citation.ref || citation.image_id}`
+          : (citation.title || citation.file_name || citation.ref || citation.data_id || t('kb.openCitation'));
+        button.title = t('kb.openCitation');
+        button.addEventListener('click', () => void kbOpenCitation(citation));
+        citations.appendChild(button);
+      }
+      bubble.appendChild(citations);
+    }
+    log.appendChild(row);
+  }
+  if (!messages.length) log.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.qaEmpty'))}</div>`;
+  log.scrollTop = log.scrollHeight;
+}
+
+async function kbOpenCitation(citation) {
+  try {
+    const result = await window.ga.kbOpen({
+      kbId: citation.kb_id,
+      dataId: citation.data_id,
+      imageId: citation.image_id,
+      ref: citation.ref,
+    });
+    if (result?.error) throw new Error(result.error);
+  } catch (error) {
+    showError(`${t('err.kbLoad')}: ${error.message || error}`);
+  }
+}
+
+function kbStartQaMirror(sess) {
+  if (kbState.qaTimer) clearInterval(kbState.qaTimer);
+  const tick = () => {
+    kbRenderQa(sess);
+    if (!rt(sess).busy) {
+      clearInterval(kbState.qaTimer); kbState.qaTimer = null; kbState.qaBusy = false;
+      if (kbPageEls.ask) kbPageEls.ask.disabled = false;
+    }
+  };
+  kbState.qaTimer = setInterval(tick, 350);
+  tick();
+}
+
+async function kbAskQuestion() {
+  const question = kbText(kbPageEls.question?.value).trim();
+  if (!question || kbState.qaBusy) return;
+  if (!kbState.activeDoc) { showError(t('err.kbAsk')); return; }
+  kbState.qaBusy = true;
+  if (kbPageEls.ask) kbPageEls.ask.disabled = true;
+  let sess = activeSess();
+  if (!sess) sess = newSession();
+  sess.knowledgeScope = kbScopeForDoc(kbState.activeDoc);
+  if (sess.bridgeSessionId) patchSession(sess, { knowledgeScope: sess.knowledgeScope });
+  if (kbPageEls.question) kbPageEls.question.value = '';
+  try {
+    const accepted = await sendPrompt(question);
+    if (!accepted) throw new Error(t('err.kbAsk'));
+    kbStartQaMirror(sess);
+  } catch (error) {
+    kbState.qaBusy = false;
+    if (kbPageEls.ask) kbPageEls.ask.disabled = false;
+    showError(`${t('err.kbAsk')}: ${error.message || error}`);
+  }
+}
+
+function kbSetTask(job, kind) {
+  const counts = job.counts || job.summary || {};
+  if (kbPageEls.taskTitle) kbPageEls.taskTitle.textContent = kind === 'import' ? t('kb.importing') : t('kb.building');
+  if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = job.phase || job.state || '';
+  if (kbPageEls.taskCurrent) kbPageEls.taskCurrent.textContent = job.currentKb || '';
+  if (kbPageEls.taskCounts) {
+    const success = counts.succeeded ?? counts.success ?? 0;
+    const failure = counts.failed ?? counts.failure ?? 0;
+    kbPageEls.taskCounts.textContent = t('kb.counts').replace('{success}', success).replace('{failure}', failure);
+  }
+  const items = job.files || job.result?.results || [];
+  const successItems = items.filter(item => ['succeeded', 'built', 'up-to-date', 'empty', 'skipped'].includes(item.status));
+  const failureItems = items.filter(item => !successItems.includes(item));
+  const renderItems = list => list.map(item => {
+    const label = item.source || item.kb_id || item.path || item.error || '';
+    return `<div>${escapeHtml(label)}${item.error ? `: ${escapeHtml(item.error)}` : ''}</div>`;
+  }).join('');
+  if (kbPageEls.taskSuccess) { kbPageEls.taskSuccess.hidden = !successItems.length; kbPageEls.taskSuccess.innerHTML = renderItems(successItems); }
+  if (kbPageEls.taskFailure) { kbPageEls.taskFailure.hidden = !failureItems.length; kbPageEls.taskFailure.innerHTML = renderItems(failureItems); }
+}
+
+async function kbTrackJob(kind, jobId) {
+  if (kbState.jobTimer) clearInterval(kbState.jobTimer);
+  kbState.jobKind = kind; kbState.jobId = jobId;
+  openModal('kb-task-modal');
+  const poll = async () => {
+    try {
+      const job = kind === 'import' ? await window.ga.kbImportStatus(jobId) : await window.ga.kbBuildStatus(jobId);
+      kbSetTask(job, kind);
+      const done = ['completed', 'completed_with_failures', 'failed'].includes(job.state) || String(job.phase).includes('completed');
+      if (done) {
+        clearInterval(kbState.jobTimer); kbState.jobTimer = null;
+        if (kbPageEls.taskClose) kbPageEls.taskClose.hidden = false;
+        await kbRefresh();
+        return true;
+      }
+      return false;
+    } catch (error) {
+      clearInterval(kbState.jobTimer); kbState.jobTimer = null;
+      if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = error.message || error;
+      if (kbPageEls.taskClose) kbPageEls.taskClose.hidden = false;
+      return true;
+    }
+  };
+  const finished = await poll();
+  if (!finished) kbState.jobTimer = setInterval(poll, 500);
+}
+
+async function kbImport() {
+  const sourceDir = kbText(kbPageEls.importPath?.value).trim();
+  if (!sourceDir) return;
+  try {
+    const result = await window.ga.kbImport({ sourceDir });
+    if (!result.jobId) throw new Error(result.error || t('err.kbImport'));
+    if (kbPageEls.importRow) kbPageEls.importRow.hidden = true;
+    if (kbPageEls.importPath) kbPageEls.importPath.value = '';
+    await kbTrackJob('import', result.jobId);
+  } catch (error) { showError(`${t('err.kbImport')}: ${error.message || error}`); }
+}
+
+async function kbDeleteLibrary(kb) {
+  if (!window.confirm(t('kb.deleteConfirm'))) return;
+  try { await window.ga.kbDelete(kb.id, { deleteData: true }); await kbRefresh(); }
+  catch (error) { showError(`${t('err.kbDelete')}: ${error.message || error}`); }
+}
+
+function kbOpenBuildModal() {
+  if (!kbPageEls.buildScope) return;
+  kbPageEls.buildScope.innerHTML = `<option value="">${escapeHtml(t('kb.buildAll'))}</option>`;
+  for (const kb of kbStatusKbs()) {
+    const option = document.createElement('option'); option.value = kb.id; option.textContent = kb.name || kb.id;
+    kbPageEls.buildScope.appendChild(option);
+  }
+  openModal('kb-build-modal');
+}
+
+function initKbPage() {
+  bindClick('kb-refresh-btn', () => void kbRefresh());
+  bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb));
+  bindClick('kb-back-libraries', () => { kbState.view = 'libraries'; kbRenderView(); });
+  bindClick('kb-back-documents', () => { kbState.view = 'documents'; kbRenderView(); });
+  bindClick('kb-import-btn', () => { if (kbPageEls.importRow) kbPageEls.importRow.hidden = !kbPageEls.importRow.hidden; });
+  bindClick('kb-import-confirm', () => void kbImport());
+  bindClick('kb-build-btn', kbOpenBuildModal);
+  bindClick('kb-ask-btn', () => void kbAskQuestion());
+  bindClick('kb-open-doc', async () => {
+    const doc = kbState.activeDoc;
+    if (!doc) return;
+    try { await window.ga.kbOpen({ kbId: doc.kb_id, dataId: doc.data_id, ref: doc.ref }); }
+    catch (error) { showError(`${t('file.openFailed')}: ${error.message || error}`); }
+  });
+  bindClick('kb-task-close', () => closeModals());
+  kbEl('kb-doc-search')?.addEventListener('input', kbRenderDocuments);
+  kbPageEls.buildForm?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const scope = kbPageEls.buildScope?.value || '';
+    const mode = kbPageEls.buildForm.querySelector('input[name="mode"]:checked')?.value || 'incremental';
+    closeModals();
+    try {
+      const result = await window.ga.kbBuild({ kbId: scope || null, mode });
+      if (!result.jobId) throw new Error(result.error || t('err.kbBuild'));
+      await kbTrackJob('build', result.jobId);
+    } catch (error) { showError(`${t('err.kbBuild')}: ${error.message || error}`); }
+  });
+  kbRefresh();
+}
+
+window.gaKbShowLibraries = () => {
+  kbState.view = 'libraries'; kbState.activeDoc = null; kbRenderView(); void kbRefresh();
+};
+// This block is declared before the generic modal helpers below; defer binding
+// until the current script has finished initializing those shared helpers.
+setTimeout(initKbPage, 0);
 
 /* ═══════════════ 弹窗开关 ═══════════════ */
 const openModal = (id) => { const m = document.getElementById(id); if (m) m.hidden = false; };
@@ -1541,6 +1921,35 @@ function rt(sess) {
 const activeSess = () => state.sessions.get(state.activeId) || null;
 const isActive = (sess) => sess && sess.id === state.activeId;
 
+function normalizeKnowledgeScope(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const mode = raw.mode || raw.kind || 'all';
+  if (mode === 'kb' || mode === 'knowledge_base') {
+    const kbId = raw.kb_id || raw.kbId || raw.id;
+    return kbId ? { mode: 'kb', kb_id: String(kbId) } : { mode: 'all' };
+  }
+  if (mode === 'document' || mode === 'doc') {
+    const kbId = raw.kb_id || raw.kbId;
+    const dataId = raw.data_id || raw.dataId;
+    if (kbId && dataId) {
+      return {
+        mode: 'document', kb_id: String(kbId), data_id: String(dataId),
+        ...(raw.file_name || raw.fileName ? { file_name: String(raw.file_name || raw.fileName) } : {}),
+        ...(raw.ref ? { ref: String(raw.ref) } : {}),
+        ...(raw.title ? { title: String(raw.title) } : {}),
+      };
+    }
+  }
+  return { mode: 'all' };
+}
+
+function knowledgeScopeLabel(scope) {
+  const s = normalizeKnowledgeScope(scope);
+  if (s.mode === 'kb') return `KB: ${s.kb_id}`;
+  if (s.mode === 'document') return s.title || s.file_name || s.data_id;
+  return t('kb.buildAll');
+}
+
 function saveSessions() {}
 function patchSession(sess, fields) {
   if (!sess.bridgeSessionId) return;
@@ -1562,7 +1971,8 @@ async function loadSessions() {
         id: s.id, bridgeSessionId: s.id, title: s.title,
         messages: [], untitled: s.untitled ?? true,
         pinned: s.pinned ?? false, lastActiveTs: s.updatedAt || s.createdAt,
-        llmNo: s.model && s.model.llmNo != null ? s.model.llmNo : null
+        llmNo: s.model && s.model.llmNo != null ? s.model.llmNo : null,
+        knowledgeScope: normalizeKnowledgeScope(s.knowledgeScope)
       });
     }
     // 刷新后固定恢复「上次正在看的会话」（前端持久化的 ga_active），而不是 bridge 的
@@ -2651,7 +3061,9 @@ function renderSessionList() {
 if (searchInput) searchInput.addEventListener('input', () => renderSessionList());
 async function ensureBridgeSession(sess) {
   if (sess.bridgeSessionId) return sess.bridgeSessionId;
-  const res = await window.ga.rpc('session/new', { cwd: '', mcp_servers: [] });
+  const res = await window.ga.rpc('session/new', {
+    cwd: '', mcp_servers: [], knowledgeScope: normalizeKnowledgeScope(sess.knowledgeScope)
+  });
   if (res?.error) throw new Error(res.error.message || res.error);
   const sid = res.sessionId || res.result?.sessionId;
   if (!sid) throw new Error('session/new did not return a session id');
@@ -2726,7 +3138,8 @@ function newSession() {
   }
   discardEmptyDraftSessions();
   const localId = 'local-' + Date.now() + '-' + Math.random().toString(16).slice(2);
-  const sess = { id: localId, bridgeSessionId: null, title: '', messages: [], untitled: true, lastActiveTs: Date.now() };
+  const sess = { id: localId, bridgeSessionId: null, title: '', messages: [], untitled: true,
+    lastActiveTs: Date.now(), knowledgeScope: { mode: 'all' } };
   state.sessions.set(localId, sess);
   setActiveSession(sess.id);
   renderSessionList();
@@ -2753,6 +3166,7 @@ function setActiveSession(id) {
   if (id) localStorage.setItem('ga_active', id);  // 持久化当前会话，刷新后固定恢复它
   const sess = state.sessions.get(id);
   if (!sess) return;
+  sess.knowledgeScope = normalizeKnowledgeScope(sess.knowledgeScope);
   // 切会话:回显该会话绑定的模型(后端权威)。未绑定(null)则保持当前全局默认显示。
   if (sess.llmNo != null && sess.llmNo !== state.llmNo) {
     state.llmNo = sess.llmNo;
@@ -2937,6 +3351,7 @@ function normalize(m) {
   if (m.stopped) o.stopped = true;
   if (m.images) o.images = m.images;
   if (m.files) o.files = m.files;
+  if (Array.isArray(m.citations)) o.citations = m.citations;
   if (m.ts) o.ts = m.ts;
   // [turn_segs双轨] 透传结构化轮数组(若后端提供)；落库消息与 partial 都可能带
   if (Array.isArray(m.turn_segs)) o.turn_segs = m.turn_segs;
