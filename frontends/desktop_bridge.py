@@ -1907,6 +1907,310 @@ async def path_open_handler(request):
     return json_ok({"ok": True, "path": str(target)})
 
 
+# ---------------------------------------------------------------------------
+# Unified knowledge-base API
+# ---------------------------------------------------------------------------
+
+def _kb_backend():
+    manager.ensure_ga_import_path()
+    from knowledge_base import backend
+
+    return backend
+
+
+def _kb_job_snapshot(job: dict) -> dict:
+    return json.loads(json.dumps(job, ensure_ascii=False, default=str))
+
+
+def _kb_file_count(source_dir: str) -> int:
+    try:
+        return sum(1 for path in Path(source_dir).rglob("*") if path.is_file())
+    except OSError:
+        return 0
+
+
+async def kb_status_handler(request):
+    try:
+        return json_ok(_kb_backend().status())
+    except Exception as error:
+        return json_ok({"ok": False, "error": str(error)}, status=500)
+
+
+async def kb_documents_handler(request):
+    try:
+        kb_id = str(request.query.get("kb_id") or request.query.get("kbId") or "").strip() or None
+        return json_ok({"documents": _kb_backend().list_documents(kb_id=kb_id)})
+    except Exception as error:
+        return json_ok({"ok": False, "error": str(error)}, status=500)
+
+
+async def kb_search_handler(request):
+    try:
+        data = await read_json(request)
+        query = str(data.get("query") or "").strip()
+        if not query:
+            return json_ok({"ok": False, "error": "missing_query"}, status=400)
+        result = _kb_backend().search(
+            query,
+            top_k=data.get("topK", data.get("top_k", 6)),
+            kb_id=data.get("kbId", data.get("kb_id")),
+            file_name=data.get("fileName", data.get("file_name")),
+            title=data.get("title"),
+            mode=data.get("mode", "rrf"),
+        )
+        return json_ok({"ok": True, "query": query, "results": result})
+    except (TypeError, ValueError) as error:
+        return json_ok({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return json_ok({"ok": False, "error": str(error)}, status=500)
+
+
+async def kb_read_handler(request):
+    try:
+        data = await read_json(request)
+        result = _kb_backend().read_document(
+            kb_id=data.get("kbId", data.get("kb_id")),
+            data_id=data.get("dataId", data.get("data_id")),
+            file_name=data.get("fileName", data.get("file_name")),
+            ref=data.get("ref"),
+            max_chars=data.get("maxChars", data.get("max_chars", 200000)),
+        )
+        return json_ok(result, status=404 if result.get("error") else 200)
+    except (TypeError, ValueError) as error:
+        return json_ok({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return json_ok({"ok": False, "error": str(error)}, status=500)
+
+
+async def kb_image_handler(request):
+    try:
+        data = await read_json(request)
+        result = _kb_backend().read_image(
+            kb_id=data.get("kbId", data.get("kb_id")),
+            image_id=data.get("imageId", data.get("image_id")),
+            image_path=data.get("imagePath", data.get("image_path")),
+            data_id=data.get("dataId", data.get("data_id")),
+            ref=data.get("ref"),
+        )
+        return json_ok(result, status=404 if result.get("error") else 200)
+    except Exception as error:
+        return json_ok({"ok": False, "error": str(error)}, status=500)
+
+
+async def kb_source_handler(request):
+    try:
+        data = await read_json(request)
+        result = _kb_backend().resolve_source_document(
+            kb_id=data.get("kbId", data.get("kb_id")),
+            data_id=data.get("dataId", data.get("data_id")),
+            file_name=data.get("fileName", data.get("file_name")),
+            ref=data.get("ref"),
+        )
+        return json_ok(result, status=404 if result.get("error") else 200)
+    except Exception as error:
+        return json_ok({"ok": False, "error": str(error)}, status=500)
+
+
+async def kb_open_handler(request):
+    try:
+        data = await read_json(request)
+        path = _kb_backend().resolve_open_target(
+            kb_id=data.get("kbId", data.get("kb_id")) or "",
+            data_id=data.get("dataId", data.get("data_id")) or "",
+            image_id=data.get("imageId", data.get("image_id")) or "",
+            image_path=data.get("imagePath", data.get("image_path")) or "",
+            ref=data.get("ref") or "",
+        )
+        if not path:
+            return json_ok({"ok": False, "error": "target_not_found"}, status=404)
+        _open_path_default(Path(path))
+        return json_ok({"ok": True, "path": str(path)})
+    except OSError as error:
+        return json_ok({"ok": False, "error": str(error)}, status=500)
+    except Exception as error:
+        return json_ok({"ok": False, "error": str(error)}, status=400)
+
+
+async def kb_import_handler(request):
+    data = await read_json(request)
+    source_dir = str(data.get("sourceDir") or data.get("path") or "").strip()
+    if not source_dir or not os.path.isdir(source_dir):
+        return json_ok({"ok": False, "error": "source_directory_not_found"}, status=400)
+    backend = _kb_backend()
+    job_id = f"kbimp-{uuid.uuid4().hex[:16]}"
+    total = _kb_file_count(source_dir)
+    job = {
+        "ok": True,
+        "jobId": job_id,
+        "state": "queued",
+        "phase": "queued",
+        "sourceDir": source_dir,
+        "kbId": backend.kb_id_for_source(source_dir),
+        "counts": {"total": total, "completed": 0, "succeeded": 0, "failed": 0},
+        "files": [],
+        "result": None,
+        "error": "",
+        "startedAt": int(time.time()),
+        "updatedAt": int(time.time()),
+    }
+    with _kb_import_jobs_lock:
+        _kb_import_jobs[job_id] = job
+
+    def run_import():
+        with _kb_import_jobs_lock:
+            current = _kb_import_jobs[job_id]
+            current.update(state="running", phase="copying", updatedAt=int(time.time()))
+        try:
+            result = backend.import_kb(
+                source_dir,
+                kb_id=data.get("kbId", data.get("kb_id", "")),
+                name=str(data.get("name") or ""),
+                overwrite=bool(data.get("overwrite", False)),
+            )
+            item = {"source": source_dir, "status": "succeeded", "error": ""}
+            with _kb_import_jobs_lock:
+                current = _kb_import_jobs[job_id]
+                current.update(
+                    state="completed",
+                    phase="completed",
+                    result=result,
+                    updatedAt=int(time.time()),
+                    files=[item],
+                )
+                current["counts"].update(completed=total, succeeded=1, failed=0)
+        except Exception as error:
+            item = {"source": source_dir, "status": "failed", "error": str(error)}
+            with _kb_import_jobs_lock:
+                current = _kb_import_jobs[job_id]
+                current.update(
+                    state="failed",
+                    phase="failed",
+                    error=str(error),
+                    updatedAt=int(time.time()),
+                    files=[item],
+                )
+                current["counts"].update(completed=total, succeeded=0, failed=1)
+
+    threading.Thread(target=run_import, name=job_id, daemon=True).start()
+    return json_ok({"ok": True, "jobId": job_id, "state": "queued"}, status=202)
+
+
+async def kb_import_status_handler(request):
+    job_id = str(request.match_info.get("job_id") or "")
+    with _kb_import_jobs_lock:
+        job = _kb_import_jobs.get(job_id)
+        if job is None:
+            return json_ok({"ok": False, "error": "import_job_not_found"}, status=404)
+        return json_ok(_kb_job_snapshot(job))
+
+
+async def kb_delete_handler(request):
+    kb_id = str(request.match_info.get("kb_id") or "").strip()
+    if not kb_id:
+        return json_ok({"ok": False, "error": "missing_kb_id"}, status=400)
+    try:
+        data = await read_json(request)
+        result = _kb_backend().delete_kb(kb_id, delete_data=bool(data.get("deleteData", False)))
+        if not result.get("removed"):
+            return json_ok({"ok": False, "error": "knowledge_base_not_found", **result}, status=404)
+        return json_ok({"ok": True, **result})
+    except RuntimeError as error:
+        return json_ok({"ok": False, "error": str(error)}, status=409)
+    except Exception as error:
+        return json_ok({"ok": False, "error": str(error)}, status=400)
+
+
+async def kb_build_handler(request):
+    data = await read_json(request)
+    kb_id = str(data.get("kbId") or data.get("kb_id") or data.get("id") or "").strip() or None
+    requested_mode = str(data.get("mode") or "incremental").strip().lower()
+    if requested_mode == "rebuild":
+        force, build_mode = True, "full"
+    elif requested_mode in {"text", "images", "full"}:
+        force, build_mode = bool(data.get("force", False)), requested_mode
+    else:
+        force, build_mode = bool(data.get("force", False)), "full"
+    backend = _kb_backend()
+    with _kb_build_jobs_lock:
+        if any(job.get("state") in {"queued", "running"} for job in _kb_build_jobs.values()):
+            return json_ok({"ok": False, "error": "build_in_progress"}, status=409)
+    targets = [kb for kb in backend.load_config() if not kb_id or kb.get("id") == kb_id]
+    job_id = f"kbbld-{uuid.uuid4().hex[:16]}"
+    now = int(time.time())
+    job = {
+        "ok": True,
+        "jobId": job_id,
+        "state": "queued",
+        "phase": "queued",
+        "mode": requested_mode,
+        "kbId": kb_id or "",
+        "scope": "selected" if kb_id else "all",
+        "targets": [{"id": kb.get("id", ""), "name": kb.get("name") or kb.get("id", "")} for kb in targets],
+        "done": 0,
+        "total": len(targets),
+        "currentKb": "",
+        "logs": [],
+        "result": None,
+        "error": "",
+        "startedAt": now,
+        "updatedAt": now,
+    }
+    with _kb_build_jobs_lock:
+        _kb_build_jobs[job_id] = job
+
+    def log(message):
+        text = str(message or "").strip()
+        if not text:
+            return
+        with _kb_build_jobs_lock:
+            current = _kb_build_jobs[job_id]
+            current["logs"] = (current["logs"] + [text])[-100:]
+            current["updatedAt"] = int(time.time())
+            current["phase"] = "indexing"
+            match = re.search(r"\[kb:([^\]]+)\]", text)
+            if match:
+                current["currentKb"] = match.group(1)
+
+    def run_build():
+        with _kb_build_jobs_lock:
+            _kb_build_jobs[job_id].update(state="running", phase="starting", updatedAt=int(time.time()))
+        try:
+            result = backend.build(
+                kb_id=kb_id,
+                force=force,
+                mode=build_mode,
+                logfn=log,
+            )
+            summary = result.get("summary") if isinstance(result, dict) else {}
+            with _kb_build_jobs_lock:
+                current = _kb_build_jobs[job_id]
+                current.update(
+                    state="completed" if not result.get("has_failures") else "failed",
+                    phase="completed" if not result.get("has_failures") else "completed_with_failures",
+                    result=result,
+                    updatedAt=int(time.time()),
+                    done=len(result.get("results") or []),
+                )
+                current["summary"] = summary or {}
+        except Exception as error:
+            with _kb_build_jobs_lock:
+                _kb_build_jobs[job_id].update(
+                    state="failed", phase="failed", error=str(error), updatedAt=int(time.time())
+                )
+
+    threading.Thread(target=run_build, name=job_id, daemon=True).start()
+    return json_ok({"ok": True, "jobId": job_id, "state": "queued"}, status=202)
+
+
+async def kb_build_status_handler(request):
+    job_id = str(request.match_info.get("job_id") or "")
+    with _kb_build_jobs_lock:
+        job = _kb_build_jobs.get(job_id)
+        if job is None:
+            return json_ok({"ok": False, "error": "build_job_not_found"}, status=404)
+        return json_ok(_kb_job_snapshot(job))
+
+
 # File attachments live under GA's own temp dir (gitignored), NOT the OS temp
 # dir, so they survive bridge restarts. Instead of wiping everything on startup,
 # we keep files for UPLOAD_RETENTION_DAYS and only sweep stale ones.
@@ -2463,6 +2767,18 @@ def create_app():
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
     app.router.add_post("/session/{sid}/restore", restore_handler)
     app.router.add_post("/session/{sid}/model", session_model_handler)
+    app.router.add_get("/kb/status", kb_status_handler)
+    app.router.add_get("/kb/docs", kb_documents_handler)
+    app.router.add_post("/kb/search", kb_search_handler)
+    app.router.add_post("/kb/read", kb_read_handler)
+    app.router.add_post("/kb/image", kb_image_handler)
+    app.router.add_post("/kb/source", kb_source_handler)
+    app.router.add_post("/kb/open", kb_open_handler)
+    app.router.add_post("/kb/import", kb_import_handler)
+    app.router.add_get("/kb/import/{job_id}", kb_import_status_handler)
+    app.router.add_post("/kb/build", kb_build_handler)
+    app.router.add_get("/kb/build/{job_id}", kb_build_status_handler)
+    app.router.add_delete("/kb/{kb_id}", kb_delete_handler)
     app.router.add_post("/path/open", path_open_handler)
     app.router.add_post("/upload", upload_handler)
     app.router.add_delete("/upload", upload_delete_handler)
