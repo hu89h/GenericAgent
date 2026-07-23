@@ -637,12 +637,15 @@ class KnowledgeBaseRetriever:
         image_path: str | None = None,
         data_id: str | None = None,
         ref: str | None = None,
+        kb_id: str | None = None,
     ) -> dict:
         image_id = str(image_id or "").strip()
         image_path = str(image_path or "").strip().replace("\\", "/")
         data_id = str(data_id or "").strip()
         ref = str(ref or "").strip().replace("\\", "/")
         for kb in self._load_config():
+            if kb_id and kb["id"] != kb_id:
+                continue
             if not kb.get("exists"):
                 continue
             for asset in self._assets_for_kb(kb):

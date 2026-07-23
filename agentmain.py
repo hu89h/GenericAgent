@@ -8,6 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from llmcore import reload_mykeys, ToolClient, MixinSession, NativeToolClient, NativeClaudeSession, NativeOAISession, resolve_client
 from agent_loop import agent_runner_loop
+from knowledge_base.agent_tools import KB_TOOL_SCHEMAS
 try:
     from plugins.hooks import discover_and_load; discover_and_load()
 except Exception: pass
@@ -18,8 +19,11 @@ BANNED_TOOLS = (['ask_user', 'start_long_term_update'] if '--no-user-tools' in s
 def load_tool_schema(suffix=''):
     global TOOLS_SCHEMA
     TS = open(os.path.join(script_dir, f'assets/tools_schema{suffix}.json'), 'r', encoding='utf-8').read()
-    TOOLS_SCHEMA = json.loads(TS if os.name == 'nt' else TS.replace('powershell', 'bash'))
-    TOOLS_SCHEMA = [t for t in TOOLS_SCHEMA if t.get('function', {}).get('name') not in BANNED_TOOLS]
+    schema = json.loads(TS if os.name == 'nt' else TS.replace('powershell', 'bash'))
+    schema = [t for t in schema if t.get('function', {}).get('name') not in BANNED_TOOLS]
+    names = {t.get('function', {}).get('name') for t in schema}
+    schema.extend(tool for tool in KB_TOOL_SCHEMAS if tool['function']['name'] not in names)
+    TOOLS_SCHEMA = schema
 load_tool_schema()
 
 lang_suffix = '_en' if os.environ.get('GA_LANG', '') == 'en' else ''

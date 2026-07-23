@@ -7,6 +7,7 @@ if sys.stderr is None: sys.stderr = open(os.devnull, "w")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from agent_loop import BaseHandler, StepOutcome, json_default
+from knowledge_base.agent_tools import KnowledgeBaseToolsMixin
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 def safe_print(*args, **kwargs):
@@ -277,7 +278,7 @@ def consume_file(dr, file):
         os.remove(os.path.join(dr, file))
         return content
 
-class GenericAgentHandler(BaseHandler):
+class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
     '''Generic Agent 工具库，包含多种工具的实现。工具函数自动加上了 do_ 前缀。实际工具名没有前缀。'''
     def __init__(self, parent, last_history=None, cwd='./temp'):
         self.parent = parent

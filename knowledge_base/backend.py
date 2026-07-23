@@ -895,9 +895,9 @@ def list_chunks(data_id=None, kb_id=None, ref=None, preview_chars=80, limit=400)
     )
 
 
-def read_image(image_id=None, image_path=None, data_id=None, ref=None):
+def read_image(image_id=None, image_path=None, data_id=None, ref=None, kb_id=None):
     return _retrieval().read_image(
-        image_id=image_id, image_path=image_path, data_id=data_id, ref=ref,
+        image_id=image_id, image_path=image_path, data_id=data_id, ref=ref, kb_id=kb_id,
     )
 
 
