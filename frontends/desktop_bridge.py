@@ -36,7 +36,7 @@ WS API (state sync):
 """
 from __future__ import annotations
 
-import asyncio, atexit, contextlib, importlib, json, os, re, shutil, signal, subprocess, sys
+import asyncio, atexit, contextlib, hashlib, importlib, json, os, re, shutil, signal, subprocess, sys
 from collections import Counter, deque
 import threading, time, traceback, uuid
 from dataclasses import dataclass, field
@@ -45,6 +45,84 @@ from typing import Any, Dict, List, Optional, Set
 from aiohttp import web, WSMsgType
 
 APP_DIR = Path(__file__).resolve().parent
+
+
+def _hot_reload_enabled() -> bool:
+    """Enable source hot reload only when the host sets the switch to 1."""
+    return os.environ.get("GA_DESKTOP_HOT_RELOAD", "").strip() == "1"
+
+
+_HOT_RELOAD_IGNORED_DIRS = frozenset({
+    ".git", ".venv", "venv", "env", "__pycache__", "node_modules",
+    "target", "temp", "tmp", "tests", "test", "build", "dist",
+})
+
+
+def _walk_source_files(root: Path, *, recursive: bool) -> list[Path]:
+    """Discover Python source files without watching generated or test trees."""
+    if not root.is_dir():
+        return []
+    try:
+        candidates = root.rglob("*.py") if recursive else root.glob("*.py")
+        return [
+            path for path in candidates
+            if path.is_file() and not any(part in _HOT_RELOAD_IGNORED_DIRS for part in path.parts)
+        ]
+    except OSError:
+        return []
+
+
+def _hot_reload_paths(*, frontend: bool) -> tuple[Path, ...]:
+    """Discover the desktop source files used for hot reload.
+
+    Frontend changes only refresh the WebView. Python changes restart the Bridge
+    so imports and managed services are rebuilt in a clean interpreter. The
+    source roots are stable, while individual modules can be added without
+    changing this watcher.
+    """
+    paths: list[Path] = []
+
+    # The desktop shell lives under frontends/; discover all of its Python
+    # services, including newly added ones, but never watch static assets here.
+    paths.extend(_walk_source_files(APP_DIR, recursive=True))
+
+    # The effective GA core may be an external checkout. Include its top-level
+    # modules and the code/plugin directories that can be imported at runtime.
+    paths.extend(_walk_source_files(DEFAULT_GA_ROOT, recursive=False))
+    for name in ("ga_cli", "reflect", "plugins"):
+        paths.extend(_walk_source_files(DEFAULT_GA_ROOT / name, recursive=True))
+
+    if frontend:
+        static_dir = APP_DIR / "desktop" / "static"
+        with contextlib.suppress(OSError):
+            paths.extend(path for path in static_dir.rglob("*") if path.is_file())
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in sorted(paths, key=lambda item: str(item).casefold()):
+        path = path.resolve()
+        key = str(path).casefold()
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return tuple(unique)
+
+
+def _reload_signature(paths: tuple[Path, ...]) -> str:
+    entries = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append(f"{path}:{stat.st_mtime_ns}:{stat.st_size}")
+    return "\n".join(entries)
+
+
+def _reload_token() -> str:
+    return hashlib.sha256(
+        _reload_signature(_hot_reload_paths(frontend=True)).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def _ga_root_override() -> Optional[Path]:
@@ -100,6 +178,7 @@ def _desktop_parent_pid() -> Optional[int]:
 _DESKTOP_PARENT_PID = _desktop_parent_pid()
 _BRIDGE_SHUTDOWN = threading.Event()
 _PARENT_WATCHDOG_STARTED = threading.Event()
+_HOT_RELOAD_WATCHDOG_STARTED = threading.Event()
 
 _FINAL_INFO_RE = re.compile(r'\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$')
 
@@ -2131,7 +2210,9 @@ async def start_extras_handler(request):
 
 async def identity_handler(request):
     return json_ok({"ga_root": str(DEFAULT_GA_ROOT), "app_dir": str(APP_DIR), "pid": os.getpid(),
-                    "build_id": os.environ.get("GA_BUILD_ID", "")})
+                    "build_id": os.environ.get("GA_BUILD_ID", ""),
+                    "hot_reload": _hot_reload_enabled(),
+                    "reload_token": _reload_token() if _hot_reload_enabled() else ""})
 
 
 def _exit_bridge() -> None:
@@ -2178,6 +2259,46 @@ def _start_desktop_parent_watchdog() -> None:
         name="desktop-parent-watchdog",
         daemon=True,
     ).start()
+
+
+def _hot_reload_watchdog() -> None:
+    """Restart backend code while keeping the native desktop shell alive."""
+    if not _hot_reload_enabled():
+        return
+    previous = _reload_signature(_hot_reload_paths(frontend=False))
+    while not _BRIDGE_SHUTDOWN.wait(0.75):
+        current = _reload_signature(_hot_reload_paths(frontend=False))
+        if current == previous:
+            continue
+        print("[bridge] backend source change detected; restarting bridge", file=sys.stderr)
+        _BRIDGE_SHUTDOWN.set()
+        with contextlib.suppress(Exception):
+            services.stop_all_extras()
+        try:
+            # Rebuild all imported Python modules in a clean interpreter while
+            # preserving the host environment and desktop-parent relationship.
+            # POSIX keeps the PID; Windows may create a replacement PID for execv.
+            os.execv(sys.executable, [sys.executable, *sys.argv])
+        except Exception as exc:
+            print(f"[bridge] hot reload failed: {exc}", file=sys.stderr)
+            os._exit(1)
+        return
+
+
+def _start_hot_reload_watchdog() -> None:
+    if not _hot_reload_enabled() or _HOT_RELOAD_WATCHDOG_STARTED.is_set():
+        return
+    _HOT_RELOAD_WATCHDOG_STARTED.set()
+    threading.Thread(
+        target=_hot_reload_watchdog,
+        name="hot-reload-watchdog",
+        daemon=True,
+    ).start()
+
+
+def _start_lifecycle_watchdogs() -> None:
+    _start_desktop_parent_watchdog()
+    _start_hot_reload_watchdog()
 
 
 async def bridge_exit_handler(request):
@@ -2301,6 +2422,20 @@ def create_app():
     static_dir = APP_DIR / "desktop" / "static"
 
     async def index_handler(request):
+        if _hot_reload_enabled():
+            html = (static_dir / "index.html").read_text(encoding="utf-8")
+            token = _reload_token()
+            for asset in ("fonts.css", "styles.css", "phosphor-icons.js", "i18n.js", "ga-web.js", "app.js"):
+                html = re.sub(
+                    rf"{re.escape(asset)}(?:\?v=[^\"']*)?",
+                    f"{asset}?v={token}",
+                    html,
+                )
+            return web.Response(
+                text=html,
+                content_type="text/html",
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
         return web.FileResponse(
             static_dir / "index.html",
             headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
@@ -2311,7 +2446,7 @@ def create_app():
 
     async def on_startup(app):
         hub.loop = asyncio.get_running_loop()
-        _start_desktop_parent_watchdog()
+        _start_lifecycle_watchdogs()
         services.autostart_extras()
 
     async def on_shutdown(app):
@@ -2326,5 +2461,5 @@ if __name__ == "__main__":
     host = os.environ.get("BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ.get("BRIDGE_PORT", "14168"))
     print(f"GenericAgent Web2 bridge: http://{host}:{port}  ws://{host}:{port}/ws", file=sys.stderr)
-    _start_desktop_parent_watchdog()
+    _start_lifecycle_watchdogs()
     web.run_app(create_app(), host=host, port=port, print=None)

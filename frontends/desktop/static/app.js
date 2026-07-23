@@ -59,6 +59,8 @@ let bridgeUiOffline = false;
   let cachedBridgeReady = null;
   let wsRetries = 0;
   let wsRetryTimer = null;
+  let hotReloadTimer = null;
+  let reloadToken = '';
   const bridgeBase = BRIDGE_ORIGIN;
   const wsUrl = `${BRIDGE_WS_ORIGIN}/ws`;
 
@@ -112,6 +114,27 @@ let bridgeUiOffline = false;
       throw err;
     }
     return data;
+  }
+
+  async function checkHotReload() {
+    try {
+      const identity = await http('/services/identity');
+      if (!identity?.hot_reload) return;
+      const nextToken = String(identity.reload_token || '');
+      if (reloadToken && nextToken && nextToken !== reloadToken) {
+        window.location.reload();
+        return;
+      }
+      if (nextToken) reloadToken = nextToken;
+    } catch (_) {
+      // The Bridge may be restarting after a backend edit; WS/HTTP retry handles recovery.
+    }
+  }
+
+  function startHotReloadPoll() {
+    if (hotReloadTimer) return;
+    void checkHotReload();
+    hotReloadTimer = setInterval(checkHotReload, 1000);
   }
 
   async function waitBridgeStatus(timeoutMs = 20000) {
@@ -306,7 +329,7 @@ let bridgeUiOffline = false;
   };
 
   connectWs();
-  http('/status').then(status => emit('bridge-ready', status))
+  http('/status').then(status => { emit('bridge-ready', status); startHotReloadPoll(); })
     .catch(err => emit('bridge-error', { type: 'http-error', message: err.message || String(err) }));
 })();
 
