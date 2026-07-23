@@ -16,29 +16,49 @@ from typing import Any, Callable, Dict
 
 
 @dataclass(frozen=True)
-class BuildServices:
+class DocumentServices:
     scan_documents: Callable[..., list]
     extract_text: Callable[..., str]
     chunk_document_records: Callable[..., list]
     build_sources: Callable[..., Dict[str, Any]]
     write_parent_chunks: Callable[..., None]
+
+
+@dataclass(frozen=True)
+class ImageServices:
     build_image_related_index: Callable[..., dict]
     image_records_for_chunk: Callable[..., list]
     analyze_image_jobs: Callable[..., dict]
     apply_image_analysis: Callable[..., None]
     write_image_assets: Callable[..., None]
     load_image_assets: Callable[..., list]
+
+
+@dataclass(frozen=True)
+class IndexServices:
     zvec_path: Callable[..., str]
     require_zvec: Callable[..., Any]
     zvec_meta: Callable[..., Dict[str, Any]]
     zvec_is_quickly_fresh: Callable[..., bool]
     build_zvec_index: Callable[..., tuple]
     append_zvec_image_index: Callable[..., tuple]
+
+
+@dataclass(frozen=True)
+class UsageServices:
     set_usage: Callable[..., None]
     empty_usage: Callable[..., Dict[str, Any]]
     usage: Callable[..., Dict[str, Any]]
     write_build_usage: Callable[..., None]
     build_usage_summary: Callable[..., Dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class BuildServices:
+    documents: DocumentServices
+    images: ImageServices
+    index: IndexServices
+    usage: UsageServices
     update_build_state: Callable[..., None]
     load_config: Callable[..., list]
 
@@ -62,6 +82,8 @@ class BuildCoordinator:
     ):
         """Generate the records consumed by the Zvec index builder."""
         services = self._services
+        documents = services.documents
+        images = services.images
         kb_id = kb["id"]
         n_files = len(scanned)
         n_ok = n_empty = 0
@@ -75,16 +97,16 @@ class BuildCoordinator:
             data_id = f"{kb_id}::{rel}"
             title = os.path.basename(rel)
             try:
-                text = services.extract_text(ap)
+                text = documents.extract_text(ap)
             except Exception as exc:
                 log(f"  [warn] 抽取失败 {rel}: {exc}")
                 text = ""
 
             related_index = (
-                services.build_image_related_index(text) if include_images else {}
+                images.build_image_related_index(text) if include_images else {}
             )
             try:
-                chunk_records = services.chunk_document_records(
+                chunk_records = documents.chunk_document_records(
                     text, ext=ext, file_name=rel
                 )
             except Exception as exc:
@@ -129,7 +151,7 @@ class BuildCoordinator:
                 if include_text:
                     records.append(record)
                 if include_images:
-                    image_records = services.image_records_for_chunk(
+                    image_records = images.image_records_for_chunk(
                         kb,
                         rel,
                         ap,
@@ -151,14 +173,14 @@ class BuildCoordinator:
                 log(f"  进度 {i}/{n_files} 文件（有效 {n_ok}，空 {n_empty}）...")
 
         image_results = (
-            services.analyze_image_jobs(kb, image_jobs, log)
+            images.analyze_image_jobs(kb, image_jobs, log)
             if include_images
             else {}
         )
         if image_results:
             for record in records:
                 if record.get("kind") == "image":
-                    services.apply_image_analysis(
+                    images.apply_image_analysis(
                         record, image_results.get(record.get("image_id"))
                     )
 
@@ -171,8 +193,8 @@ class BuildCoordinator:
             for record in records
             if record.get("kind") == "image"
         ]
-        services.write_image_assets(kb["path"], stored_assets)
-        services.write_parent_chunks(kb["path"], parent_chunks)
+        images.write_image_assets(kb["path"], stored_assets)
+        documents.write_parent_chunks(kb["path"], parent_chunks)
         log(
             f"  抽取完成：{n_files} 文件，有效 {n_ok}，无正文 {n_empty}，图片资产 {image_count}"
         )
@@ -181,10 +203,12 @@ class BuildCoordinator:
     def _finalize_build_result(self, kb, scanned, z_status, z_stats, log):
         """Persist the common build report and publish the final build state."""
         services = self._services
+        images = services.images
+        usage_service = services.usage
         z_stats = dict(z_stats or {})
         n_images = z_stats.get("image_assets")
         if n_images is None:
-            n_images = len(services.load_image_assets(kb["path"]))
+            n_images = len(images.load_image_assets(kb["path"]))
 
         stats = dict(z_stats)
         stats["zvec"] = dict(z_stats)
@@ -192,14 +216,14 @@ class BuildCoordinator:
         stats["zvec_status"] = z_status
         stats["image_assets"] = n_images
 
-        usage = services.usage()
+        usage = usage_service.usage()
         usage["stats"] = {
             "n_docs": stats.get("n_docs", 0),
             "n_chunks": stats.get("n_chunks", 0),
             "image_assets": n_images,
         }
-        services.write_build_usage(kb["path"], usage)
-        stats["usage"] = services.build_usage_summary(usage)
+        usage_service.write_build_usage(kb["path"], usage)
+        stats["usage"] = usage_service.build_usage_summary(usage)
 
         done = "已最新" if z_status == "up-to-date" else "完成"
         log(
@@ -221,6 +245,9 @@ class BuildCoordinator:
     def build_kb(self, kb, force=False, verbose=True, logfn=None, mode="full"):
         """Build one knowledge base and return ``(status, stats)``."""
         services = self._services
+        documents = services.documents
+        index = services.index
+        usage = services.usage
 
         def log(message):
             if logfn:
@@ -240,7 +267,7 @@ class BuildCoordinator:
             processed=0,
             total=0,
         )
-        scanned = services.scan_documents(kb["path"])
+        scanned = documents.scan_documents(kb["path"])
         if not scanned:
             log("未发现可索引文档")
             services.update_build_state(
@@ -257,24 +284,24 @@ class BuildCoordinator:
             processed=0,
             total=len(scanned),
         )
-        services.set_usage(services.empty_usage(kb["id"], kb["path"]))
+        usage.set_usage(usage.empty_usage(kb["id"], kb["path"]))
         mode_label = {"full": "完整", "text": "文本", "images": "图片资产"}[mode]
         try:
-            services.require_zvec()
+            index.require_zvec()
         except Exception as exc:
             log(f"Zvec 不可用，无法建立索引：{exc}")
             services.update_build_state(phase="failed", message=f"Zvec 不可用：{exc}")
             return ("unavailable", {"error": str(exc), "index_backend": "zvec"})
 
-        meta = services.zvec_meta(kb["path"])
-        if not force and services.zvec_is_quickly_fresh(
+        meta = index.zvec_meta(kb["path"])
+        if not force and index.zvec_is_quickly_fresh(
             kb["path"], scanned, meta=meta, mode=mode
         ):
             return self._finalize_build_result(
                 kb, scanned, "up-to-date", meta.get("stats") or {}, log
             )
 
-        sources = services.build_sources(
+        sources = documents.build_sources(
             kb["path"], scanned, mode="text" if mode == "text" else "full"
         )
         services.update_build_state(
@@ -285,7 +312,7 @@ class BuildCoordinator:
         )
         log(
             f"发现 {len(scanned)} 个文档，开始建立 {mode_label} Zvec 索引 → "
-            f"{services.zvec_path(kb['path'])}"
+            f"{index.zvec_path(kb['path'])}"
         )
         records = self.records(
             kb,
@@ -304,11 +331,11 @@ class BuildCoordinator:
             total=len(scanned),
         )
         if mode == "images":
-            z_status, z_stats = services.append_zvec_image_index(
+            z_status, z_stats = index.append_zvec_image_index(
                 kb, records, sources, force=force, logfn=log
             )
         else:
-            z_status, z_stats = services.build_zvec_index(
+            z_status, z_stats = index.build_zvec_index(
                 kb, records, sources, force=force, logfn=log
             )
         return self._finalize_build_result(kb, scanned, z_status, z_stats, log)

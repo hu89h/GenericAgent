@@ -57,7 +57,14 @@ try:
 
     from .usage import UsageTracker as _UsageTracker
     from .assets import ImageAssetProcessor as _ImageAssetProcessor
-    from .build import BuildCoordinator as _BuildCoordinator, BuildServices as _BuildServices
+    from .build import (
+        BuildCoordinator as _BuildCoordinator,
+        BuildServices as _BuildServices,
+        DocumentServices as _DocumentServices,
+        ImageServices as _ImageServices,
+        IndexServices as _IndexServices,
+        UsageServices as _UsageServices,
+    )
     from .retrieval import KnowledgeBaseRetriever as _KnowledgeBaseRetriever
     from .zvec import ZvecIndex as _ZvecIndex
 except ImportError:  # pragma: no cover - supports direct CLI execution
@@ -73,7 +80,14 @@ except ImportError:  # pragma: no cover - supports direct CLI execution
 
     from usage import UsageTracker as _UsageTracker
     from assets import ImageAssetProcessor as _ImageAssetProcessor
-    from build import BuildCoordinator as _BuildCoordinator, BuildServices as _BuildServices
+    from build import (
+        BuildCoordinator as _BuildCoordinator,
+        BuildServices as _BuildServices,
+        DocumentServices as _DocumentServices,
+        ImageServices as _ImageServices,
+        IndexServices as _IndexServices,
+        UsageServices as _UsageServices,
+    )
     from retrieval import KnowledgeBaseRetriever as _KnowledgeBaseRetriever
     from zvec import ZvecIndex as _ZvecIndex
 
@@ -472,28 +486,36 @@ def _build_coordinator():
     if _build_coordinator_instance is None:
         _build_coordinator_instance = _BuildCoordinator(
             _BuildServices(
-                scan_documents=_scan,
-                extract_text=extract_text,
-                chunk_document_records=chunk_document_records,
-                build_sources=_build_sources,
-                write_parent_chunks=_write_parent_chunks,
-                build_image_related_index=_build_image_related_index,
-                image_records_for_chunk=_image_records_for_chunk,
-                analyze_image_jobs=_analyze_image_jobs,
-                apply_image_analysis=_apply_image_analysis,
-                write_image_assets=_write_image_assets,
-                load_image_assets=_load_image_assets,
-                zvec_path=_zvec_path,
-                require_zvec=_require_zvec,
-                zvec_meta=_zvec_meta,
-                zvec_is_quickly_fresh=_zvec_is_quickly_fresh,
-                build_zvec_index=_build_zvec_index,
-                append_zvec_image_index=_append_zvec_image_index,
-                set_usage=_set_usage,
-                empty_usage=_empty_usage,
-                usage=_usage,
-                write_build_usage=_write_build_usage,
-                build_usage_summary=_build_usage_summary,
+                documents=_DocumentServices(
+                    scan_documents=_scan,
+                    extract_text=extract_text,
+                    chunk_document_records=chunk_document_records,
+                    build_sources=_build_sources,
+                    write_parent_chunks=_write_parent_chunks,
+                ),
+                images=_ImageServices(
+                    build_image_related_index=_build_image_related_index,
+                    image_records_for_chunk=_image_records_for_chunk,
+                    analyze_image_jobs=_analyze_image_jobs,
+                    apply_image_analysis=_apply_image_analysis,
+                    write_image_assets=_write_image_assets,
+                    load_image_assets=_load_image_assets,
+                ),
+                index=_IndexServices(
+                    zvec_path=_zvec_path,
+                    require_zvec=_require_zvec,
+                    zvec_meta=_zvec_meta,
+                    zvec_is_quickly_fresh=_zvec_is_quickly_fresh,
+                    build_zvec_index=_build_zvec_index,
+                    append_zvec_image_index=_append_zvec_image_index,
+                ),
+                usage=_UsageServices(
+                    set_usage=_set_usage,
+                    empty_usage=_empty_usage,
+                    usage=_usage,
+                    write_build_usage=_write_build_usage,
+                    build_usage_summary=_build_usage_summary,
+                ),
                 update_build_state=_update_build_state,
                 load_config=load_config,
             ),
