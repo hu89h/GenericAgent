@@ -88,7 +88,7 @@ class BuildCoordinator:
         n_files = len(scanned)
         n_ok = n_empty = 0
         parent_chunks = []
-        records = []
+        image_records = []
         image_jobs = {}
         image_count = 0
 
@@ -149,9 +149,11 @@ class BuildCoordinator:
                     "body": body,
                 }
                 if include_text:
-                    records.append(record)
+                    # Text records can be embedded while documents are scanned;
+                    # image records remain buffered until VLM analysis finishes.
+                    yield record
                 if include_images:
-                    image_records = images.image_records_for_chunk(
+                    chunk_images = images.image_records_for_chunk(
                         kb,
                         rel,
                         ap,
@@ -163,9 +165,9 @@ class BuildCoordinator:
                         image_jobs=image_jobs,
                         related_index=related_index,
                     )
-                    for image_record in image_records:
+                    for image_record in chunk_images:
                         image_count += 1
-                        records.append(image_record)
+                        image_records.append(image_record)
 
             if i % 100 == 0 or i == n_files:
                 if callable(progressfn):
@@ -178,7 +180,7 @@ class BuildCoordinator:
             else {}
         )
         if image_results:
-            for record in records:
+            for record in image_records:
                 if record.get("kind") == "image":
                     images.apply_image_analysis(
                         record, image_results.get(record.get("image_id"))
@@ -190,7 +192,7 @@ class BuildCoordinator:
                 for key, value in record.items()
                 if not key.startswith("_") and key != "body"
             }
-            for record in records
+            for record in image_records
             if record.get("kind") == "image"
         ]
         images.write_image_assets(kb["path"], stored_assets)
@@ -198,7 +200,7 @@ class BuildCoordinator:
         log(
             f"  抽取完成：{n_files} 文件，有效 {n_ok}，无正文 {n_empty}，图片资产 {image_count}"
         )
-        yield from records
+        yield from image_records
 
     def _finalize_build_result(self, kb, scanned, z_status, z_stats, log):
         """Persist the common build report and publish the final build state."""
