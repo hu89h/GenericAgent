@@ -100,7 +100,21 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
             next_prompts.add(handler._done_hooks.pop(0))
         next_prompt = handler.turn_end_callback(response, tool_calls, tool_results, turn, '\n'.join(next_prompts), exit_reason)
         _hook('turn_after', locals())
-        messages = [{"role": "user", "content": next_prompt, "tool_results": tool_results}]   # just new message, history is kept in *Session
+        inline_blocks = []
+        take_inline = getattr(handler, "take_pending_inline_blocks", None)
+        if callable(take_inline):
+            inline_blocks = take_inline() or []
+        content = next_prompt
+        if inline_blocks:
+            if getattr(client, "supports_image_blocks", False):
+                content = [{"type": "text", "text": next_prompt}, *inline_blocks]
+            else:
+                content = (
+                    next_prompt
+                    + "\n\n[SYSTEM] 当前模型客户端不支持原图 content block，"
+                    "无法查看 kb_image_view 登记的图片；请使用已返回的图片描述和表格内容回答。"
+                )
+        messages = [{"role": "user", "content": content, "tool_results": tool_results}]   # just new message, history is kept in *Session
     if exit_reason: handler.turn_end_callback(response, tool_calls, tool_results, turn, '', exit_reason)
     _hook('agent_after', locals())
     return exit_reason or {'result': 'MAX_TURNS_EXCEEDED'}

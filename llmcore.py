@@ -1124,6 +1124,8 @@ The reply body should first include a minimal one-line (<30 words) physical snap
 """.strip()
 
 class NativeToolClient:
+    supports_image_blocks = True
+
     @staticmethod
     def _thinking_prompt(): return THINKING_PROMPT_EN if os.environ.get('GA_LANG') == 'en' else THINKING_PROMPT_ZH
     def __init__(self, backend):

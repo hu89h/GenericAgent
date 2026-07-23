@@ -287,7 +287,13 @@ class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
         self.history_info = last_history if last_history else []
         self.code_stop_signal = []
         self._done_hooks = []
+        self._pending_inline_blocks = []
         self.print = safe_print
+
+    def take_pending_inline_blocks(self):
+        blocks = self._pending_inline_blocks
+        self._pending_inline_blocks = []
+        return blocks
 
     def _get_tool_maxlen(self, l, args, growth_rate=1.0):
         multiplier = 1 + (self.parent.get_ctx_multiplier() - 1) * growth_rate

@@ -4,7 +4,10 @@ This module deliberately contains only the agent-facing adapter.  Retrieval,
 asset validation, and index lifecycle remain owned by :mod:`knowledge_base.backend`.
 """
 
+import base64
 import json
+import mimetypes
+import os
 
 from agent_loop import StepOutcome
 
@@ -78,7 +81,26 @@ KB_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "kb_image_view",
+            "description": "查看已由知识库定位的原图，并将其加入下一轮多模态模型输入；不能读取任意本地路径。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_id": {"type": "string"},
+                    "image_path": {"type": "string"},
+                    "data_id": {"type": "string"},
+                    "ref": {"type": "string"},
+                },
+            },
+        },
+    },
 ]
+
+_MAX_INLINE_IMAGES = 3
+_MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024
 
 
 class KnowledgeBaseToolsMixin:
@@ -296,3 +318,66 @@ class KnowledgeBaseToolsMixin:
             return self._anchor_outcome(args, error)
         yield "[Info] kb_image_read done.\n"
         return self._anchor_outcome(args, json.dumps(self._public_image(info), ensure_ascii=False, indent=2))
+
+    @staticmethod
+    def _image_data_url(path):
+        mime = mimetypes.guess_type(path)[0] or "image/png"
+        with open(path, "rb") as handle:
+            encoded = base64.b64encode(handle.read()).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+
+    def _queue_image_view(self, info):
+        pending = getattr(self, "_pending_inline_blocks", None)
+        if pending is None:
+            self._pending_inline_blocks = pending = []
+        if len(pending) // 2 >= _MAX_INLINE_IMAGES:
+            return "[kb_image_view] 本轮最多查看 3 张图片。"
+        path = str(info.get("image_abspath") or "")
+        if not os.path.isfile(path):
+            return f"[kb_image_view] 图片文件不存在: {info.get('image_path') or path}"
+        try:
+            size = os.path.getsize(path)
+            if size > _MAX_INLINE_IMAGE_BYTES:
+                return "[kb_image_view] 图片文件过大，无法安全注入当前模型上下文；可使用图片描述回答。"
+            data_url = self._image_data_url(path)
+        except OSError as error:
+            return f"[kb_image_view] 图片读取失败: {error}"
+        pending.extend(
+            [
+                {
+                    "type": "text",
+                    "text": (
+                        "[知识库图片原图]\n"
+                        f"图题: {info.get('title') or info.get('alt_text') or ''}\n"
+                        f"引用: [[kb:{info.get('ref') or ''}]]\n"
+                        "请直接查看紧随其后的原图，并结合工具结果回答用户问题。"
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]
+        )
+        return None
+
+    def do_kb_image_view(self, args, response):
+        info, error = self._read_image_asset(args)
+        if error:
+            return self._anchor_outcome(args, error)
+        error = self._queue_image_view(info)
+        if error:
+            return self._anchor_outcome(args, error)
+        result = {
+            "status": "attached",
+            "message": "原图已加入下一轮模型输入。",
+            "kb_id": info.get("kb_id", ""),
+            "data_id": info.get("data_id", ""),
+            "image_id": info.get("image_id", ""),
+            "ref": info.get("ref", ""),
+            "title": info.get("title", ""),
+            "image_path": info.get("image_path", ""),
+            "description": info.get("description", ""),
+            "table_markdown": info.get("table_markdown", ""),
+            "related_text": info.get("related_text", ""),
+            "citation": f"[[kb:{info.get('ref', '')}]]" if info.get("ref") else "",
+        }
+        yield "[Info] kb_image_view done.\n"
+        return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
