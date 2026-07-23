@@ -21,6 +21,9 @@ def _resolve_ga_root() -> str:
 ROOT = _resolve_ga_root()
 if ROOT not in sys.path: sys.path.insert(0, ROOT)
 
+from service_watchdog import start_parent_watchdog
+start_parent_watchdog()
+
 from agentmain import GenericAgent
 
 HOST = "127.0.0.1"

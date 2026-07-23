@@ -36,7 +36,7 @@ WS API (state sync):
 """
 from __future__ import annotations
 
-import asyncio, atexit, contextlib, importlib, json, os, re, shutil, subprocess, sys
+import asyncio, atexit, contextlib, importlib, json, os, re, shutil, signal, subprocess, sys
 from collections import Counter, deque
 import threading, time, traceback, uuid
 from dataclasses import dataclass, field
@@ -84,6 +84,22 @@ def find_default_ga_root() -> Path:
 
 
 DEFAULT_GA_ROOT = find_default_ga_root()
+
+
+def _desktop_parent_pid() -> Optional[int]:
+    raw = str(os.environ.get("GA_DESKTOP_PARENT_PID", "")).strip()
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0 or pid == os.getpid():
+        return None
+    return pid
+
+
+_DESKTOP_PARENT_PID = _desktop_parent_pid()
+_BRIDGE_SHUTDOWN = threading.Event()
+_PARENT_WATCHDOG_STARTED = threading.Event()
 
 _FINAL_INFO_RE = re.compile(r'\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$')
 
@@ -1233,6 +1249,70 @@ class ServiceManager:
                 return
             time.sleep(0.1)
 
+    @staticmethod
+    def _process_group_kwargs() -> Dict[str, Any]:
+        """Return subprocess options that keep managed descendants together."""
+        if sys.platform == "win32":
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            return {"creationflags": flags}
+        return {"start_new_session": True}
+
+    @staticmethod
+    def _terminate_process_tree(proc: Optional[subprocess.Popen]) -> None:
+        """Stop a managed process and descendants on all supported platforms."""
+        if proc is None:
+            return
+
+        pid = getattr(proc, "pid", None)
+        if not pid:
+            return
+
+        try:
+            import psutil
+        except ImportError:
+            psutil = None
+
+        if psutil is not None:
+            try:
+                root = psutil.Process(pid)
+                descendants = root.children(recursive=True)
+                # Stop descendants first so they cannot outlive the managed service.
+                for child in reversed(descendants):
+                    with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                        child.kill()
+                with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                    root.kill()
+                return
+            except (psutil.Error, OSError):
+                pass
+
+        # Fallback for environments without psutil. Keep the platform-specific
+        # process-group behavior as a best-effort last resort.
+        if sys.platform == "win32":
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            return
+
+        try:
+            process_group = os.getpgid(pid)
+            if process_group != os.getpgrp():
+                os.killpg(process_group, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except (AttributeError, OSError, ProcessLookupError):
+            with contextlib.suppress(Exception):
+                proc.terminate()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
+
     def _reader(self, sid: str, proc: subprocess.Popen) -> None:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -1256,13 +1336,13 @@ class ServiceManager:
         self.buffers[sid] = deque(maxlen=500)
         # Pass the effective ga_root so bundle-side extras (conductor) import the external核.
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8",
-               "GA_ROOT": str(self.ga_root)}
+               "GA_ROOT": str(self.ga_root),
+               "GA_SERVICE_PARENT_PID": str(os.getpid())}
         kw: Dict[str, Any] = dict(
             cwd=str(self.ga_root), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
         )
-        if sys.platform == "win32":
-            kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+        kw.update(self._process_group_kwargs())
         proc = subprocess.Popen(svc["cmd"], **kw)
         self.procs[sid] = proc
         threading.Thread(target=self._reader, args=(sid, proc), daemon=True).start()
@@ -1326,9 +1406,7 @@ class ServiceManager:
             raise KeyError(sid)
         self._stopping.add(sid)
         proc = self.procs.get(sid)
-        if proc and proc.poll() is None:
-            proc.terminate()
-            proc.wait()
+        self._terminate_process_tree(proc)
         self.procs.pop(sid, None)
         self._stopping.discard(sid)
         item = self._state(sid)
@@ -2057,9 +2135,49 @@ async def identity_handler(request):
 
 
 def _exit_bridge() -> None:
+    if _BRIDGE_SHUTDOWN.is_set():
+        return
+    _BRIDGE_SHUTDOWN.set()
+
     with contextlib.suppress(Exception):
         services.stop_all_extras()
-    threading.Timer(0.4, lambda: os._exit(0)).start()
+    os._exit(0)
+
+
+def _desktop_parent_watchdog() -> None:
+    """Exit the bridge when the native desktop shell disappears unexpectedly."""
+    if not _DESKTOP_PARENT_PID:
+        return
+    try:
+        import psutil
+    except Exception as exc:
+        print(f"[bridge] parent watchdog unavailable: {exc}", file=sys.stderr)
+        return
+
+    while not _BRIDGE_SHUTDOWN.wait(0.75):
+        try:
+            if not psutil.pid_exists(_DESKTOP_PARENT_PID):
+                alive = False
+            else:
+                parent = psutil.Process(_DESKTOP_PARENT_PID)
+                alive = parent.is_running() and parent.status() != psutil.STATUS_ZOMBIE
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            alive = False
+        if not alive:
+            print("[bridge] desktop shell exited; stopping managed services", file=sys.stderr)
+            _exit_bridge()
+            return
+
+
+def _start_desktop_parent_watchdog() -> None:
+    if not _DESKTOP_PARENT_PID or _PARENT_WATCHDOG_STARTED.is_set():
+        return
+    _PARENT_WATCHDOG_STARTED.set()
+    threading.Thread(
+        target=_desktop_parent_watchdog,
+        name="desktop-parent-watchdog",
+        daemon=True,
+    ).start()
 
 
 async def bridge_exit_handler(request):
@@ -2193,6 +2311,7 @@ def create_app():
 
     async def on_startup(app):
         hub.loop = asyncio.get_running_loop()
+        _start_desktop_parent_watchdog()
         services.autostart_extras()
 
     async def on_shutdown(app):
@@ -2207,4 +2326,5 @@ if __name__ == "__main__":
     host = os.environ.get("BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ.get("BRIDGE_PORT", "14168"))
     print(f"GenericAgent Web2 bridge: http://{host}:{port}  ws://{host}:{port}/ws", file=sys.stderr)
+    _start_desktop_parent_watchdog()
     web.run_app(create_app(), host=host, port=port, print=None)
