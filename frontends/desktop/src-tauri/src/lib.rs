@@ -482,6 +482,12 @@ fn sanitize_bundle_env(cmd: &mut Command) {
     }
 }
 
+/// Tie every bridge process to this native shell so the bridge can clean up if the
+/// shell exits without sending its normal shutdown request.
+fn set_desktop_parent_env(cmd: &mut Command) {
+    cmd.env("GA_DESKTOP_PARENT_PID", std::process::id().to_string());
+}
+
 /// Run the offline prepare (install_windows.ps1 -Mode PrepareOnly) using bundled python + wheels.
 /// Streams the script's stdout and forwards GAPROGRESS markers to `report(pct, message)`.
 /// Blocking; intended to run on a background thread. Writes ~/.ga_desktop_settings.json.
@@ -754,6 +760,7 @@ fn spawn_bridge_process(python_path: &str, project_dir: &str) -> Result<(), Stri
     let mut cmd = Command::new(&py);
     cmd.arg(&script).current_dir(&dir);
     sanitize_bundle_env(&mut cmd);
+    set_desktop_parent_env(&mut cmd);
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
@@ -967,6 +974,7 @@ pub fn run() {
             let mut cmd = Command::new(&eff_py);
             cmd.arg(&script).current_dir(&dir);
             sanitize_bundle_env(&mut cmd);
+            set_desktop_parent_env(&mut cmd);
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
             if let Ok(child) = cmd.spawn() {
@@ -1034,6 +1042,7 @@ pub fn run() {
                             let mut cmd = Command::new(&py_str);
                             cmd.arg(&script).current_dir(&dir);
                             sanitize_bundle_env(&mut cmd);
+                            set_desktop_parent_env(&mut cmd);
                             #[cfg(windows)]
                             cmd.creation_flags(0x08000000);
                             if let Ok(child) = cmd.spawn() {
@@ -1111,8 +1120,9 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let label = window.label();
                 if label == "main" {
-                    // Persistent backend: closing the window does NOT stop the bridge or its
-                    // services, so relaunching attaches to the warm backend on 14168.
+                    // Close the bridge before leaving the native shell. The bridge's parent
+                    // watchdog remains as a fallback for crashes and other abnormal exits.
+                    request_bridge_shutdown();
                     window.app_handle().exit(0);
                 } else if label == "setup" {
                     // Setup closed -> exit if main is not visible

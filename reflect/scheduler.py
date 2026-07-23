@@ -1,6 +1,9 @@
 import os, json, time as _time, socket as _socket, logging
 from datetime import datetime, timedelta
 
+from service_watchdog import start_parent_watchdog
+start_parent_watchdog()
+
 # 端口锁：防止重复启动，bind失败时agentmain会直接崩溃退出
 # reload时mod.__dict__保留_lock，跳过重复绑定
 try: _lock
