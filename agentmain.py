@@ -192,11 +192,15 @@ class GenericAgent:
                 if self.inc_out and last_pos < len(full_resp):
                     display_queue.put({'next': full_resp[last_pos:], 'source': source,
                                     'turn': curr_turn, 'outputs': turn_resps[-2:]})
-                display_queue.put({'done': full_resp, 'source': source, 'turn': curr_turn, 'outputs': turn_resps.copy()})
+                display_queue.put({'done': full_resp, 'source': source, 'turn': curr_turn,
+                                   'outputs': turn_resps.copy(),
+                                   'citations': handler.take_knowledge_citations()})
                 self.history = handler.history_info
             except Exception as e:
                 print(f"Backend Error: {format_error(e)}")
-                display_queue.put({'done': full_resp + f'\n```\n{format_error(e)}\n```', 'source': source, 'turn': curr_turn, 'outputs': turn_resps.copy()})
+                display_queue.put({'done': full_resp + f'\n```\n{format_error(e)}\n```', 'source': source,
+                                   'turn': curr_turn, 'outputs': turn_resps.copy(),
+                                   'citations': handler.take_knowledge_citations()})
             finally:
                 if self.stop_sig: print('User aborted the task.')
                 self.is_running = self.stop_sig = False  # keep _current_queue: its final 'done' may still be unclaimed (refreshed UI salvages it); next task overwrites it

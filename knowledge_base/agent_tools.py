@@ -74,7 +74,6 @@ KB_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "image_id": {"type": "string"},
-                    "image_path": {"type": "string"},
                     "data_id": {"type": "string"},
                     "ref": {"type": "string"},
                 },
@@ -90,7 +89,6 @@ KB_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "image_id": {"type": "string"},
-                    "image_path": {"type": "string"},
                     "data_id": {"type": "string"},
                     "ref": {"type": "string"},
                 },
@@ -190,11 +188,55 @@ class KnowledgeBaseToolsMixin:
         keep = (
             "kb_id", "score", "score_type", "rank", "data_id", "chunk_index",
             "title", "file_name", "folder", "ref", "kind", "format", "image_id",
-            "image_path", "parent_data_id", "parent_chunk_index", "header_path",
+            "parent_data_id", "parent_chunk_index", "header_path",
             "chunk_role", "snippet", "body", "description", "table_markdown",
             "related_text", "related_text_refs", "near_text", "uncertain",
         )
         return {key: hit[key] for key in keep if key in hit and hit[key] is not None}
+
+    def _record_knowledge_citations(self, *items):
+        """Keep stable knowledge references for the Desktop message metadata.
+
+        The model-facing tool result can contain large text, while the UI only
+        needs identifiers it can send back to the bridge.  Never copy a local
+        path into this metadata.
+        """
+        citations = getattr(self, "_knowledge_citations", None)
+        if citations is None:
+            self._knowledge_citations = citations = []
+        seen = {
+            (item.get("kb_id", ""), item.get("data_id", ""),
+             item.get("ref", ""), item.get("image_id", ""))
+            for item in citations
+        }
+        for value in items:
+            if isinstance(value, dict):
+                values = [value]
+            elif isinstance(value, (list, tuple)):
+                values = value
+            else:
+                continue
+            for raw in values:
+                if not isinstance(raw, dict):
+                    continue
+                citation = {
+                    key: str(raw.get(key) or "").strip()
+                    for key in ("kb_id", "data_id", "ref", "image_id", "title", "file_name", "kind")
+                    if raw.get(key)
+                }
+                if not any(citation.get(key) for key in ("data_id", "ref", "image_id")):
+                    continue
+                key = tuple(citation.get(name, "") for name in ("kb_id", "data_id", "ref", "image_id"))
+                if key not in seen:
+                    citations.append(citation)
+                    seen.add(key)
+                if len(citations) >= 24:
+                    return
+
+    def take_knowledge_citations(self):
+        citations = list(getattr(self, "_knowledge_citations", []) or [])
+        self._knowledge_citations = []
+        return citations
 
     def _anchor_outcome(self, args, data):
         return StepOutcome(
@@ -224,6 +266,7 @@ class KnowledgeBaseToolsMixin:
             "scope": self._knowledge_scope(),
             "hits": [self._clean_hit(hit) for hit in hits],
         }
+        self._record_knowledge_citations(result["hits"])
         yield "[Info] kb_search done.\n"
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -253,6 +296,11 @@ class KnowledgeBaseToolsMixin:
             if str(content).startswith("[未找到]"):
                 break
             parts.append(str(content))
+        if parts:
+            self._record_knowledge_citations({
+                "kb_id": self._scope_kb_id(), "data_id": data_id, "ref": ref,
+                "kind": "document",
+            })
         yield "[Info] kb_read done.\n"
         return self._anchor_outcome(args, "\n\n".join(parts) or "[kb_read] 未读到内容。")
 
@@ -273,18 +321,34 @@ class KnowledgeBaseToolsMixin:
                 preview_chars=preview,
             )
         else:
-            result = {"documents": self._kb_backend().list_documents(kb_id=self._scope_kb_id())}
+            documents = self._kb_backend().list_documents(kb_id=self._scope_kb_id())
+            if self._knowledge_scope()["mode"] == "document":
+                expected = self._document_key(
+                    data_id=self._knowledge_scope().get("data_id"),
+                    ref=self._knowledge_scope().get("ref"),
+                    file_name=self._knowledge_scope().get("file_name"),
+                )
+                documents = [
+                    document for document in documents
+                    if self._document_key(
+                        data_id=document.get("data_id"),
+                        ref=document.get("ref"),
+                        file_name=document.get("file_name"),
+                    ) == expected
+                ]
+            self._record_knowledge_citations(documents)
+            result = {"documents": documents}
         yield "[Info] kb_list done.\n"
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
     def _read_image_asset(self, args):
         lookup = {
             key: str(args.get(key) or "").strip() or None
-            for key in ("image_id", "image_path", "data_id", "ref")
+            for key in ("image_id", "data_id", "ref")
         }
         if not any(lookup.values()):
-            return None, "[Error] 需要 image_id、image_path、data_id 或 ref。"
-        # image_id/image_path alone do not carry the owning document.  In a
+            return None, "[Error] 需要 image_id、data_id 或 ref。"
+        # image_id alone does not carry the owning document.  In a
         # restricted scope the backend query is first constrained by kb_id;
         # the returned asset is then checked against the document scope below.
         if (lookup["data_id"] or lookup["ref"]) and not self._scope_allows_target(
@@ -310,12 +374,14 @@ class KnowledgeBaseToolsMixin:
     def _public_image(info):
         result = dict(info)
         result.pop("image_abspath", None)
+        result.pop("image_path", None)
         return result
 
     def do_kb_image_read(self, args, response):
         info, error = self._read_image_asset(args)
         if error:
             return self._anchor_outcome(args, error)
+        self._record_knowledge_citations(info)
         yield "[Info] kb_image_read done.\n"
         return self._anchor_outcome(args, json.dumps(self._public_image(info), ensure_ascii=False, indent=2))
 
@@ -334,7 +400,7 @@ class KnowledgeBaseToolsMixin:
             return "[kb_image_view] 本轮最多查看 3 张图片。"
         path = str(info.get("image_abspath") or "")
         if not os.path.isfile(path):
-            return f"[kb_image_view] 图片文件不存在: {info.get('image_path') or path}"
+            return "[kb_image_view] 图片文件不存在，无法注入原图；可使用已返回的图片描述回答。"
         try:
             size = os.path.getsize(path)
             if size > _MAX_INLINE_IMAGE_BYTES:
@@ -362,6 +428,7 @@ class KnowledgeBaseToolsMixin:
         info, error = self._read_image_asset(args)
         if error:
             return self._anchor_outcome(args, error)
+        self._record_knowledge_citations(info)
         error = self._queue_image_view(info)
         if error:
             return self._anchor_outcome(args, error)
@@ -373,7 +440,6 @@ class KnowledgeBaseToolsMixin:
             "image_id": info.get("image_id", ""),
             "ref": info.get("ref", ""),
             "title": info.get("title", ""),
-            "image_path": info.get("image_path", ""),
             "description": info.get("description", ""),
             "table_markdown": info.get("table_markdown", ""),
             "related_text": info.get("related_text", ""),

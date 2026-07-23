@@ -936,6 +936,7 @@ class AgentManager:
                     agent.next_llm(int(no))
             full = ""
             done_outputs = None  # done时agent给的全量轮文本(turn_resps.copy())
+            done_citations = []
             if hasattr(agent, "put_task"):
                 display_q = agent.put_task(prompt, images=images or [])
                 pieces = []
@@ -974,6 +975,7 @@ class AgentManager:
                         if "done" in item:
                             full = strip_final_info_marker(item.get("done") or "")
                             done_outputs = normalize_final_turn_segs(full, item.get("outputs"))  # done时=turn_resps.copy()全量轮
+                            done_citations = item.get("citations") or []
                             if done_outputs:
                                 with self.lock:
                                     if sess.partial is not None and sess.active_turn_id == turn_id:
@@ -982,6 +984,8 @@ class AgentManager:
                                         sess.partial["updatedAt"] = sess.partial["ts"] if "updatedAt" in sess.partial else sess.partial.get("updatedAt")
                                         sess.partial["curr_turn"] = max(0, len(done_outputs) - 1)
                                         sess.partial["turn_segs"] = list(done_outputs)
+                                        if done_citations:
+                                            sess.partial["citations"] = list(done_citations)
                                         sess.updated_at = time.time()
                             break
                     else:
@@ -1015,10 +1019,10 @@ class AgentManager:
                 plan_state.sync_plan_path_from_text(sess, full, sess.cwd or self.ga_root)
                 # 轨道2: 落库时带结构化全量轮(权威turn_segs),前端按轮渲染;content保留兜底
                 _final_segs = normalize_final_turn_segs(full, done_outputs)
-                if _final_segs:
-                    self.add_message(sess, "assistant", full, turn_segs=_final_segs)
-                else:
-                    self.add_message(sess, "assistant", full)
+                extra = {"turn_segs": _final_segs} if _final_segs else {}
+                if done_citations:
+                    extra["citations"] = list(done_citations)
+                self.add_message(sess, "assistant", full, **extra)
                 try: sess.llm_history = json.loads(json.dumps(agent.llmclient.backend.history, ensure_ascii=False, default=str))
                 except Exception: pass
                 sess.status = "idle"
