@@ -345,6 +345,10 @@ class AgentManager:
                 for f in self._sessions_dir.glob("*.json"):
                     try:
                         item = json.loads(f.read_text(encoding="utf-8"))
+                        if not item.get("messages"):
+                            with contextlib.suppress(Exception):
+                                f.unlink()
+                            continue
                         sess = self._session_from_item(item)
                         self.sessions[sess.id] = sess
                     except Exception as e:
@@ -360,6 +364,8 @@ class AgentManager:
                     if not isinstance(item, dict) or item.get("id") in self.sessions:
                         continue
                     try:
+                        if not item.get("messages"):
+                            continue
                         sess = self._session_from_item(item)
                         self.sessions[sess.id] = sess
                         self._persist_session(sess)
@@ -415,8 +421,11 @@ class AgentManager:
         new_sessions: List["Session"] = []
         with self.lock:
             for item in items:
+                if not isinstance(item, dict):
+                    skipped += 1
+                    continue
                 sid = item.get("id")
-                if not sid or sid in self.sessions:
+                if not item.get("messages") or not sid or sid in self.sessions:
                     skipped += 1
                     continue
                 sess = self._session_from_item(item)
