@@ -1,5 +1,7 @@
 temp/
+data/
 tmp/
+.codegraph/
 
 __pycache__/
 *.py[cod]
@@ -143,6 +145,7 @@ frontends/conductor_im_plugins/*
 
 # Universal: never track __pycache__ anywhere
 **/__pycache__/
+.embedding_cache/
 
 .claude/
 
