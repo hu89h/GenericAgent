@@ -371,7 +371,7 @@ class ImageAssetProcessor:
         return digest.hexdigest()
 
     def image_records_for_chunk(
-        self, kb, rel, ap, data_id, chunk_index, body, title, top, ext, log,
+        self, kb, rel, ap, data_id, chunk_index, body, title, log,
         image_jobs=None, related_index=None,
     ):
         if os.path.splitext(rel)[1].lower() not in (".md", ".markdown"):
@@ -429,15 +429,11 @@ class ImageAssetProcessor:
                 "kind": "image",
                 "image_id": image_sha,
                 "data_id": f"{data_id}::image::{image_sha[:16]}::{chunk_index}::{seq}-{ref_sig}",
-                "_chunk_index": 0,
+                "chunk_index": 0,
                 "parent_data_id": data_id,
                 "parent_chunk_index": chunk_index,
                 "title": image_title,
                 "file_name": rel,
-                "source_type": kb["id"],
-                "country": top,
-                "format": "image",
-                "source_file": kb["id"],
                 "image_path": image_rel,
                 "image_abspath": image_abs,
                 "alt_text": ref.get("alt", ""),
@@ -453,7 +449,7 @@ class ImageAssetProcessor:
                 "uncertain": analysis.get("uncertain", []),
                 "analysis_error": analysis.get("error", ""),
             }
-            asset["raw_chunk"] = self.asset_body(asset)
+            asset["body"] = self.asset_body(asset)
             assets.append(asset)
         return assets
 
@@ -538,7 +534,7 @@ class ImageAssetProcessor:
         related_text, related_refs = self.related_text_for_ref_key(asset["ref_key"], asset.get("_related_index") or {})
         asset["related_text"] = related_text
         asset["related_text_refs"] = related_refs
-        asset["raw_chunk"] = self.asset_body(asset)
+        asset["body"] = self.asset_body(asset)
         return asset
 
     def analyze_image_jobs(self, kb, image_jobs, log):

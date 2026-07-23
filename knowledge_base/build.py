@@ -72,7 +72,6 @@ class BuildCoordinator:
 
         for i, (rel, ap, _mt, _sz) in enumerate(scanned, 1):
             ext = os.path.splitext(rel)[1].lower().lstrip(".")
-            top = rel.split("/")[0] if "/" in rel else ""
             data_id = f"{kb_id}::{rel}"
             title = os.path.basename(rel)
             try:
@@ -116,20 +115,16 @@ class BuildCoordinator:
                 body = chunk.get("body", "")
                 record = {
                     "data_id": data_id,
-                    "_chunk_index": chunk_index,
+                    "chunk_index": chunk_index,
                     "title": title,
                     "file_name": rel,
-                    "source_type": kb_id,
-                    "country": top,
-                    "format": ext,
-                    "source_file": kb_id,
                     "kind": "text",
                     "image_path": "",
                     "parent_data_id": "",
                     "parent_chunk_index": int(chunk.get("parent_chunk_index", -1)),
                     "header_path": chunk.get("header_path", ""),
                     "chunk_role": chunk.get("chunk_role", "leaf"),
-                    "raw_chunk": body,
+                    "body": body,
                 }
                 if include_text:
                     records.append(record)
@@ -142,8 +137,6 @@ class BuildCoordinator:
                         chunk_index,
                         body,
                         title,
-                        top,
-                        ext,
                         log,
                         image_jobs=image_jobs,
                         related_index=related_index,
@@ -173,7 +166,7 @@ class BuildCoordinator:
             {
                 key: value
                 for key, value in record.items()
-                if not key.startswith("_") and key != "raw_chunk"
+                if not key.startswith("_") and key != "body"
             }
             for record in records
             if record.get("kind") == "image"

@@ -147,6 +147,21 @@ class ZvecIndex:
             if meta.get(key) is not None
         }
 
+    def _embedding_config_matches(self, meta: Dict[str, Any] | None) -> bool:
+        meta = meta or {}
+        return (
+            self._embedding_fingerprint(meta.get("embedding"))
+            == self._embedding_fingerprint(self._embedding_meta_fn())
+            and self._embedding_fingerprint(meta.get("sparse_embedding"))
+            == self._embedding_fingerprint(self._sparse_embedding_meta_fn())
+        )
+
+    def _index_is_usable(self, kb_path: str, meta: Dict[str, Any] | None) -> bool:
+        return bool(
+            self._embedding_config_matches(meta)
+            and os.path.isdir(self._path_fn(kb_path))
+        )
+
     def is_fresh(self, kb_path: str, sources: Dict[str, Any], required_kinds=None) -> bool:
         meta = self.meta(kb_path)
         indexed = set(meta.get("indexed_kinds") or ["text", "image"])
@@ -156,11 +171,7 @@ class ZvecIndex:
             meta
             and meta.get("schema_version") == self.schema_version
             and meta.get("sources") == sources
-            and self._embedding_fingerprint(meta.get("embedding"))
-            == self._embedding_fingerprint(self._embedding_meta_fn())
-            and self._embedding_fingerprint(meta.get("sparse_embedding"))
-            == self._embedding_fingerprint(self._sparse_embedding_meta_fn())
-            and os.path.isdir(self._path_fn(kb_path))
+            and self._index_is_usable(kb_path, meta)
         )
 
     def is_quickly_fresh(self, kb_path: str, scanned: list, meta=None, mode: str = "full") -> bool:
@@ -190,13 +201,7 @@ class ZvecIndex:
                     return False
                 if {"mtime": int(stat.st_mtime), "size": stat.st_size} != expected:
                     return False
-        return bool(
-            self._embedding_fingerprint(meta.get("embedding"))
-            == self._embedding_fingerprint(self._embedding_meta_fn())
-            and self._embedding_fingerprint(meta.get("sparse_embedding"))
-            == self._embedding_fingerprint(self._sparse_embedding_meta_fn())
-            and os.path.isdir(self._path_fn(kb_path))
-        )
+        return self._index_is_usable(kb_path, meta)
 
     @staticmethod
     def doc_id(data_id: str, chunk_index: int) -> str:
@@ -268,11 +273,11 @@ class ZvecIndex:
             batch = []
 
         for record in records:
-            body = record.get("raw_chunk", "") or ""
+            body = record.get("body", "") or ""
             data_id = record.get("data_id") or ""
             if not body or not data_id:
                 continue
-            chunk_index = int(record.get("_chunk_index", 0))
+            chunk_index = int(record.get("chunk_index", 0))
             kind = record.get("kind", "text") or "text"
             if kind == "image":
                 n_image_chunks += 1

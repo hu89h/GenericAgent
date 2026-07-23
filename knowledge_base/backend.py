@@ -21,12 +21,9 @@ import os
 import re
 import sys
 import json
-import math
 import hashlib
 import shutil
 import threading
-import urllib.request
-import urllib.error
 
 try:
     from .documents import (
@@ -52,14 +49,10 @@ try:
         CONFIG_PATH,
         DATA_ROOT,
         ROOT,
-        _dump_raw_config,
-        _kb_block,
-        _load_raw_config,
         kb_by_id as _kb_by_id,
         load_config,
         remove_kb,
         upsert_kb,
-        valid_kb_id,
     )
 
     from .usage import UsageTracker as _UsageTracker
@@ -72,14 +65,10 @@ except ImportError:  # pragma: no cover - supports direct CLI execution
         CONFIG_PATH,
         DATA_ROOT,
         ROOT,
-        _dump_raw_config,
-        _kb_block,
-        _load_raw_config,
         kb_by_id as _kb_by_id,
         load_config,
         remove_kb,
         upsert_kb,
-        valid_kb_id,
     )
 
     from usage import UsageTracker as _UsageTracker
@@ -102,7 +91,6 @@ ZVEC_BATCH = int(os.environ.get("GA_KB_ZVEC_BATCH", "256"))
 ZVEC_QUERY_FACTOR = max(1, int(os.environ.get("GA_KB_ZVEC_QUERY_FACTOR", "4")))
 ZVEC_VECTOR_WEIGHT = float(os.environ.get("GA_KB_VECTOR_WEIGHT", "1.2"))
 ZVEC_SPARSE_WEIGHT = 1.0
-IMAGE_ANALYSIS_ON = os.environ.get("GA_KB_IMAGE_ANALYSIS", "0").strip().lower() in ("1", "true", "yes", "on")
 IMAGE_ANALYSIS_CONCURRENCY = max(1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY", "1")))
 
 _local = threading.local()
@@ -197,13 +185,6 @@ def delete_kb(kb_id, delete_data=False, config_path=CONFIG_PATH):
         }
     finally:
         _build_lock.release()
-
-
-def _safe_kb_id(value):
-    value = str(value or "").strip()
-    value = re.sub(r"[\\/:*?\"<>|\s]+", "_", value)
-    value = re.sub(r"_+", "_", value).strip("._")
-    return value[:64] or DEFAULT_KB_ID
 
 
 def _canonical_source_path(source_dir):
@@ -445,28 +426,12 @@ def _image_assets():
     return _image_assets_instance
 
 
-def _scan_image_refs(body):
-    return _image_assets().scan_image_refs(body)
-
-
 def _local_ref_key(value):
     return _image_assets().local_ref_key(value)
 
 
 def _build_image_related_index(text):
     return _image_assets().build_related_index(text)
-
-
-def _related_text_for_ref_key(ref_key, related_index, limit=5, max_chars=1800):
-    return _image_assets().related_text_for_ref_key(ref_key, related_index, limit=limit, max_chars=max_chars)
-
-
-def _related_text_for_image(title, related_index, limit=5, max_chars=1800):
-    return _image_assets().related_text_for_image(title, related_index, limit=limit, max_chars=max_chars)
-
-
-def _related_text_for_key(key, related_index, *, title="", limit=5, max_chars=1800):
-    return _image_assets().related_text_for_key(key, related_index, title=title, limit=limit, max_chars=max_chars)
 
 
 def _asset_body(asset):
@@ -656,16 +621,8 @@ def _zvec_meta(kb_path):
     return _zvec_store().meta(kb_path)
 
 
-def _zvec_is_fresh(kb_path, sources, required_kinds=None):
-    return _zvec_store().is_fresh(kb_path, sources, required_kinds=required_kinds)
-
-
 def _zvec_is_quickly_fresh(kb_path, scanned, meta=None, mode="full"):
     return _zvec_store().is_quickly_fresh(kb_path, scanned, meta=meta, mode=mode)
-
-
-def _embedding_fingerprint(meta):
-    return _ZvecIndex._embedding_fingerprint(meta)
 
 
 def _zvec_doc_id(data_id, chunk_index):
@@ -687,10 +644,6 @@ def search_diagnostics():
     return list(getattr(_local, "search_errors", []) or [])
 
 
-def _insert_zvec_records(kb, col, records, logfn=None, operation="insert"):
-    return _zvec_store().insert_records(kb, col, records, logfn=logfn, operation=operation)
-
-
 def _require_zvec():
     return _zvec_store().require()
 
@@ -701,10 +654,6 @@ def _build_zvec_index(kb, records, sources, force=False, logfn=None):
 
 def _append_zvec_image_index(kb, records, sources, force=False, logfn=None):
     return _zvec_store().append_images(kb, records, sources, force=force, logfn=logfn)
-
-
-def _dir_size(path):
-    return _zvec_store().dir_size(path)
 
 
 _ZVEC_OUTPUT_FIELDS = [
