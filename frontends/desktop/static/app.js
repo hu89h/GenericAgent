@@ -642,7 +642,7 @@ function applyAppearance(nextApp, nextPlain, { persist } = { persist: true }) {
 const nav = document.getElementById('nav');
 const pages = document.querySelectorAll('#pages .page');
 let currentPage = 'chat';
-function gaGoPage(key) {
+function gaGoPage(key, { newConversation = false } = {}) {
   const item = nav?.querySelector(`.nav-item[data-page="${key}"]`);
   if (!item) return;
   currentPage = key;
@@ -652,12 +652,13 @@ function gaGoPage(key) {
   window.gaSetActiveFileComposer?.(key === 'collab' ? 'collab' : 'chat');
   if (key === 'collab') window.collabInit?.();
   if (key === 'kb') window.gaKbShowLibraries?.();
+  if (key === 'chat' && newConversation) newSession({ mode: 'all', origin: 'chat' });
 }
 window.gaGoPage = gaGoPage;
 nav.addEventListener('click', (e) => {
   const item = e.target.closest('.nav-item');
   if (!item) return;
-  gaGoPage(item.dataset.page);
+  gaGoPage(item.dataset.page, { newConversation: item.dataset.page === 'chat' });
 });
 
 /* ═══════════════ 知识库工作区 ═══════════════
