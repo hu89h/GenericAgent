@@ -23,6 +23,7 @@ import sys
 import json
 import shutil
 import threading
+from urllib.parse import unquote
 
 try:
     from .documents import (
@@ -99,6 +100,9 @@ INDEX_SUBDIR = ".kb_index"          # 放在每个知识库路径下
 ZVEC_SUBDIR = "zvec"                # 向量索引目录：.kb_index/zvec/
 IMAGE_CACHE_SUBDIR = "image_cache"
 IMAGE_ASSETS_FILE = "image_assets.json"
+DOCUMENT_IMAGE_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp", ".tif", ".tiff",
+})
 BUILD_USAGE_FILE = "build_usage.json"
 PARENT_CHUNKS_FILE = "parent_chunks.json"
 ZVEC_SCHEMA_VERSION = 6
@@ -954,6 +958,50 @@ def resolve_source_document(kb_id=None, data_id=None, file_name=None, ref=None):
     return _retrieval().resolve_source_document(
         kb_id=kb_id, data_id=data_id, file_name=file_name, ref=ref,
     )
+
+
+def _path_is_within(root, path):
+    try:
+        root = os.path.realpath(root)
+        path = os.path.realpath(path)
+        return path == root or os.path.commonpath((root, path)) == root
+    except (OSError, ValueError):
+        return False
+
+
+def resolve_document_asset(kb_id=None, data_id=None, image_path=None):
+    """Resolve a Markdown-relative image under one validated KB document."""
+    data_id = str(data_id or "").strip()
+    kid = str(kb_id or "").strip()
+    if "::" not in data_id:
+        return None
+    data_kb_id, document_rel = data_id.split("::", 1)
+    if kid and data_kb_id != kid:
+        return None
+    kb = _kb_by_id(kid or data_kb_id)
+    if kb is None or not kb.get("exists"):
+        return None
+
+    raw_image = str(image_path or "").strip().strip("<>")
+    raw_image = unquote(raw_image.split("?", 1)[0].split("#", 1)[0]).replace("\\", "/")
+    if (
+        not raw_image
+        or raw_image.startswith("/")
+        or re.match(r"^[a-z][a-z0-9+.-]*:", raw_image, re.I)
+        or os.path.splitext(raw_image)[1].lower() not in DOCUMENT_IMAGE_EXTS
+    ):
+        return None
+
+    root = os.path.realpath(kb["path"])
+    document = os.path.realpath(os.path.join(root, document_rel.replace("/", os.sep)))
+    if not _path_is_within(root, document) or not os.path.isfile(document):
+        return None
+    target = os.path.realpath(
+        os.path.join(os.path.dirname(document), raw_image.replace("/", os.sep))
+    )
+    if not _path_is_within(root, target) or not os.path.isfile(target):
+        return None
+    return target
 
 
 def build(kb_id=None, force=False, mode="full", logfn=None):

@@ -21,7 +21,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 try:
     from .config import DATA_ROOT, ROOT, kb_by_id, kb_id_for_source, upsert_kb
@@ -138,7 +138,10 @@ def _prepare_markdown(
         shutil.copy2(source_image, target_image)
         copied.add(target_image)
         tail = raw[len(path_part):]
-        relative = os.path.relpath(target_image, target_markdown.parent).replace(os.sep, "/")
+        relative = quote(
+            os.path.relpath(target_image, target_markdown.parent).replace(os.sep, "/"),
+            safe="/-._~",
+        )
         replacements.append((match.start(2), match.end(2), relative + tail))
 
     for image in extra_images or []:
@@ -151,7 +154,10 @@ def _prepare_markdown(
         target_image.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(image, target_image)
         copied.add(target_image)
-        relative = os.path.relpath(target_image, target_markdown.parent).replace(os.sep, "/")
+        relative = quote(
+            os.path.relpath(target_image, target_markdown.parent).replace(os.sep, "/"),
+            safe="/-._~",
+        )
         if not re.search(rf"\]\({re.escape(relative)}(?:[?#\s)]|$)", body):
             body = body.rstrip() + f"\n\n![原始图片]({relative})\n"
 

@@ -2065,6 +2065,24 @@ async def kb_read_handler(request):
         return json_ok({"ok": False, "error": str(error)}, status=500)
 
 
+async def kb_asset_handler(request):
+    """Serve one Markdown-relative image after backend path validation."""
+    path = _kb_backend().resolve_document_asset(
+        kb_id=request.query.get("kbId", request.query.get("kb_id")),
+        data_id=request.query.get("dataId", request.query.get("data_id")),
+        image_path=request.query.get("path", request.query.get("imagePath")),
+    )
+    if not path:
+        raise web.HTTPNotFound()
+    return web.FileResponse(
+        path,
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 async def kb_image_handler(request):
     try:
         data = await read_json(request)
@@ -2954,6 +2972,7 @@ def create_app():
     app.router.add_get("/kb/docs", kb_documents_handler)
     app.router.add_post("/kb/search", kb_search_handler)
     app.router.add_post("/kb/read", kb_read_handler)
+    app.router.add_get("/kb/asset", kb_asset_handler)
     app.router.add_post("/kb/image", kb_image_handler)
     app.router.add_post("/kb/source", kb_source_handler)
     app.router.add_post("/kb/open", kb_open_handler)
