@@ -662,6 +662,9 @@ nav.addEventListener('click', (e) => {
 const kbState = {
   status: null, view: 'libraries', activeKb: null, documents: [], activeDoc: null,
   qaTimer: null, jobTimer: null, jobKind: '', jobId: '', qaBusy: false,
+  statusUpdatedAt: 0, documentsLoading: false,
+  statusRequest: null, documentRequests: new Map(),
+  documentLists: new Map(), documentHtml: new Map(),
 };
 const kbEl = id => document.getElementById(id);
 const kbPageEls = {
@@ -717,6 +720,34 @@ function kbDocumentMeta(doc) {
   return kbFormat(t('kb.documentMeta'), { type, size: kbFormatBytes(doc.size) });
 }
 
+function kbDocumentImageUrl(doc, source) {
+  const value = kbText(source).trim();
+  if (!value || /^(?:https?:|data:|blob:)/i.test(value)) return value;
+  if (value.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(value)) return '';
+  const query = new URLSearchParams({
+    kbId: doc.kb_id || '',
+    dataId: doc.data_id || '',
+    path: value,
+  });
+  return `${bridgeHost()}/kb/asset?${query.toString()}`;
+}
+
+function kbCachedDocumentHtml(key) {
+  const html = kbState.documentHtml.get(key);
+  if (html == null) return null;
+  kbState.documentHtml.delete(key);
+  kbState.documentHtml.set(key, html);
+  return html;
+}
+
+function kbCacheDocumentHtml(key, html) {
+  kbState.documentHtml.delete(key);
+  kbState.documentHtml.set(key, html);
+  while (kbState.documentHtml.size > 8) {
+    kbState.documentHtml.delete(kbState.documentHtml.keys().next().value);
+  }
+}
+
 function kbPhaseText(job) {
   const phase = kbText(job.phase || job.state).toLowerCase();
   const normalized = {
@@ -764,8 +795,10 @@ function kbRenderLibraries() {
       documents: kb.n_docs || 0,
       images: kb.image_assets || 0,
     });
-    card.querySelector('.kb-open-library').addEventListener('click', () => void kbOpenDocuments(kb));
-    card.querySelector('.kb-card-title').addEventListener('click', () => void kbOpenDocuments(kb));
+    card.addEventListener('click', event => {
+      if (event.target.closest('.kb-delete-library')) return;
+      void kbOpenDocuments(kb);
+    });
     card.querySelector('.kb-delete-library').addEventListener('click', () => void kbDeleteLibrary(kb));
     grid.appendChild(card);
     card.querySelectorAll('[data-ga-icon]').forEach(el => { if (typeof window.gaIcon === 'function') el.outerHTML = window.gaIcon(el.dataset.gaIcon, el.className || ''); });
@@ -778,6 +811,10 @@ function kbRenderDocuments() {
   const query = kbText(kbEl('kb-doc-search')?.value).trim().toLowerCase();
   const rows = kbState.documents.filter(doc => !query || `${doc.title} ${doc.file_name}`.toLowerCase().includes(query));
   docs.innerHTML = '';
+  if (kbState.documentsLoading && !rows.length) {
+    docs.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.loading'))}</div>`;
+    return;
+  }
   if (!rows.length) {
     docs.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.noDocs'))}</div>`;
     return;
@@ -803,9 +840,22 @@ function kbRenderView() {
   if (view === 'documents') kbRenderDocuments();
 }
 
-async function kbRefresh() {
+async function kbRefresh({ force = false } = {}) {
+  const isFresh = kbState.status && Date.now() - kbState.statusUpdatedAt < 3000;
+  if (!force && isFresh) {
+    kbRenderView();
+    return;
+  }
+  const request = kbState.statusRequest || (kbState.statusRequest = Promise.resolve().then(() => window.ga.kbStatus()));
+  if (kbState.statusRequest === request) {
+    request.then(
+      () => { if (kbState.statusRequest === request) kbState.statusRequest = null; },
+      () => { if (kbState.statusRequest === request) kbState.statusRequest = null; },
+    );
+  }
   try {
-    kbState.status = await window.ga.kbStatus();
+    kbState.status = await request;
+    kbState.statusUpdatedAt = Date.now();
     kbRenderView();
   } catch (error) {
     kbState.status = { knowledge_bases: [] };
@@ -814,14 +864,37 @@ async function kbRefresh() {
   }
 }
 
-async function kbOpenDocuments(kb) {
+async function kbOpenDocuments(kb, { force = false } = {}) {
+  kbState.activeKb = kb;
+  kbState.view = 'documents';
+  if (kbPageEls.docTitle) kbPageEls.docTitle.textContent = kb.name || kb.id || '';
+  const cached = kbState.documentLists.get(kb.id);
+  kbState.documents = cached?.documents || [];
+  kbState.documentsLoading = !cached;
+  kbRenderView();
+  if (!force && cached && Date.now() - cached.updatedAt < 3000) return;
   try {
-    kbState.activeKb = kb;
-    kbState.documents = (await window.ga.kbDocs({ kbId: kb.id })).documents || [];
-    kbState.view = 'documents';
-    if (kbPageEls.docTitle) kbPageEls.docTitle.textContent = kb.name || kb.id || '';
-    kbRenderView();
+    let request = kbState.documentRequests.get(kb.id);
+    if (!request) {
+      request = Promise.resolve().then(() => window.ga.kbDocs({ kbId: kb.id }));
+      kbState.documentRequests.set(kb.id, request);
+      request.then(
+        () => { if (kbState.documentRequests.get(kb.id) === request) kbState.documentRequests.delete(kb.id); },
+        () => { if (kbState.documentRequests.get(kb.id) === request) kbState.documentRequests.delete(kb.id); },
+      );
+    }
+    const documents = (await request).documents || [];
+    kbState.documentLists.set(kb.id, { documents, updatedAt: Date.now() });
+    if (kbState.activeKb?.id === kb.id) {
+      kbState.documents = documents;
+      kbState.documentsLoading = false;
+      kbRenderView();
+    }
   } catch (error) {
+    if (kbState.activeKb?.id === kb.id) {
+      kbState.documentsLoading = false;
+      kbRenderView();
+    }
     showError(`${t('err.kbLoad')}: ${error.message || error}`);
   }
 }
@@ -836,56 +909,88 @@ async function kbOpenDocument(doc) {
     if (kbPageEls.source) kbPageEls.source.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.loading'))}</div>`;
     if (kbPageEls.open) kbPageEls.open.disabled = false;
     kbRenderView();
+    const cacheKey = `${doc.data_id}:${doc.size || 0}`;
+    const cachedHtml = kbCachedDocumentHtml(cacheKey);
+    const mountHtml = html => {
+      if (!kbPageEls.source) return;
+      kbPageEls.source.innerHTML = html;
+      postRenderEnhance(kbPageEls.source);
+    };
+    if (cachedHtml) {
+      mountHtml(cachedHtml);
+      kbRenderQa(activeSess());
+      return;
+    }
     const result = await window.ga.kbRead({ kbId: doc.kb_id, dataId: doc.data_id, fileName: doc.file_name, ref: doc.ref, maxChars: 200000 });
     if (result.error) throw new Error(result.error);
     const content = result.content || '';
-    if (kbPageEls.source) kbPageEls.source.innerHTML = content ? renderMarkdown(content) : `<div class="kb-empty">${escapeHtml(t('kb.noData'))}</div>`;
+    const html = content
+      ? `<div class="bubble md kb-document-markdown">${renderTurnBody(content, { resolveImage: source => kbDocumentImageUrl(doc, source) })}</div>`
+      : `<div class="kb-empty">${escapeHtml(t('kb.noData'))}</div>`;
+    kbCacheDocumentHtml(cacheKey, html);
+    if (kbState.activeDoc?.data_id === doc.data_id) {
+      mountHtml(html);
+    }
     kbRenderQa(activeSess());
   } catch (error) {
-    if (kbPageEls.source) kbPageEls.source.innerHTML = `<div class="kb-empty kb-error">${escapeHtml(error.message || error)}</div>`;
+    if (kbState.activeDoc?.data_id === doc.data_id && kbPageEls.source) {
+      kbPageEls.source.innerHTML = `<div class="kb-empty kb-error">${escapeHtml(error.message || error)}</div>`;
+    }
     showError(`${t('err.kbLoad')}: ${error.message || error}`);
   }
+}
+
+function kbAppendCitations(row, msg) {
+  if (msg.role !== 'assistant' || !Array.isArray(msg.citations) || !msg.citations.length) return;
+  const bubble = row.querySelector(':scope > .bubble.md');
+  if (!bubble) return;
+  const citations = document.createElement('div');
+  citations.className = 'kb-citations';
+  const title = document.createElement('div');
+  title.className = 'kb-citations-title';
+  title.textContent = t('kb.citations');
+  citations.appendChild(title);
+  for (const citation of msg.citations) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'kb-citation-btn';
+    button.textContent = citation.image_id
+      ? `🖼 ${citation.title || citation.file_name || citation.ref || citation.image_id}`
+      : (citation.title || citation.file_name || citation.ref || citation.data_id || t('kb.openCitation'));
+    button.title = t('kb.openCitation');
+    button.addEventListener('click', () => void kbOpenCitation(citation));
+    citations.appendChild(button);
+  }
+  bubble.appendChild(citations);
 }
 
 function kbRenderQa(sess) {
   const log = kbPageEls.qaLog;
   if (!log) return;
   log.innerHTML = '';
-  const messages = sess?.messages || [];
+  const messages = [...(sess?.messages || [])];
+  const runtime = sess ? rt(sess) : null;
+  if (Array.isArray(runtime?.draftSegs) && runtime.draftSegs.some(segment => kbText(segment).length)) {
+    messages.push({
+      role: 'assistant',
+      turn_segs: runtime.draftSegs,
+      curr_turn: runtime.draftTurn,
+      partial: true,
+    });
+  }
   for (const msg of messages) {
     if (!msg || !['user', 'assistant', 'error'].includes(msg.role)) continue;
-    const row = document.createElement('div');
-    row.className = `kb-qa-msg ${msg.role}`;
-    const bubble = document.createElement('div');
-    bubble.className = 'kb-qa-bubble';
-    const text = msg.role === 'assistant' ? assistantStructuredText(msg) : (msg.display || msg.content || '');
-    if (msg.role === 'assistant') bubble.innerHTML = renderMarkdown(text || '');
-    else bubble.textContent = kbText(text);
-    row.appendChild(bubble);
-    if (msg.role === 'assistant' && Array.isArray(msg.citations) && msg.citations.length) {
-      const citations = document.createElement('div');
-      citations.className = 'kb-citations';
-      const title = document.createElement('div');
-      title.className = 'kb-citations-title';
-      title.textContent = t('kb.citations');
-      citations.appendChild(title);
-      for (const citation of msg.citations) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'kb-citation-btn';
-        button.textContent = citation.image_id
-          ? `🖼 ${citation.title || citation.file_name || citation.ref || citation.image_id}`
-          : (citation.title || citation.file_name || citation.ref || citation.data_id || t('kb.openCitation'));
-        button.title = t('kb.openCitation');
-        button.addEventListener('click', () => void kbOpenCitation(citation));
-        citations.appendChild(button);
-      }
-      bubble.appendChild(citations);
-    }
+    const row = msgNode(msg);
+    if (msg.partial) row.classList.add('streaming');
+    kbAppendCitations(row, msg);
     log.appendChild(row);
   }
   if (!messages.length) log.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.qaEmpty'))}</div>`;
   log.scrollTop = log.scrollHeight;
+}
+
+function kbSyncQa(sess) {
+  if (currentPage === 'kb' && kbState.view === 'reader' && sess && isActive(sess)) kbRenderQa(sess);
 }
 
 async function kbOpenCitation(citation) {
@@ -905,13 +1010,15 @@ async function kbOpenCitation(citation) {
 function kbStartQaMirror(sess) {
   if (kbState.qaTimer) clearInterval(kbState.qaTimer);
   const tick = () => {
-    kbRenderQa(sess);
-    if (!rt(sess).busy) {
+    const current = activeSess() || sess;
+    if (!current || !rt(current).busy) {
       clearInterval(kbState.qaTimer); kbState.qaTimer = null; kbState.qaBusy = false;
       if (kbPageEls.ask) kbPageEls.ask.disabled = false;
+      if (current) kbSyncQa(current);
     }
   };
-  kbState.qaTimer = setInterval(tick, 350);
+  kbSyncQa(activeSess() || sess);
+  kbState.qaTimer = setInterval(tick, 250);
   tick();
 }
 
@@ -1011,7 +1118,9 @@ async function kbTrackJob(kind, jobId) {
       if (done) {
         clearInterval(kbState.jobTimer); kbState.jobTimer = null;
         if (kbPageEls.taskClose) kbPageEls.taskClose.hidden = false;
-        await kbRefresh();
+        kbState.documentLists.clear();
+        kbState.documentHtml.clear();
+        await kbRefresh({ force: true });
         return true;
       }
       return false;
@@ -1040,7 +1149,12 @@ async function kbImport() {
 
 async function kbDeleteLibrary(kb) {
   if (!window.confirm(t('kb.deleteConfirm'))) return;
-  try { await window.ga.kbDelete(kb.id, { deleteData: true }); await kbRefresh(); }
+  try {
+    await window.ga.kbDelete(kb.id, { deleteData: true });
+    kbState.documentLists.delete(kb.id);
+    kbState.documentHtml.clear();
+    await kbRefresh({ force: true });
+  }
   catch (error) { showError(`${t('err.kbDelete')}: ${error.message || error}`); }
 }
 
@@ -1055,8 +1169,8 @@ function kbOpenBuildModal() {
 }
 
 function initKbPage() {
-  bindClick('kb-refresh-btn', () => void kbRefresh());
-  bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb));
+  bindClick('kb-refresh-btn', () => void kbRefresh({ force: true }));
+  bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb, { force: true }));
   bindClick('kb-back-libraries', () => { kbState.view = 'libraries'; kbRenderView(); });
   bindClick('kb-back-documents', () => { kbState.view = 'documents'; kbRenderView(); });
   bindClick('kb-import-btn', () => { if (kbPageEls.importRow) kbPageEls.importRow.hidden = !kbPageEls.importRow.hidden; });
@@ -1378,7 +1492,7 @@ function profileLabel(name) {
 function normalizeProfiles(list) {
   return (list || []).map(p => ({ ...p, name: profileLabel(p.name) || p.name }));
 }
-function sanitizeMarkdown(html) {
+function sanitizeMarkdown(html, options = {}) {
   const tpl = document.createElement('template');
   tpl.innerHTML = String(html);
   const blocked = new Set(['SCRIPT','STYLE','IFRAME','OBJECT','EMBED','LINK','META','BASE','FORM','INPUT','BUTTON']);
@@ -1388,11 +1502,22 @@ function sanitizeMarkdown(html) {
     const el = walker.currentNode;
     if (blocked.has(el.tagName)) { rmv.push(el); continue; }
     for (const attr of Array.from(el.attributes)) {
-      const n = attr.name.toLowerCase(), v = attr.value.trim();
+      const n = attr.name.toLowerCase();
+      let v = attr.value.trim();
       if (n.startsWith('on') || n === 'srcdoc') { el.removeAttribute(attr.name); continue; }
+      if (el.tagName === 'IMG' && n === 'src' && typeof options.resolveImage === 'function') {
+        v = kbText(options.resolveImage(v)).trim();
+        if (v) el.setAttribute(attr.name, v);
+        else { el.removeAttribute(attr.name); continue; }
+      }
       if ((n === 'href' || n === 'src' || n === 'xlink:href') && v && !ALLOWED_URI_RE.test(v)) el.removeAttribute(attr.name);
     }
     if (el.tagName === 'A') { el.setAttribute('rel','noopener noreferrer'); el.setAttribute('target','_blank'); }
+    if (el.tagName === 'IMG') {
+      el.setAttribute('loading', 'lazy');
+      el.setAttribute('decoding', 'async');
+      el.setAttribute('referrerpolicy', 'no-referrer');
+    }
   }
   rmv.forEach(el => el.remove());
   return tpl.innerHTML;
@@ -1460,11 +1585,11 @@ function restoreLatex(html) {
   });
 }
 
-function renderMarkdown(text) {
+function renderMarkdown(text, options = {}) {
   if (typeof marked === 'undefined') return escapeHtml(text).replace(/\n/g, '<br>');
   try {
     const protected_ = protectLatex(String(text || ''));
-    let html = sanitizeMarkdown(marked.parse(protected_));
+    let html = sanitizeMarkdown(marked.parse(protected_), options);
     html = restoreLatex(html);
     // TUI 风格代码块：包装 pre>code 为 .code-block 容器 + 语言头
     html = html.replace(/<pre><code\b(?:\s+class="language-([^"]*)")?[^>]*>([\s\S]*?)<\/code><\/pre>/g,
@@ -1664,7 +1789,7 @@ function stripTurnMarker(body) {
     .replace(/^\s*\**LLM Running \(Turn \d+\) \.\.\.\**\s*/i, '');
 }
 
-function renderTurnBody(body) {
+function renderTurnBody(body, options = {}) {
   // 自包含：每次调用独立的占位栈，渲染完立即还原，无跨调用共享状态
   const folds = [];
   const asks = [];
@@ -1694,7 +1819,7 @@ function renderTurnBody(body) {
   s = s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi, m => stash(t('fold.tool'), m, 'fold-tool'));
   s = s.replace(/<function_results>[\s\S]*?<\/function_results>/gi, m => stash(t('fold.toolResult'), m, 'fold-result'));
   s = s.replace(/<summary>([\s\S]*?)<\/summary>/gi, (_, inner) => `<div class="turn-summary">${inner}</div>`);
-  let html = renderMarkdown(s);
+  let html = renderMarkdown(s, options);
   // 还原占位符
   html = html
     .replace(/§§ASK:(\d+)§§/g, (_, i) => {
@@ -2134,6 +2259,64 @@ function bindResize(handle, panel, dir, min, max) {
 }
 bindResize(rpResize, rpPanel, -1, 160, 400);  // 右栏:cursor 左移 → 增宽
 bindResize(sbResize, sbPanel, +1, 180, 360);  // 左栏:cursor 右移 → 增宽
+
+function bindKbReaderResize() {
+  const splitter = document.querySelector('.kb-reader-splitter');
+  const layout = document.querySelector('.kb-reader-layout');
+  if (!splitter || !layout || splitter.dataset.bound) return;
+  splitter.dataset.bound = '1';
+  let dragging = false;
+  let startX = 0;
+  let startLeft = 0;
+
+  const currentLeft = () => {
+    const firstColumn = getComputedStyle(layout).gridTemplateColumns.split(/\s+/)[0];
+    const value = parseFloat(firstColumn);
+    return Number.isFinite(value) ? value : layout.getBoundingClientRect().width * 0.58;
+  };
+  const setLeft = clientX => {
+    const rect = layout.getBoundingClientRect();
+    const min = 280;
+    const max = Math.max(min, rect.width - 12 - 320);
+    const left = Math.round(Math.min(max, Math.max(min, startLeft + clientX - startX)));
+    layout.style.setProperty('--kb-reader-left', `${left}px`);
+  };
+  const stop = event => {
+    if (!dragging) return;
+    dragging = false;
+    splitter.classList.remove('dragging');
+    try { splitter.releasePointerCapture(event.pointerId); } catch (_) {}
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  };
+
+  splitter.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    dragging = true;
+    startX = event.clientX;
+    startLeft = currentLeft();
+    splitter.classList.add('dragging');
+    try { splitter.setPointerCapture(event.pointerId); } catch (_) {}
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    event.preventDefault();
+  });
+  splitter.addEventListener('pointermove', event => {
+    if (!dragging) return;
+    setLeft(event.clientX);
+    event.preventDefault();
+  });
+  splitter.addEventListener('pointerup', stop);
+  splitter.addEventListener('pointercancel', stop);
+  splitter.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    startX = 0;
+    startLeft = currentLeft();
+    setLeft(event.key === 'ArrowRight' ? 16 : -16);
+    event.preventDefault();
+  });
+}
+bindKbReaderResize();
 const modelChip  = document.getElementById('model-chip');
 const modelNameEl= modelChip ? modelChip.querySelector('.model-name') : null;
 // conductor 页面也有一个独立的模型 chip,共用一份模型数据
@@ -3467,6 +3650,7 @@ function upsert(sess, raw, partial) {
     }
     r.draftStreamBaseline = curLen;
     if (isActive(sess)) renderDraft(sess);
+    kbSyncQa(sess);
     return;
   }
   if (!m.id || r.seen.has(m.id)) return;
@@ -3519,12 +3703,13 @@ function upsert(sess, raw, partial) {
     }
     r.draftEl = null; r.draftSegs = null; r.draftTurn = 0; r.streamTurn = 0;
     sess.messages.push(m);
+    kbSyncQa(sess);
     refreshEmptyState(sess);
     if (m.role === 'assistant' || m.role === 'user') syncAskUserUi();
     saveSessions();
     return;
   }
-  sess.messages.push(m); appendMessage(sess, m);
+  sess.messages.push(m); appendMessage(sess, m); kbSyncQa(sess);
   saveSessions();
 }
 
@@ -3773,6 +3958,7 @@ async function sendPrompt(text) {
   const previewFiles = usedFiles.filter(f => !f.isImage).map(f => ({ id: 'f-' + f.sid, name: f.name, path: f.path }));
   if (previewFiles.length) userMsg.files = previewFiles;
   sess.messages.push(userMsg); appendMessage(sess, userMsg);
+  kbSyncQa(sess);
   sess.lastActiveTs = Date.now();
   // 草稿阶段不落盘标题；首条消息提交后由后端建立会话并生成标题，
   // 前端列表优先从消息内容派生显示名。
