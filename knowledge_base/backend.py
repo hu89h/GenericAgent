@@ -875,20 +875,27 @@ def is_preload_enabled():
 
 def _imported_document_titles(kb_path):
     """Map generated Markdown paths back to source filenames when present."""
+    titles = {}
+    for entry in _imported_document_entries(kb_path):
+        source = str(entry.get("source") or "")
+        title = os.path.basename(source) or source
+        for rel in entry.get("processed") or []:
+            titles[str(rel).replace("\\", "/")] = title
+    return titles
+
+
+def _imported_document_entries(kb_path):
+    """Return manifest document entries without exposing source file paths."""
     manifest = os.path.join(os.path.dirname(kb_path), "import_manifest.json")
     try:
         with open(manifest, encoding="utf-8") as handle:
             entries = (json.load(handle) or {}).get("files") or []
     except Exception:
-        return {}
-    titles = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        source = str(entry.get("source") or "")
-        for rel in entry.get("processed") or []:
-            titles[str(rel).replace("\\", "/")] = os.path.basename(source) or source
-    return titles
+        return []
+    return [
+        entry for entry in entries
+        if isinstance(entry, dict) and entry.get("kind") == "document"
+    ]
 
 
 _retrieval_instance = None
@@ -915,6 +922,7 @@ def _retrieval():
             parent_chunk_body=_parent_chunk_body,
             record_search_error=_record_search_error,
             imported_document_titles=_imported_document_titles,
+            imported_document_entries=_imported_document_entries,
             query_factor=ZVEC_QUERY_FACTOR,
             vector_weight=ZVEC_VECTOR_WEIGHT,
             snippet_width=_SNIPPET,
@@ -1022,6 +1030,33 @@ def resolve_document_asset(kb_id=None, data_id=None, image_path=None):
     return target
 
 
+def resolve_source_asset(kb_id=None, data_id=None, ref=None, image_path=None):
+    """Resolve an image linked from an original source document."""
+    source = resolve_source_document(kb_id=kb_id, data_id=data_id, ref=ref)
+    if source.get("error") or not source.get("is_original"):
+        return None
+    kb = _kb_by_id(source.get("kb_id") or kb_id)
+    source_root_value = str((kb or {}).get("source_path") or "").strip()
+    if kb is None or not source_root_value:
+        return None
+    raw_image = str(image_path or "").strip().strip("<>")
+    raw_image = unquote(raw_image.split("?", 1)[0].split("#", 1)[0]).replace("\\", "/")
+    if (
+        not raw_image
+        or raw_image.startswith("/")
+        or re.match(r"^[a-z][a-z0-9+.-]*:", raw_image, re.I)
+        or os.path.splitext(raw_image)[1].lower() not in DOCUMENT_IMAGE_EXTS
+    ):
+        return None
+    source_root = os.path.realpath(source_root_value)
+    target = os.path.realpath(
+        os.path.join(os.path.dirname(source["path"]), raw_image.replace("/", os.sep))
+    )
+    if not _path_is_within(source_root, target) or not os.path.isfile(target):
+        return None
+    return target
+
+
 def build(kb_id=None, force=False, mode="full", logfn=None):
     """Desktop bridge wrapper around the original same-stack Zvec builder."""
     results = build_all(force=force, verbose=not callable(logfn), logfn=logfn, kb_id=kb_id, mode=mode)
@@ -1051,13 +1086,23 @@ def answer_image(image_id=None, image_path=None, question="", data_id=None, ref=
 
 
 def resolve_open_target(kb_id="", data_id="", image_id="", image_path="", ref=""):
-    """Resolve Desktop /kb/open payload to a package-local source file or image path."""
+    """Resolve Desktop /kb/open to an original document or indexed image."""
     if image_id or image_path:
         asset = read_image(image_id=image_id, image_path=image_path, data_id=data_id, ref=ref)
         if not asset.get("error"):
             path = asset.get("image_abspath") or ""
             if path and os.path.isfile(path):
                 return path
+    # A document reference points at the processed Markdown for retrieval, but
+    # opening it in the desktop UI should take the user to the imported source.
+    if not data_id or "::image::" not in str(data_id):
+        source = resolve_source_document(
+            kb_id=kb_id,
+            data_id=data_id,
+            ref=ref,
+        )
+        if source.get("is_original") and os.path.isfile(source.get("path") or ""):
+            return source["path"]
     if data_id and "::image::" in data_id:
         asset = read_image(data_id=data_id)
         if not asset.get("error"):

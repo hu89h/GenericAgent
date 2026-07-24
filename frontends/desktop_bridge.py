@@ -2284,6 +2284,34 @@ async def kb_asset_handler(request):
     )
 
 
+async def kb_source_asset_handler(request):
+    """Serve a validated original document or its local image reference."""
+    backend = _kb_backend()
+    kb_id = request.query.get("kbId", request.query.get("kb_id"))
+    data_id = request.query.get("dataId", request.query.get("data_id"))
+    ref = request.query.get("ref")
+    image_path = request.query.get("path", request.query.get("imagePath"))
+    if image_path:
+        path = backend.resolve_source_asset(
+            kb_id=kb_id, data_id=data_id, ref=ref, image_path=image_path
+        )
+    else:
+        source = backend.resolve_source_document(
+            kb_id=kb_id, data_id=data_id, ref=ref
+        )
+        path = source.get("path") if source.get("is_original") else None
+    if not path or not os.path.isfile(path):
+        raise web.HTTPNotFound()
+    return web.FileResponse(
+        path,
+        headers={
+            "Cache-Control": "private, max-age=60",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": "inline",
+        },
+    )
+
+
 async def kb_image_handler(request):
     try:
         data = await read_json(request)
@@ -2301,8 +2329,30 @@ async def kb_image_handler(request):
 
 async def kb_source_handler(request):
     try:
+        backend = _kb_backend()
+        if request.method == "GET":
+            source = backend.resolve_source_document(
+                kb_id=request.query.get("kbId", request.query.get("id", request.query.get("kb_id"))),
+                data_id=request.query.get("dataId", request.query.get("data_id")),
+                file_name=request.query.get("fileName", request.query.get("file_name")),
+                ref=request.query.get("ref"),
+            )
+            target = Path(source.get("path") or "").resolve()
+            if source.get("error") or not source.get("is_original") or not target.is_file():
+                return web.Response(status=404, text=source.get("error") or "source document not found")
+            import mimetypes
+            from urllib.parse import quote
+            content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            return web.FileResponse(
+                path=target,
+                headers={
+                    "Content-Type": content_type,
+                    "Content-Disposition": f"inline; filename*=UTF-8''{quote(target.name)}",
+                    "Cache-Control": "no-cache",
+                },
+            )
         data = await read_json(request)
-        result = _kb_backend().resolve_source_document(
+        result = backend.resolve_source_document(
             kb_id=data.get("kbId", data.get("kb_id")),
             data_id=data.get("dataId", data.get("data_id")),
             file_name=data.get("fileName", data.get("file_name")),
@@ -3176,8 +3226,10 @@ def create_app():
     app.router.add_post("/kb/search", kb_search_handler)
     app.router.add_post("/kb/read", kb_read_handler)
     app.router.add_get("/kb/asset", kb_asset_handler)
+    app.router.add_get("/kb/source/asset", kb_source_asset_handler)
     app.router.add_post("/kb/image", kb_image_handler)
     app.router.add_post("/kb/source", kb_source_handler)
+    app.router.add_get("/kb/source", kb_source_handler)
     app.router.add_post("/kb/open", kb_open_handler)
     app.router.add_post("/kb/import", kb_import_handler)
     app.router.add_get("/kb/import/{job_id}", kb_import_status_handler)

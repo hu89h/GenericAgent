@@ -53,6 +53,7 @@ class KnowledgeBaseRetriever:
         parent_chunk_body: Callable[[str, str, int], str],
         record_search_error: Callable[[dict, str, Any], None],
         imported_document_titles: Callable[[str], dict],
+        imported_document_entries: Callable[[str], list[dict]] | None = None,
         query_factor: int = 4,
         vector_weight: float = 1.2,
         snippet_width: int = 220,
@@ -75,6 +76,7 @@ class KnowledgeBaseRetriever:
         self._parent_chunk_body = parent_chunk_body
         self._record_search_error = record_search_error
         self._imported_document_titles = imported_document_titles
+        self._imported_document_entries = imported_document_entries or (lambda _path: [])
         self._query_factor = max(1, int(query_factor))
         self._vector_weight = float(vector_weight)
         self._snippet_width = max(1, int(snippet_width))
@@ -696,15 +698,33 @@ class KnowledgeBaseRetriever:
             if not kb.get("exists"):
                 continue
             imported_titles = self._imported_document_titles(kb["path"])
+            manifest_by_processed = {}
+            for entry in self._imported_document_entries(kb["path"]):
+                source_rel = str(entry.get("source") or "").replace("\\", "/")
+                for processed_rel in entry.get("processed") or []:
+                    rel = str(processed_rel or "").replace("\\", "/")
+                    if rel:
+                        manifest_by_processed[rel] = source_rel
+            source_root_value = str(kb.get("source_path") or "").strip()
+            source_root = os.path.realpath(source_root_value) if source_root_value else ""
             for rel, absolute_path, _mtime, size in self._scan_documents(kb["path"]):
                 rel = rel.replace("\\", "/")
+                source_rel = manifest_by_processed.get(rel, "")
+                source_path = os.path.realpath(os.path.join(source_root, source_rel)) if source_root and source_rel else ""
+                source_is_safe = bool(source_root and source_rel and self._path_is_within(source_root, source_path))
+                source_exists = bool(source_is_safe and os.path.isfile(source_path))
+                source_size = os.path.getsize(source_path) if source_exists else 0
+                display_name = os.path.basename(source_rel) if source_rel else imported_titles.get(rel, os.path.basename(rel))
                 docs.append({
                     "kb_id": kb["id"],
                     "data_id": f"{kb['id']}::{rel}",
-                    "title": imported_titles.get(rel, os.path.basename(rel)),
+                    "title": display_name,
                     "file_name": rel,
-                    "folder": rel.split("/", 1)[0] if "/" in rel else "",
+                    "folder": (source_rel or rel).split("/", 1)[0] if "/" in (source_rel or rel) else "",
                     "size": size,
+                    "source_file_name": source_rel,
+                    "source_size": source_size,
+                    "source_exists": source_exists,
                     "abspath": absolute_path,
                     "ref": f"{kb['id']}/{rel}",
                 })
@@ -782,7 +802,8 @@ class KnowledgeBaseRetriever:
                     break
         except Exception:
             pass
-        source_root = os.path.realpath(str(kb.get("source_path") or ""))
+        source_root_value = str(kb.get("source_path") or "").strip()
+        source_root = os.path.realpath(source_root_value) if source_root_value else ""
         external_path = os.path.realpath(os.path.join(source_root, source_rel)) if source_root and source_rel else ""
         external_is_safe = bool(source_root and source_rel and self._path_is_within(source_root, external_path))
         originals_root = os.path.realpath(os.path.join(package_root, "originals"))
