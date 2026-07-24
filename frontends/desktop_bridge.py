@@ -1922,15 +1922,94 @@ def _kb_backend():
     return backend
 
 
+def _kb_display_name(value) -> str:
+    """Return a user-facing basename without leaking an internal path."""
+    text = str(value or "").strip().replace("\\", "/").rstrip("/")
+    return text.rsplit("/", 1)[-1] if text else ""
+
+
+def _kb_error_code(error) -> str:
+    """Classify internal failures for the desktop UI without exposing details."""
+    text = str(error or "").strip().lower()
+    if not text:
+        return ""
+    if "api" in text and ("key" in text or "token" in text):
+        return "api_key_missing"
+    if "number of pages exceeds limit" in text or "page limit" in text:
+        return "page_limit"
+    if "too large" in text or "file size" in text:
+        return "file_too_large"
+    if "timeout" in text or "timed out" in text or "超时" in text:
+        return "processing_timeout"
+    if "already exists" in text or "已存在" in text:
+        return "already_exists"
+    if "not found" in text or "不存在" in text:
+        return "source_missing"
+    if "encrypted" in text or "已加密" in text:
+        return "encrypted_pdf"
+    return "processing_failed"
+
+
+def _kb_public_job_item(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return {}
+    public = {
+        "name": str(item.get("name") or _kb_display_name(item.get("source") or item.get("kb_id"))),
+        "status": str(item.get("status") or ""),
+    }
+    error_code = _kb_error_code(item.get("error"))
+    if error_code:
+        public["errorCode"] = error_code
+    for source_key, target_key in (
+        ("part_count", "partCount"),
+        ("part_index", "partIndex"),
+        ("first_page", "firstPage"),
+        ("last_page", "lastPage"),
+    ):
+        if item.get(source_key) is not None:
+            public[target_key] = item[source_key]
+    return public
+
+
 def _kb_job_snapshot(job: dict) -> dict:
-    return json.loads(json.dumps(job, ensure_ascii=False, default=str))
-
-
-def _kb_file_count(source_dir: str) -> int:
-    try:
-        return sum(1 for path in Path(source_dir).rglob("*") if path.is_file())
-    except OSError:
-        return 0
+    """Expose only stable, user-facing task state to the desktop page."""
+    snapshot = {
+        "ok": bool(job.get("ok", True)),
+        "jobId": str(job.get("jobId") or ""),
+        "state": str(job.get("state") or ""),
+        "phase": str(job.get("phase") or ""),
+        "mode": str(job.get("mode") or ""),
+        "scope": str(job.get("scope") or ""),
+        "current": _kb_display_name(job.get("current") or job.get("currentKb")),
+        "done": int(job.get("done") or 0),
+        "total": int(job.get("total") or 0),
+        "counts": dict(job.get("counts") or {}),
+        "summary": dict(job.get("summary") or {}),
+        "files": [
+            public
+            for public in (_kb_public_job_item(item) for item in (job.get("files") or []))
+            if public.get("name")
+        ],
+        "targets": [
+            {"name": str(item.get("name") or "")}
+            for item in (job.get("targets") or [])
+            if isinstance(item, dict) and item.get("name")
+        ],
+        "startedAt": job.get("startedAt"),
+        "updatedAt": job.get("updatedAt"),
+    }
+    for source_key, target_key in (
+        ("part_index", "partIndex"),
+        ("part_count", "partCount"),
+        ("first_page", "firstPage"),
+        ("last_page", "lastPage"),
+    ):
+        if job.get(source_key) is not None:
+            snapshot[target_key] = job[source_key]
+    error_code = _kb_error_code(job.get("error"))
+    if error_code:
+        snapshot["errorCode"] = error_code
+    return json.loads(json.dumps(snapshot, ensure_ascii=False, default=str))
 
 
 async def kb_status_handler(request):
@@ -2042,7 +2121,6 @@ async def kb_import_handler(request):
         return json_ok({"ok": False, "error": "source_directory_not_found"}, status=400)
     backend = _kb_backend()
     job_id = f"kbimp-{uuid.uuid4().hex[:16]}"
-    total = _kb_file_count(source_dir)
     job = {
         "ok": True,
         "jobId": job_id,
@@ -2050,8 +2128,23 @@ async def kb_import_handler(request):
         "phase": "queued",
         "sourceDir": source_dir,
         "kbId": backend.kb_id_for_source(source_dir),
-        "counts": {"total": total, "completed": 0, "succeeded": 0, "failed": 0},
+        "counts": {
+            "scanned": 0,
+            "total": 0,
+            "completed": 0,
+            "markdown": 0,
+            "converting": 0,
+            "ready": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "ignored": 0,
+            "skipped": 0,
+            "assets": 0,
+            "split_files": 0,
+            "parts": 0,
+        },
         "files": [],
+        "current": "",
         "result": None,
         "error": "",
         "startedAt": int(time.time()),
@@ -2060,40 +2153,101 @@ async def kb_import_handler(request):
     with _kb_import_jobs_lock:
         _kb_import_jobs[job_id] = job
 
+    def update_progress(event: dict):
+        """Merge importer progress while keeping one row per source file."""
+        if not isinstance(event, dict):
+            return
+        with _kb_import_jobs_lock:
+            current = _kb_import_jobs.get(job_id)
+            if current is None:
+                return
+            current["phase"] = str(event.get("phase") or current.get("phase") or "running")
+            if event.get("current") is not None:
+                current["current"] = str(
+                    event.get("name") or _kb_display_name(event.get("current"))
+                )
+            for key in ("part_index", "part_count", "first_page", "last_page"):
+                if event.get(key) is not None:
+                    current[key] = event[key]
+                elif key in current and event.get("source"):
+                    current.pop(key, None)
+            for key in current["counts"]:
+                if key not in event:
+                    continue
+                try:
+                    current["counts"][key] = max(0, int(event[key]))
+                except (TypeError, ValueError):
+                    continue
+            source = str(event.get("source") or "").strip()
+            if source:
+                rows = current.setdefault("files", [])
+                row = next((item for item in rows if item.get("source") == source), None)
+                if row is None:
+                    row = {
+                        "source": source,
+                        "name": str(event.get("name") or _kb_display_name(source)),
+                        "status": "queued",
+                        "error": "",
+                    }
+                    rows.append(row)
+                if event.get("file_status"):
+                    row["status"] = str(event["file_status"])
+                if event.get("error") is not None:
+                    row["error"] = str(event.get("error") or "")
+                if event.get("current"):
+                    row["current"] = _kb_display_name(event["current"])
+                for key in ("part_index", "part_count", "first_page", "last_page"):
+                    if event.get(key) is not None:
+                        row[key] = event[key]
+            current["updatedAt"] = int(time.time())
+
     def run_import():
         with _kb_import_jobs_lock:
             current = _kb_import_jobs[job_id]
-            current.update(state="running", phase="copying", updatedAt=int(time.time()))
+            current.update(state="running", phase="scanning", updatedAt=int(time.time()))
         try:
             result = backend.import_kb(
                 source_dir,
                 kb_id=data.get("kbId", data.get("kb_id", "")),
                 name=str(data.get("name") or ""),
                 overwrite=bool(data.get("overwrite", False)),
+                progress=update_progress,
             )
-            item = {"source": source_dir, "status": "succeeded", "error": ""}
+            summary = result.get("summary") or {}
+            failed = int(summary.get("failed") or 0)
             with _kb_import_jobs_lock:
                 current = _kb_import_jobs[job_id]
                 current.update(
-                    state="completed",
+                    state="completed_with_failures" if failed else "completed",
                     phase="completed",
                     result=result,
                     updatedAt=int(time.time()),
-                    files=[item],
+                    current="",
+                    files=result.get("files") or [],
                 )
-                current["counts"].update(completed=total, succeeded=1, failed=0)
+                current["counts"].update({
+                    key: int(value)
+                    for key, value in summary.items()
+                    if key in current["counts"] and isinstance(value, (int, float))
+                })
         except Exception as error:
-            item = {"source": source_dir, "status": "failed", "error": str(error)}
             with _kb_import_jobs_lock:
                 current = _kb_import_jobs[job_id]
+                files = current.get("files") or []
+                if not files:
+                    files = [{"source": source_dir, "status": "failed", "error": str(error)}]
                 current.update(
                     state="failed",
                     phase="failed",
                     error=str(error),
                     updatedAt=int(time.time()),
-                    files=[item],
+                    current=_kb_display_name(source_dir),
+                    files=files,
                 )
-                current["counts"].update(completed=total, succeeded=0, failed=1)
+                current["counts"].update(
+                    completed=int(current["counts"].get("completed") or 0),
+                    failed=max(int(current["counts"].get("failed") or 0), 1),
+                )
 
     threading.Thread(target=run_import, name=job_id, daemon=True).start()
     return json_ok({"ok": True, "jobId": job_id, "state": "queued"}, status=202)
@@ -2153,6 +2307,8 @@ async def kb_build_handler(request):
         "done": 0,
         "total": len(targets),
         "currentKb": "",
+        "current": "",
+        "files": [],
         "logs": [],
         "result": None,
         "error": "",
@@ -2173,7 +2329,16 @@ async def kb_build_handler(request):
             current["phase"] = "indexing"
             match = re.search(r"\[kb:([^\]]+)\]", text)
             if match:
-                current["currentKb"] = match.group(1)
+                current_id = match.group(1)
+                current["currentKb"] = current_id
+                current["current"] = next(
+                    (
+                        target.get("name") or current_id
+                        for target in current.get("targets") or []
+                        if target.get("id") == current_id
+                    ),
+                    current_id,
+                )
 
     def run_build():
         with _kb_build_jobs_lock:
@@ -2188,12 +2353,26 @@ async def kb_build_handler(request):
             summary = result.get("summary") if isinstance(result, dict) else {}
             with _kb_build_jobs_lock:
                 current = _kb_build_jobs[job_id]
+                target_names = {
+                    target.get("id"): target.get("name") or target.get("id")
+                    for target in current.get("targets") or []
+                }
+                files = []
+                for item in result.get("results") or []:
+                    stats = item.get("stats") or {}
+                    files.append({
+                        "name": target_names.get(item.get("kb_id"), "知识库"),
+                        "status": item.get("status") or "",
+                        "error": stats.get("error") or "",
+                    })
                 current.update(
                     state="completed" if not result.get("has_failures") else "failed",
                     phase="completed" if not result.get("has_failures") else "completed_with_failures",
                     result=result,
                     updatedAt=int(time.time()),
                     done=len(result.get("results") or []),
+                    current="",
+                    files=files,
                 )
                 current["summary"] = summary or {}
         except Exception as error:

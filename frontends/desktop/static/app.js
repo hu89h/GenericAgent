@@ -696,6 +696,50 @@ function kbText(value) {
   return String(value == null ? '' : value);
 }
 
+function kbFormat(template, values = {}) {
+  return Object.entries(values).reduce(
+    (text, [key, value]) => text.replaceAll(`{${key}}`, String(value)),
+    template,
+  );
+}
+
+function kbFormatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function kbDocumentMeta(doc) {
+  const title = kbText(doc.title || doc.file_name);
+  const dot = title.lastIndexOf('.');
+  const type = dot >= 0 ? title.slice(dot + 1).toUpperCase() : t('kb.document');
+  return kbFormat(t('kb.documentMeta'), { type, size: kbFormatBytes(doc.size) });
+}
+
+function kbPhaseText(job) {
+  const phase = kbText(job.phase || job.state).toLowerCase();
+  const normalized = {
+    queued: 'queued',
+    scanning: 'scanning',
+    scanned: 'preparing',
+    splitting: 'preparing',
+    starting: 'preparing',
+    processing: 'processing',
+    indexing: 'indexing',
+    completed: 'completed',
+    completed_with_failures: 'completedWithFailures',
+    failed: 'failed',
+  }[phase] || 'processing';
+  return t(`kb.phase.${normalized}`);
+}
+
+function kbErrorText(code) {
+  const key = `kb.error.${kbText(code)}`;
+  const translated = t(key);
+  return translated === key ? t('kb.error.processing_failed') : translated;
+}
+
 function kbRenderLibraries() {
   const grid = kbPageEls.grid;
   if (!grid) return;
@@ -716,7 +760,10 @@ function kbRenderLibraries() {
       <div class="kb-card-meta"></div>
       <div class="kb-card-actions"><button type="button" class="kb-link-btn kb-open-library">${escapeHtml(t('kb.open'))}</button><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
     card.querySelector('.kb-card-title').textContent = kb.name || kb.id || '';
-    card.querySelector('.kb-card-meta').textContent = `${kb.n_docs || 0} docs · ${kb.n_chunks || 0} chunks`;
+    card.querySelector('.kb-card-meta').textContent = kbFormat(t('kb.libraryMeta'), {
+      documents: kb.n_docs || 0,
+      images: kb.image_assets || 0,
+    });
     card.querySelector('.kb-open-library').addEventListener('click', () => void kbOpenDocuments(kb));
     card.querySelector('.kb-card-title').addEventListener('click', () => void kbOpenDocuments(kb));
     card.querySelector('.kb-delete-library').addEventListener('click', () => void kbDeleteLibrary(kb));
@@ -740,7 +787,7 @@ function kbRenderDocuments() {
     row.type = 'button'; row.className = 'kb-doc-card';
     row.innerHTML = '<span class="kb-doc-icon" data-ga-icon="fileText"></span><span class="kb-doc-meta"><b></b><small></small></span>';
     row.querySelector('b').textContent = doc.title || doc.file_name || doc.data_id;
-    row.querySelector('small').textContent = doc.file_name || '';
+    row.querySelector('small').textContent = kbDocumentMeta(doc);
     row.addEventListener('click', () => void kbOpenDocument(doc));
     docs.appendChild(row);
     row.querySelectorAll('[data-ga-icon]').forEach(el => { if (typeof window.gaIcon === 'function') el.outerHTML = window.gaIcon(el.dataset.gaIcon, el.className || ''); });
@@ -893,22 +940,63 @@ async function kbAskQuestion() {
 function kbSetTask(job, kind) {
   const counts = job.counts || job.summary || {};
   if (kbPageEls.taskTitle) kbPageEls.taskTitle.textContent = kind === 'import' ? t('kb.importing') : t('kb.building');
-  if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = job.phase || job.state || '';
-  if (kbPageEls.taskCurrent) kbPageEls.taskCurrent.textContent = job.currentKb || '';
+  if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = kbPhaseText(job);
+  if (kbPageEls.taskCurrent) {
+    let current = kbText(job.current);
+    if (current && job.partCount) {
+      current = `${current} · ${kbFormat(t('kb.partProgress'), {
+        current: job.partIndex || 1,
+        total: job.partCount,
+      })}`;
+    }
+    if (job.errorCode) current = kbErrorText(job.errorCode);
+    kbPageEls.taskCurrent.textContent = current;
+  }
   if (kbPageEls.taskCounts) {
     const success = counts.succeeded ?? counts.success ?? 0;
     const failure = counts.failed ?? counts.failure ?? 0;
-    kbPageEls.taskCounts.textContent = t('kb.counts').replace('{success}', success).replace('{failure}', failure);
+    if (kind === 'import') {
+      const lines = [kbFormat(t('kb.importCounts'), {
+        completed: counts.completed || 0,
+        total: counts.total || 0,
+        success,
+        failure,
+      })];
+      if ((counts.assets || 0) || (counts.ignored || 0)) {
+        lines.push(kbFormat(t('kb.importExtras'), {
+          assets: counts.assets || 0,
+          ignored: counts.ignored || 0,
+        }));
+      }
+      kbPageEls.taskCounts.textContent = lines.join('\n');
+    } else {
+      kbPageEls.taskCounts.textContent = kbFormat(t('kb.buildCounts'), {
+        completed: job.done || success + failure + (counts.skipped || 0),
+        total: job.total || counts.total || 0,
+        success,
+        failure,
+      });
+    }
   }
-  const items = job.files || job.result?.results || [];
-  const successItems = items.filter(item => ['succeeded', 'built', 'up-to-date', 'empty', 'skipped'].includes(item.status));
-  const failureItems = items.filter(item => !successItems.includes(item));
+  const items = job.files || [];
+  const successItems = items.filter(item => ['succeeded', 'ready', 'built', 'up-to-date', 'empty'].includes(item.status));
+  const failureItems = items.filter(item => ['failed', 'error', 'missing', 'unavailable'].includes(item.status));
   const renderItems = list => list.map(item => {
-    const label = item.source || item.kb_id || item.path || item.error || '';
-    return `<div>${escapeHtml(label)}${item.error ? `: ${escapeHtml(item.error)}` : ''}</div>`;
+    const error = item.errorCode ? kbErrorText(item.errorCode) : '';
+    return `<div>${escapeHtml(item.name || '')}${error ? `：${escapeHtml(error)}` : ''}</div>`;
   }).join('');
-  if (kbPageEls.taskSuccess) { kbPageEls.taskSuccess.hidden = !successItems.length; kbPageEls.taskSuccess.innerHTML = renderItems(successItems); }
-  if (kbPageEls.taskFailure) { kbPageEls.taskFailure.hidden = !failureItems.length; kbPageEls.taskFailure.innerHTML = renderItems(failureItems); }
+  if (kbPageEls.taskSuccess) {
+    kbPageEls.taskSuccess.hidden = !successItems.length;
+    kbPageEls.taskSuccess.innerHTML = successItems.length
+      ? `<strong>${escapeHtml(t('kb.successList'))}</strong>${renderItems(successItems)}`
+      : '';
+  }
+  if (kbPageEls.taskFailure) {
+    kbPageEls.taskFailure.hidden = !failureItems.length;
+    kbPageEls.taskFailure.innerHTML = failureItems.length
+      ? `<strong>${escapeHtml(t('kb.failureList'))}</strong>${renderItems(failureItems)}`
+      : '';
+  }
 }
 
 async function kbTrackJob(kind, jobId) {

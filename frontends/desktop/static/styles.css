@@ -2740,7 +2740,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
 .kb-task-body{ display:flex; flex-direction:column; gap:12px; }
 .kb-task-phase{ color:var(--txt-strong); font-size:15px; font-weight:600; }
 .kb-task-current{ min-height:20px; color:var(--txt-2); font-size:13px; overflow-wrap:anywhere; }
-.kb-task-counts{ color:var(--muted); font-size:12px; }
+.kb-task-counts{ color:var(--muted); font-size:12px; white-space:pre-line; }
 .kb-task-result{ border-top:1px solid var(--line-soft); padding-top:10px; color:var(--ok); white-space:pre-wrap; font-size:12px; }
 .kb-task-failures{ color:var(--danger); }
 .kb-task-actions{ display:flex; justify-content:flex-end; }
