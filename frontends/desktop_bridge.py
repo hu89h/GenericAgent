@@ -1519,7 +1519,7 @@ class ServiceManager:
         if not buf:
             return ""
         lines = [ln.strip() for ln in list(buf)[-n:] if ln.strip()]
-        return lines[-1][:300] if lines else ""
+        return "\n".join(lines)[-600:] if lines else ""
 
     def _state(self, sid: str, *, err: str = "") -> dict:
         proc = self.procs.get(sid)
