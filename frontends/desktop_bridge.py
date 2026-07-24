@@ -178,11 +178,16 @@ def normalize_knowledge_scope(value: Any) -> dict:
     mode = str(raw.get("mode") or raw.get("kind") or raw.get("type") or "all").strip().lower()
     if mode not in {"all", "kb", "document"}:
         mode = "all"
-    scope = {"mode": mode}
+    origin = str(raw.get("origin") or raw.get("source") or "").strip().lower()
+    if origin not in {"chat", "knowledge"}:
+        # Existing sessions with a KB/document scope were created by the KB
+        # workspace. Existing all-scope sessions remain ordinary chat sessions.
+        origin = "knowledge" if mode in {"kb", "document"} else "chat"
+    scope = {"mode": mode, "origin": origin}
     if mode in {"kb", "document"}:
         kb_id = str(raw.get("kb_id") or raw.get("kbId") or "").strip()
         if not kb_id:
-            return {"mode": "all"}
+            return {"mode": "all", "origin": origin}
         scope["kb_id"] = kb_id
         kb_name = str(raw.get("kb_name") or raw.get("kbName") or "").strip()
         if kb_name:
@@ -198,7 +203,7 @@ def normalize_knowledge_scope(value: Any) -> dict:
             if item:
                 scope[target] = str(item).strip()
         if not any(scope.get(key) for key in ("data_id", "file_name", "ref")):
-            return {"mode": "all"}
+            return {"mode": "all", "origin": origin}
     return scope
 
 

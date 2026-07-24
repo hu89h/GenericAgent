@@ -330,6 +330,9 @@ let bridgeUiOffline = false;
     getMykeyContent: () => rpc('services/mykey/get', {}),
     saveMykeyContent: (content) => rpc('services/mykey/save', { content }),
     importMemory: (sourceDir) => rpc('memory/import', { sourceDir }),
+    pickDirectory: window.__TAURI__?.core?.invoke
+      ? (title = '') => tauriInvoke('pick_directory', { title })
+      : null,
     kbStatus: () => rpc('kb/status', {}),
     kbConfig: () => rpc('kb/config/get', {}),
     saveKbConfig: (params = {}) => rpc('kb/config/save', params),
@@ -338,6 +341,10 @@ let bridgeUiOffline = false;
     kbRead: (params = {}) => rpc('kb/read', params),
     kbImage: (params = {}) => rpc('kb/image', params),
     kbSource: (params = {}) => rpc('kb/source', params),
+    kbSourceUrl: (params = {}) => {
+      const query = new URLSearchParams(params || {}).toString();
+      return `${bridgeHost()}/kb/source${query ? `?${query}` : ''}`;
+    },
     kbOpen: (params = {}) => rpc('kb/open', params),
     kbImport: (params = {}) => rpc('kb/import', params),
     kbImportStatus: (jobId) => rpc('kb/import/status', { jobId }),
@@ -665,7 +672,7 @@ nav.addEventListener('click', (e) => {
    页面只管理知识范围和展示状态；问答仍走现有 session/prompt/poll 链路，
    这样知识库对话与历史会话使用同一份后端状态，不会出现两套消息生命周期。 */
 const kbState = {
-  status: null, view: 'libraries', activeKb: null, documents: [], activeDoc: null,
+  status: null, activeKb: null, documents: [], activeDoc: null,
   qaTimer: null, jobTimer: null, jobKind: '', jobId: '', qaBusy: false,
   statusUpdatedAt: 0, documentsLoading: false,
   statusRequest: null, documentRequests: new Map(),
@@ -676,23 +683,45 @@ const kbPageEls = {
   library: kbEl('kb-library-view'), grid: kbEl('kb-library-grid'),
   documents: kbEl('kb-documents-view'), docTitle: kbEl('kb-active-kb-title'), docs: kbEl('kb-doc-list'),
   reader: kbEl('kb-reader-view'), title: kbEl('kb-doc-title'), source: kbEl('kb-md-view'),
+  browser: kbEl('kb-browser'), workspace: document.querySelector('.kb-workspace'),
+  workspaceSplitter: kbEl('kb-workspace-splitter'), readerPane: kbEl('kb-reader-pane'), readerLayout: kbEl('kb-reader-layout'),
+  splitter: kbEl('kb-reader-splitter'), qaTitle: kbEl('kb-qa-title'),
   qaLog: kbEl('kb-qa-log'), question: kbEl('kb-question'), ask: kbEl('kb-ask-btn'), open: kbEl('kb-open-doc'),
-  importRow: kbEl('kb-import-row'), importPath: kbEl('kb-import-path'),
   task: kbEl('kb-task-modal'), taskTitle: kbEl('kb-task-title'), taskPhase: kbEl('kb-task-phase'),
+  taskProgress: kbEl('kb-task-progress-bar'), taskProgressValue: kbEl('kb-task-progress-value'),
   taskCurrent: kbEl('kb-task-current'), taskCounts: kbEl('kb-task-counts'), taskSuccess: kbEl('kb-task-successes'),
   taskFailure: kbEl('kb-task-failures'), taskClose: kbEl('kb-task-close'), build: kbEl('kb-build-modal'),
   buildForm: kbEl('kb-build-form'), buildScope: kbEl('kb-build-scope'),
 };
 
 function kbScopeForDoc(doc) {
-  return normalizeKnowledgeScope({ mode: 'document', kb_id: doc.kb_id, data_id: doc.data_id,
-    file_name: doc.file_name, ref: doc.ref, title: doc.title });
+  return normalizeKnowledgeScope({ mode: 'document', origin: 'knowledge', kb_id: doc.kb_id,
+    kb_name: kbState.activeKb?.name || kbState.activeKb?.id || doc.kb_id,
+    data_id: doc.data_id, file_name: doc.file_name, ref: doc.ref, title: doc.title });
+}
+
+function kbScopeForKb(kb) {
+  return normalizeKnowledgeScope({ mode: 'kb', origin: 'knowledge', kb_id: kb?.id, kb_name: kb?.name || kb?.id });
+}
+
+function kbScopeKey(scope) {
+  const value = normalizeKnowledgeScope(scope);
+  return [value.origin, value.mode, value.kb_id || '', value.data_id || '', value.ref || '', value.file_name || ''].join('|');
+}
+
+function kbSessionMatchesScope(sess, scope) {
+  return !!sess && kbScopeKey(sess.knowledgeScope) === kbScopeKey(scope);
+}
+
+function kbKnowledgeScope(scope) {
+  return normalizeKnowledgeScope({ ...(scope || {}), origin: 'knowledge' });
 }
 
 function kbSetSessionScope(scope) {
   const sess = activeSess();
   if (!sess) return;
   sess.knowledgeScope = normalizeKnowledgeScope(scope);
+  updateKnowledgeScopeChip(sess);
   if (sess.bridgeSessionId) patchSession(sess, { knowledgeScope: sess.knowledgeScope });
 }
 
@@ -718,11 +747,17 @@ function kbFormatBytes(value) {
   return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
+function kbDocumentName(doc) {
+  const source = kbText(doc.source_file_name || '').replaceAll('\\', '/');
+  return source ? source.split('/').pop() : kbText(doc.title || doc.file_name || doc.data_id);
+}
+
 function kbDocumentMeta(doc) {
-  const title = kbText(doc.title || doc.file_name);
+  const title = kbText(doc.source_file_name || doc.title || doc.file_name);
   const dot = title.lastIndexOf('.');
   const type = dot >= 0 ? title.slice(dot + 1).toUpperCase() : t('kb.document');
-  return kbFormat(t('kb.documentMeta'), { type, size: kbFormatBytes(doc.size) });
+  const size = doc.source_file_name ? doc.source_size : doc.size;
+  return kbFormat(t('kb.documentMeta'), { type, size: kbFormatBytes(size) });
 }
 
 function kbDocumentImageUrl(doc, source) {
@@ -735,6 +770,32 @@ function kbDocumentImageUrl(doc, source) {
     path: value,
   });
   return `${bridgeHost()}/kb/asset?${query.toString()}`;
+}
+
+function kbDocumentSourceUrl(doc, imagePath = '') {
+  const params = {
+    kbId: doc.kb_id || '',
+    dataId: doc.data_id || '',
+    fileName: doc.file_name || '',
+    ref: doc.ref || '',
+  };
+  if (!imagePath && window.ga.kbSourceUrl) return window.ga.kbSourceUrl(params);
+  const query = new URLSearchParams(params);
+  if (imagePath) query.set('path', imagePath);
+  return `${bridgeHost()}/kb/source/asset?${query.toString()}`;
+}
+
+function kbDocumentSourceType(doc, source) {
+  const name = kbText(source?.source_file_name || doc.source_file_name || doc.title || doc.file_name);
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function kbOriginalImageUrl(doc, source) {
+  const value = kbText(source).trim();
+  if (!value || /^(?:https?:|data:|blob:)/i.test(value)) return value;
+  if (value.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(value)) return '';
+  return kbDocumentSourceUrl(doc, value);
 }
 
 function kbCachedDocumentHtml(key) {
@@ -787,11 +848,11 @@ function kbRenderLibraries() {
   }
   for (const kb of kbs) {
     const card = document.createElement('article');
-    card.className = 'kb-library-card';
+    card.className = `kb-library-card${kbState.activeKb?.id === kb.id ? ' active' : ''}`;
     card.dataset.kbId = kb.id || '';
     const stateText = kb.ready ? t('kb.ready') : t('kb.notReady');
     card.innerHTML = `
-      <div class="kb-card-top"><div class="kb-card-icon"><span data-ga-icon="books"></span></div><span class="kb-status ${kb.ready ? 'ready' : 'pending'}">${escapeHtml(stateText)}</span></div>
+      <div class="kb-card-top"><span class="kb-status ${kb.ready ? 'ready' : 'pending'}">${escapeHtml(stateText)}</span></div>
       <h3 class="kb-card-title"></h3>
       <div class="kb-card-meta"></div>
       <div class="kb-card-actions"><button type="button" class="kb-link-btn kb-open-library">${escapeHtml(t('kb.open'))}</button><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
@@ -806,7 +867,6 @@ function kbRenderLibraries() {
     });
     card.querySelector('.kb-delete-library').addEventListener('click', () => void kbDeleteLibrary(kb));
     grid.appendChild(card);
-    card.querySelectorAll('[data-ga-icon]').forEach(el => { if (typeof window.gaIcon === 'function') el.outerHTML = window.gaIcon(el.dataset.gaIcon, el.className || ''); });
   }
 }
 
@@ -826,9 +886,9 @@ function kbRenderDocuments() {
   }
   for (const doc of rows) {
     const row = document.createElement('button');
-    row.type = 'button'; row.className = 'kb-doc-card';
+    row.type = 'button'; row.className = `kb-doc-card${kbState.activeDoc?.data_id === doc.data_id ? ' active' : ''}`;
     row.innerHTML = '<span class="kb-doc-icon" data-ga-icon="fileText"></span><span class="kb-doc-meta"><b></b><small></small></span>';
-    row.querySelector('b').textContent = doc.title || doc.file_name || doc.data_id;
+    row.querySelector('b').textContent = kbDocumentName(doc);
     row.querySelector('small').textContent = kbDocumentMeta(doc);
     row.addEventListener('click', () => void kbOpenDocument(doc));
     docs.appendChild(row);
@@ -836,13 +896,37 @@ function kbRenderDocuments() {
   }
 }
 
+function kbRenderScopeState() {
+  if (!kbPageEls.source) return;
+  const hasDocument = !!kbState.activeDoc;
+  const documentTitle = hasDocument ? kbDocumentName(kbState.activeDoc) : '';
+  if (kbPageEls.title) kbPageEls.title.textContent = documentTitle;
+  if (kbPageEls.readerPane) kbPageEls.readerPane.hidden = !hasDocument;
+  if (kbPageEls.splitter) kbPageEls.splitter.hidden = !hasDocument;
+  if (kbPageEls.readerLayout) kbPageEls.readerLayout.classList.toggle('scope-only', !hasDocument);
+  if (kbPageEls.open) kbPageEls.open.disabled = !hasDocument;
+  if (kbPageEls.qaTitle) kbPageEls.qaTitle.textContent = hasDocument
+    ? t('kb.docQa')
+    : (kbState.activeKb ? t('kb.kbQa') : t('kb.allQa'));
+  if (!hasDocument) {
+    kbPageEls.source.innerHTML = '';
+    kbPageEls.source.classList.remove('kb-original-source');
+  }
+}
+
 function kbRenderView() {
-  const view = kbState.view;
-  if (kbPageEls.library) kbPageEls.library.hidden = view !== 'libraries';
-  if (kbPageEls.documents) kbPageEls.documents.hidden = view !== 'documents';
-  if (kbPageEls.reader) kbPageEls.reader.hidden = view !== 'reader';
-  if (view === 'libraries') kbRenderLibraries();
-  if (view === 'documents') kbRenderDocuments();
+  // The knowledge page is one stable workbench. The library list remains visible,
+  // while the document list appears below it after a library is selected. The
+  // reader and scoped chat stay mounted so switching scope does not recreate them.
+  if (kbPageEls.library) kbPageEls.library.hidden = false;
+  if (kbPageEls.documents) kbPageEls.documents.hidden = !kbState.activeKb;
+  if (kbPageEls.reader) kbPageEls.reader.hidden = false;
+  if (kbPageEls.browser) kbPageEls.browser.classList.toggle('has-active-kb', !!kbState.activeKb);
+  kbRenderLibraries();
+  if (kbState.activeKb) kbRenderDocuments();
+  kbRenderScopeState();
+  window.__gaClampKbWorkspace?.();
+  window.__gaClampKbReader?.();
 }
 
 async function kbRefresh({ force = false } = {}) {
@@ -861,6 +945,13 @@ async function kbRefresh({ force = false } = {}) {
   try {
     kbState.status = await request;
     kbState.statusUpdatedAt = Date.now();
+    if (kbState.activeKb) {
+      kbState.activeKb = kbStatusKbs().find(item => item.id === kbState.activeKb.id) || null;
+      if (!kbState.activeKb) {
+        kbState.activeDoc = null;
+        kbState.documents = [];
+      }
+    }
     kbRenderView();
   } catch (error) {
     kbState.status = { knowledge_bases: [] };
@@ -871,12 +962,14 @@ async function kbRefresh({ force = false } = {}) {
 
 async function kbOpenDocuments(kb, { force = false } = {}) {
   kbState.activeKb = kb;
-  kbState.view = 'documents';
+  kbState.activeDoc = null;
   if (kbPageEls.docTitle) kbPageEls.docTitle.textContent = kb.name || kb.id || '';
   const cached = kbState.documentLists.get(kb.id);
   kbState.documents = cached?.documents || [];
   kbState.documentsLoading = !cached;
   kbRenderView();
+  const kbScope = kbScopeForKb(kb);
+  kbRenderQa(kbSessionMatchesScope(activeSess(), kbScope) ? activeSess() : null);
   if (!force && cached && Date.now() - cached.updatedAt < 3000) return;
   try {
     let request = kbState.documentRequests.get(kb.id);
@@ -904,45 +997,111 @@ async function kbOpenDocuments(kb, { force = false } = {}) {
   }
 }
 
-async function kbOpenDocument(doc) {
+async function kbOpenDocument(doc, { session = null } = {}) {
+  if (!doc) return;
   try {
     kbState.activeDoc = doc;
-    kbState.view = 'reader';
     const scope = kbScopeForDoc(doc);
-    kbSetSessionScope(scope);
-    if (kbPageEls.title) kbPageEls.title.textContent = doc.title || doc.file_name || '';
-    if (kbPageEls.source) kbPageEls.source.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.loading'))}</div>`;
+    if (session && activeSess()?.id !== session.id) setActiveSession(session.id);
+    if (kbPageEls.title) kbPageEls.title.textContent = kbDocumentName(doc);
+    if (kbPageEls.source) {
+      kbPageEls.source.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.loading'))}</div>`;
+      kbPageEls.source.classList.remove('kb-original-source');
+    }
     if (kbPageEls.open) kbPageEls.open.disabled = false;
     kbRenderView();
-    const cacheKey = `${doc.data_id}:${doc.size || 0}`;
+    const current = activeSess();
+    if (kbSessionMatchesScope(current, scope)) kbRenderQa(current);
+    else kbRenderQa(null);
+    const source = await window.ga.kbSource({ kbId: doc.kb_id, dataId: doc.data_id, ref: doc.ref });
+    if (source.error) throw new Error(source.error);
+    if (!source.is_original) throw new Error(t('kb.originalUnavailable'));
+    const sourceType = kbDocumentSourceType(doc, source);
+    const sourceUrl = kbDocumentSourceUrl(doc);
+    const cacheKey = `original:${doc.data_id}:${doc.source_size || doc.size || 0}`;
     const cachedHtml = kbCachedDocumentHtml(cacheKey);
     const mountHtml = html => {
       if (!kbPageEls.source) return;
       kbPageEls.source.innerHTML = html;
+      kbPageEls.source.classList.toggle('kb-original-source', true);
       postRenderEnhance(kbPageEls.source);
     };
     if (cachedHtml) {
       mountHtml(cachedHtml);
-      kbRenderQa(activeSess());
+      if (kbSessionMatchesScope(activeSess(), scope)) kbRenderQa(activeSess());
       return;
     }
-    const result = await window.ga.kbRead({ kbId: doc.kb_id, dataId: doc.data_id, fileName: doc.file_name, ref: doc.ref, maxChars: 200000 });
-    if (result.error) throw new Error(result.error);
-    const content = result.content || '';
-    const html = content
-      ? `<div class="bubble md kb-document-markdown">${renderTurnBody(content, { resolveImage: source => kbDocumentImageUrl(doc, source) })}</div>`
-      : `<div class="kb-empty">${escapeHtml(t('kb.noData'))}</div>`;
+    const imageTypes = new Set(['png', 'jpg', 'jpeg', 'jp2', 'webp', 'gif', 'bmp', 'tif', 'tiff']);
+    const textTypes = new Set(['md', 'markdown', 'txt', 'text', 'csv', 'tsv', 'json', 'yaml', 'yml', 'xml', 'html', 'htm']);
+    let html;
+    if (sourceType === 'pdf') {
+      html = `<iframe class="kb-original-frame" src="${escapeHtml(sourceUrl)}" title="${escapeHtml(kbDocumentName(doc))}"></iframe>`;
+    } else if (imageTypes.has(sourceType)) {
+      html = `<div class="kb-original-image-wrap"><img class="kb-original-image" src="${escapeHtml(sourceUrl)}" alt="${escapeHtml(kbDocumentName(doc))}"></div>`;
+    } else if (textTypes.has(sourceType)) {
+      const response = await fetch(sourceUrl, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`${t('kb.originalUnavailable')} (${response.status})`);
+      const content = await response.text();
+      html = content
+        ? `<div class="bubble md kb-document-markdown">${renderTurnBody(content, { resolveImage: image => kbOriginalImageUrl(doc, image) })}</div>`
+        : `<div class="kb-empty">${escapeHtml(t('kb.noData'))}</div>`;
+    } else {
+      html = `<div class="kb-original-file"><div class="kb-original-file-name">${escapeHtml(kbDocumentName(doc))}</div><div class="kb-empty">${escapeHtml(t('kb.previewUnavailable'))}</div></div>`;
+    }
     kbCacheDocumentHtml(cacheKey, html);
     if (kbState.activeDoc?.data_id === doc.data_id) {
       mountHtml(html);
     }
-    kbRenderQa(activeSess());
+    if (kbSessionMatchesScope(activeSess(), scope)) kbRenderQa(activeSess());
   } catch (error) {
     if (kbState.activeDoc?.data_id === doc.data_id && kbPageEls.source) {
       kbPageEls.source.innerHTML = `<div class="kb-empty kb-error">${escapeHtml(error.message || error)}</div>`;
     }
     showError(`${t('err.kbLoad')}: ${error.message || error}`);
   }
+}
+
+async function kbOpenSessionScope(sess) {
+  const scope = normalizeKnowledgeScope(sess?.knowledgeScope);
+  if (scope.origin !== 'knowledge' && scope.mode === 'all') return;
+  if (currentPage !== 'kb') gaGoPage('kb');
+  try {
+    await kbRefresh();
+    if (scope.mode === 'all') {
+      kbState.activeKb = null;
+      kbState.activeDoc = null;
+      kbRenderView();
+      kbRenderQa(sess);
+      return;
+    }
+    const kb = kbStatusKbs().find(item => item.id === scope.kb_id);
+    if (!kb) throw new Error(t('kb.error.source_missing'));
+    await kbOpenDocuments(kb);
+    if (scope.mode === 'kb') {
+      kbRenderQa(sess);
+      return;
+    }
+    const doc = kbState.documents.find(item =>
+      (scope.data_id && item.data_id === scope.data_id)
+      || (scope.ref && item.ref === scope.ref)
+      || (scope.file_name && item.file_name === scope.file_name)
+    );
+    if (!doc) throw new Error(t('kb.error.source_missing'));
+    await kbOpenDocument(doc, { session: sess });
+  } catch (error) {
+    showError(`${t('err.kbLoad')}: ${error.message || error}`);
+  }
+}
+
+async function openSessionSurface(sess) {
+  if (!sess) return;
+  setActiveSession(sess.id);
+  const scope = normalizeKnowledgeScope(sess.knowledgeScope);
+  if (scope.origin === 'knowledge') {
+    await kbOpenSessionScope(sess);
+    return;
+  }
+  if (currentPage !== 'chat') gaGoPage('chat');
 }
 
 function kbAppendCitations(row, msg) {
@@ -994,8 +1153,18 @@ function kbRenderQa(sess) {
   log.scrollTop = log.scrollHeight;
 }
 
+function kbVisibleScope() {
+  return kbKnowledgeScope(kbState.activeDoc
+    ? kbScopeForDoc(kbState.activeDoc)
+    : kbState.activeKb
+      ? kbScopeForKb(kbState.activeKb)
+      : { mode: 'all' });
+}
+
 function kbSyncQa(sess) {
-  if (currentPage === 'kb' && kbState.view === 'reader' && sess && isActive(sess)) kbRenderQa(sess);
+  if (currentPage === 'kb' && sess && isActive(sess) && kbSessionMatchesScope(sess, kbVisibleScope())) {
+    kbRenderQa(sess);
+  }
 }
 
 async function kbOpenCitation(citation) {
@@ -1030,13 +1199,16 @@ function kbStartQaMirror(sess) {
 async function kbAskQuestion() {
   const question = kbText(kbPageEls.question?.value).trim();
   if (!question || kbState.qaBusy) return;
-  if (!kbState.activeDoc) { showError(t('err.kbAsk')); return; }
   kbState.qaBusy = true;
   if (kbPageEls.ask) kbPageEls.ask.disabled = true;
+  const scope = kbKnowledgeScope(kbState.activeDoc
+    ? kbScopeForDoc(kbState.activeDoc)
+    : kbState.activeKb
+      ? kbScopeForKb(kbState.activeKb)
+      : { mode: 'all' });
   let sess = activeSess();
-  if (!sess) sess = newSession();
-  sess.knowledgeScope = kbScopeForDoc(kbState.activeDoc);
-  if (sess.bridgeSessionId) patchSession(sess, { knowledgeScope: sess.knowledgeScope });
+  if (!kbSessionMatchesScope(sess, scope)) sess = newSession(scope);
+  else kbSetSessionScope(scope);
   if (kbPageEls.question) kbPageEls.question.value = '';
   try {
     const accepted = await sendPrompt(question);
@@ -1064,9 +1236,27 @@ function kbSetTask(job, kind) {
     if (job.errorCode) current = kbErrorText(job.errorCode);
     kbPageEls.taskCurrent.textContent = current;
   }
+  const success = Number(counts.succeeded ?? counts.success ?? 0);
+  const failure = Number(counts.failed ?? counts.failure ?? 0);
+  const completed = Math.max(0, Number(
+    kind === 'import'
+      ? (counts.completed ?? success + failure)
+      : (job.done ?? counts.completed ?? success + failure + Number(counts.skipped || 0)),
+  ) || 0);
+  const total = Math.max(0, Number(
+    kind === 'import' ? counts.total : (job.total ?? counts.total),
+  ) || 0);
+  const terminal = ['completed', 'completed_with_failures', 'failed'].includes(job.state)
+    || String(job.phase || '').includes('completed');
+  const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : (terminal ? 100 : 0);
+  if (kbPageEls.taskProgress) {
+    kbPageEls.taskProgress.style.width = `${percent}%`;
+    kbPageEls.taskProgress.parentElement?.setAttribute('aria-valuenow', String(percent));
+  }
+  if (kbPageEls.taskProgressValue) {
+    kbPageEls.taskProgressValue.textContent = total ? `${Math.min(completed, total)}/${total}` : '';
+  }
   if (kbPageEls.taskCounts) {
-    const success = counts.succeeded ?? counts.success ?? 0;
-    const failure = counts.failed ?? counts.failure ?? 0;
     if (kind === 'import') {
       const lines = [kbFormat(t('kb.importCounts'), {
         completed: counts.completed || 0,
@@ -1114,6 +1304,17 @@ function kbSetTask(job, kind) {
 async function kbTrackJob(kind, jobId) {
   if (kbState.jobTimer) clearInterval(kbState.jobTimer);
   kbState.jobKind = kind; kbState.jobId = jobId;
+  if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = t('kb.loading');
+  if (kbPageEls.taskProgress) {
+    kbPageEls.taskProgress.style.width = '0%';
+    kbPageEls.taskProgress.parentElement?.setAttribute('aria-valuenow', '0');
+  }
+  if (kbPageEls.taskProgressValue) kbPageEls.taskProgressValue.textContent = '';
+  if (kbPageEls.taskCurrent) kbPageEls.taskCurrent.textContent = '';
+  if (kbPageEls.taskCounts) kbPageEls.taskCounts.textContent = '';
+  if (kbPageEls.taskSuccess) { kbPageEls.taskSuccess.hidden = true; kbPageEls.taskSuccess.innerHTML = ''; }
+  if (kbPageEls.taskFailure) { kbPageEls.taskFailure.hidden = true; kbPageEls.taskFailure.innerHTML = ''; }
+  if (kbPageEls.taskClose) kbPageEls.taskClose.hidden = true;
   openModal('kb-task-modal');
   const poll = async () => {
     try {
@@ -1140,16 +1341,27 @@ async function kbTrackJob(kind, jobId) {
   if (!finished) kbState.jobTimer = setInterval(poll, 500);
 }
 
-async function kbImport() {
-  const sourceDir = kbText(kbPageEls.importPath?.value).trim();
+async function kbImport(sourceDir) {
+  sourceDir = kbText(sourceDir).trim();
   if (!sourceDir) return;
   try {
     const result = await window.ga.kbImport({ sourceDir });
     if (!result.jobId) throw new Error(result.error || t('err.kbImport'));
-    if (kbPageEls.importRow) kbPageEls.importRow.hidden = true;
-    if (kbPageEls.importPath) kbPageEls.importPath.value = '';
     await kbTrackJob('import', result.jobId);
   } catch (error) { showError(`${t('err.kbImport')}: ${error.message || error}`); }
+}
+
+async function kbPickAndImport() {
+  if (typeof window.ga.pickDirectory !== 'function') {
+    showError(t('err.kbFolderPicker'));
+    return;
+  }
+  try {
+    const sourceDir = await window.ga.pickDirectory(t('kb.import'));
+    if (sourceDir) await kbImport(sourceDir);
+  } catch (error) {
+    showError(`${t('err.kbImport')}: ${error.message || error}`);
+  }
 }
 
 async function kbDeleteLibrary(kb) {
@@ -1163,8 +1375,9 @@ async function kbDeleteLibrary(kb) {
   catch (error) { showError(`${t('err.kbDelete')}: ${error.message || error}`); }
 }
 
-function kbOpenBuildModal() {
+async function kbOpenBuildModal() {
   if (!kbPageEls.buildScope) return;
+  await kbRefresh();
   kbPageEls.buildScope.innerHTML = `<option value="">${escapeHtml(t('kb.buildAll'))}</option>`;
   for (const kb of kbStatusKbs()) {
     const option = document.createElement('option'); option.value = kb.id; option.textContent = kb.name || kb.id;
@@ -1176,10 +1389,7 @@ function kbOpenBuildModal() {
 function initKbPage() {
   bindClick('kb-refresh-btn', () => void kbRefresh({ force: true }));
   bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb, { force: true }));
-  bindClick('kb-back-libraries', () => { kbState.view = 'libraries'; kbRenderView(); });
-  bindClick('kb-back-documents', () => { kbState.view = 'documents'; kbRenderView(); });
-  bindClick('kb-import-btn', () => { if (kbPageEls.importRow) kbPageEls.importRow.hidden = !kbPageEls.importRow.hidden; });
-  bindClick('kb-import-confirm', () => void kbImport());
+  bindClick('kb-import-btn', () => void kbPickAndImport());
   bindClick('kb-build-btn', kbOpenBuildModal);
   bindClick('kb-ask-btn', () => void kbAskQuestion());
   bindClick('kb-open-doc', async () => {
@@ -1205,8 +1415,111 @@ function initKbPage() {
 }
 
 window.gaKbShowLibraries = () => {
-  kbState.view = 'libraries'; kbState.activeDoc = null; kbRenderView(); void kbRefresh();
+  kbState.activeKb = null; kbState.activeDoc = null;
+  kbRenderView();
+  const sess = activeSess();
+  const scope = normalizeKnowledgeScope(sess?.knowledgeScope);
+  kbRenderQa(scope.origin === 'knowledge' && scope.mode === 'all' ? sess : null);
+  void kbRefresh();
 };
+
+function closeKnowledgeScopePicker() {
+  document.getElementById('knowledge-scope-picker')?.remove();
+}
+
+async function openKnowledgeScopePicker() {
+  closeKnowledgeScopePicker();
+  const anchor = document.getElementById('chat-plus-btn');
+  if (!anchor) return;
+  const picker = document.createElement('div');
+  picker.id = 'knowledge-scope-picker';
+  picker.className = 'ga-menu knowledge-scope-picker';
+  picker.innerHTML = `<div class="knowledge-scope-head">${escapeHtml(t('kb.choose'))}</div><div class="knowledge-scope-loading">${escapeHtml(t('kb.loading'))}</div>`;
+  document.body.appendChild(picker);
+  const rect = anchor.getBoundingClientRect();
+  picker.style.left = `${Math.max(8, Math.min(window.innerWidth - 328, rect.left))}px`;
+  picker.style.bottom = `${Math.max(10, window.innerHeight - rect.top + 6)}px`;
+  let scopeKbs = [];
+
+  const currentScope = () => normalizeKnowledgeScope(activeSess()?.knowledgeScope);
+  const renderKbChoices = () => {
+    const current = currentScope();
+    picker.innerHTML = `<div class="knowledge-scope-head">${escapeHtml(t('kb.choose'))}</div>`
+      + `<button type="button" class="ga-menu-item ${current.mode === 'all' ? 'active' : ''}" data-knowledge-scope-kind="all">${escapeHtml(t('kb.scopeAll'))}</button>`
+      + (scopeKbs.length
+        ? scopeKbs.map(kb => {
+          const active = current.mode === 'kb' && current.kb_id === kb.id;
+          return `<button type="button" class="ga-menu-item ${active ? 'active' : ''}" data-knowledge-scope-kb-id="${escapeHtml(kb.id)}" data-knowledge-scope-kb-name="${escapeHtml(kb.name || kb.id)}">${escapeHtml(kb.name || kb.id)}</button>`;
+        }).join('')
+        : `<div class="knowledge-scope-empty">${escapeHtml(t('kb.noReady'))}</div>`);
+  };
+
+  const renderDocChoices = (kb, docs) => {
+    const current = currentScope();
+    picker.innerHTML = `<button type="button" class="knowledge-scope-back" data-knowledge-scope-action="back">${escapeHtml(t('kb.backLibraries'))}</button>`
+      + `<div class="knowledge-scope-head">${escapeHtml(kb.name || kb.id)}</div>`
+      + `<button type="button" class="ga-menu-item ${current.mode === 'kb' && current.kb_id === kb.id ? 'active' : ''}" data-knowledge-scope-kb-id="${escapeHtml(kb.id)}" data-knowledge-scope-kb-name="${escapeHtml(kb.name || kb.id)}" data-knowledge-scope-select-kb="1">${escapeHtml(t('kb.allInKb'))}</button>`
+      + (docs.length
+        ? docs.map(doc => {
+          const title = doc.title || doc.file_name || doc.ref || doc.data_id || '';
+          const active = current.mode === 'document' && current.kb_id === kb.id
+            && ((current.data_id && current.data_id === doc.data_id) || (current.ref && current.ref === doc.ref));
+          const payload = encodeURIComponent(JSON.stringify({
+            mode: 'document', origin: 'chat', kb_id: doc.kb_id || kb.id,
+            kb_name: kb.name || kb.id, data_id: doc.data_id || '', file_name: doc.file_name || '',
+            ref: doc.ref || '', title,
+          }));
+          return `<button type="button" class="ga-menu-item knowledge-scope-doc ${active ? 'active' : ''}" data-knowledge-scope-doc="${payload}" title="${escapeHtml(doc.file_name || doc.ref || title)}">${escapeHtml(title)}</button>`;
+        }).join('')
+        : `<div class="knowledge-scope-empty">${escapeHtml(t('kb.noDocs'))}</div>`);
+  };
+
+  const chooseScope = async (scope) => {
+    closeKnowledgeScopePicker();
+    newSession(normalizeKnowledgeScope({ ...scope, origin: 'chat' }));
+  };
+
+  picker.addEventListener('click', async event => {
+    const back = event.target.closest('[data-knowledge-scope-action="back"]');
+    if (back) { event.preventDefault(); renderKbChoices(); return; }
+    const all = event.target.closest('[data-knowledge-scope-kind="all"]');
+    if (all) { event.preventDefault(); await chooseScope({ mode: 'all' }); return; }
+    const doc = event.target.closest('[data-knowledge-scope-doc]');
+    if (doc) {
+      event.preventDefault();
+      try { await chooseScope(JSON.parse(decodeURIComponent(doc.dataset.knowledgeScopeDoc))); }
+      catch (_) { closeKnowledgeScopePicker(); showError(t('err.kbLoad')); }
+      return;
+    }
+    const kbItem = event.target.closest('[data-knowledge-scope-kb-id]');
+    if (!kbItem) return;
+    event.preventDefault();
+    const kb = scopeKbs.find(item => item.id === kbItem.dataset.knowledgeScopeKbId)
+      || { id: kbItem.dataset.knowledgeScopeKbId, name: kbItem.dataset.knowledgeScopeKbName || kbItem.dataset.knowledgeScopeKbId };
+    if (kbItem.dataset.knowledgeScopeSelectKb === '1') {
+      await chooseScope({ mode: 'kb', kb_id: kb.id, kb_name: kb.name || kb.id });
+      return;
+    }
+    picker.innerHTML = `<div class="knowledge-scope-head">${escapeHtml(kb.name || kb.id)}</div><div class="knowledge-scope-loading">${escapeHtml(t('kb.loading'))}</div>`;
+    try {
+      const data = await window.ga.kbDocs({ kbId: kb.id });
+      renderDocChoices(kb, Array.isArray(data?.documents) ? data.documents : (Array.isArray(data?.docs) ? data.docs : []));
+    } catch (error) {
+      picker.innerHTML = `<button type="button" class="knowledge-scope-back" data-knowledge-scope-action="back">${escapeHtml(t('kb.backLibraries'))}</button><div class="knowledge-scope-empty">${escapeHtml(error.message || t('err.kbLoad'))}</div>`;
+    }
+  });
+
+  try {
+    const data = await window.ga.kbStatus();
+    const allKbs = Array.isArray(data?.knowledge_bases) ? data.knowledge_bases : kbStatusKbs();
+    scopeKbs = allKbs.filter(kb => kb.ready);
+    renderKbChoices();
+  } catch (error) {
+    picker.innerHTML = `<div class="knowledge-scope-empty">${escapeHtml(error.message || t('err.kbLoad'))}</div>`;
+  }
+}
+
+window.gaOpenKnowledgeScopePicker = openKnowledgeScopePicker;
 // This block is declared before the generic modal helpers below; defer binding
 // until the current script has finished initializing those shared helpers.
 setTimeout(initKbPage, 0);
@@ -2142,30 +2455,49 @@ const isActive = (sess) => sess && sess.id === state.activeId;
 function normalizeKnowledgeScope(value) {
   const raw = value && typeof value === 'object' ? value : {};
   const mode = raw.mode || raw.kind || 'all';
+  let origin = String(raw.origin || raw.source || '').trim().toLowerCase();
+  if (origin !== 'chat' && origin !== 'knowledge') {
+    origin = (mode === 'kb' || mode === 'knowledge_base' || mode === 'document' || mode === 'doc')
+      ? 'knowledge' : 'chat';
+  }
   if (mode === 'kb' || mode === 'knowledge_base') {
     const kbId = raw.kb_id || raw.kbId || raw.id;
-    return kbId ? { mode: 'kb', kb_id: String(kbId) } : { mode: 'all' };
+    return kbId ? {
+      mode: 'kb', origin, kb_id: String(kbId),
+      ...(raw.kb_name || raw.kbName ? { kb_name: String(raw.kb_name || raw.kbName) } : {}),
+    } : { mode: 'all', origin };
   }
   if (mode === 'document' || mode === 'doc') {
     const kbId = raw.kb_id || raw.kbId;
     const dataId = raw.data_id || raw.dataId;
     if (kbId && dataId) {
       return {
-        mode: 'document', kb_id: String(kbId), data_id: String(dataId),
+        mode: 'document', origin, kb_id: String(kbId), data_id: String(dataId),
+        ...(raw.kb_name || raw.kbName ? { kb_name: String(raw.kb_name || raw.kbName) } : {}),
         ...(raw.file_name || raw.fileName ? { file_name: String(raw.file_name || raw.fileName) } : {}),
         ...(raw.ref ? { ref: String(raw.ref) } : {}),
         ...(raw.title ? { title: String(raw.title) } : {}),
       };
     }
   }
-  return { mode: 'all' };
+  return { mode: 'all', origin };
 }
 
 function knowledgeScopeLabel(scope) {
   const s = normalizeKnowledgeScope(scope);
-  if (s.mode === 'kb') return `KB: ${s.kb_id}`;
-  if (s.mode === 'document') return s.title || s.file_name || s.data_id;
-  return t('kb.buildAll');
+  if (s.mode === 'kb') return `${t('kb.scopeKb')}: ${s.kb_name || s.kb_id}`;
+  if (s.mode === 'document') return `${t('kb.scopeDoc')}: ${s.title || s.file_name || s.data_id}`;
+  return t('kb.scopeAll');
+}
+
+function updateKnowledgeScopeChip(sess = activeSess()) {
+  const chip = document.getElementById('knowledge-scope-chip');
+  if (!chip) return;
+  const scope = normalizeKnowledgeScope(sess?.knowledgeScope);
+  chip.textContent = scope.origin === 'knowledge' || scope.mode !== 'all'
+    ? knowledgeScopeLabel(scope)
+    : '';
+  chip.title = chip.textContent;
 }
 
 function saveSessions() {}
@@ -2265,6 +2597,88 @@ function bindResize(handle, panel, dir, min, max) {
 bindResize(rpResize, rpPanel, -1, 160, 400);  // 右栏:cursor 左移 → 增宽
 bindResize(sbResize, sbPanel, +1, 180, 360);  // 左栏:cursor 右移 → 增宽
 
+function bindKbWorkspaceResize() {
+  const splitter = document.querySelector('.kb-workspace-splitter');
+  const workspace = document.querySelector('.kb-workspace');
+  const browser = workspace?.querySelector('.kb-browser');
+  if (!splitter || !workspace || !browser || splitter.dataset.bound) return;
+  splitter.dataset.bound = '1';
+  let dragging = false;
+  let startX = 0;
+  let startLeft = 0;
+
+  const currentLeft = () => {
+    const value = browser.getBoundingClientRect().width;
+    if (value > 0) return value;
+    const configured = parseFloat(getComputedStyle(workspace).getPropertyValue('--kb-browser-width'));
+    return Number.isFinite(configured) ? configured : 270;
+  };
+  const bounds = () => {
+    const rect = workspace.getBoundingClientRect();
+    if (rect.width <= 0) return null;
+    const available = Math.max(0, rect.width - 12);
+    const min = Math.min(available, Math.min(220, Math.max(140, Math.floor(available * 0.28))));
+    const max = Math.max(min, available - 220);
+    return { min, max };
+  };
+  const setLeft = clientX => {
+    const range = bounds();
+    if (!range) return;
+    const { min, max } = range;
+    const left = Math.round(Math.min(max, Math.max(min, startLeft + clientX - startX)));
+    workspace.style.setProperty('--kb-browser-width', `${left}px`);
+  };
+  const clampToWorkspace = () => {
+    const range = bounds();
+    if (!range) return;
+    let value = parseFloat(getComputedStyle(workspace).getPropertyValue('--kb-browser-width'));
+    if (!Number.isFinite(value) || value <= 0) {
+      workspace.style.removeProperty('--kb-browser-width');
+      value = parseFloat(getComputedStyle(workspace).getPropertyValue('--kb-browser-width'));
+    }
+    if (!Number.isFinite(value)) return;
+    const { min, max } = range;
+    const left = Math.round(Math.min(max, Math.max(min, value)));
+    workspace.style.setProperty('--kb-browser-width', `${left}px`);
+  };
+  const stop = event => {
+    if (!dragging) return;
+    dragging = false;
+    splitter.classList.remove('dragging');
+    try { splitter.releasePointerCapture(event.pointerId); } catch (_) {}
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  };
+
+  splitter.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    dragging = true;
+    startX = event.clientX;
+    startLeft = currentLeft();
+    splitter.classList.add('dragging');
+    try { splitter.setPointerCapture(event.pointerId); } catch (_) {}
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    event.preventDefault();
+  });
+  splitter.addEventListener('pointermove', event => {
+    if (!dragging) return;
+    setLeft(event.clientX);
+    event.preventDefault();
+  });
+  splitter.addEventListener('pointerup', stop);
+  splitter.addEventListener('pointercancel', stop);
+  splitter.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    startX = 0;
+    startLeft = currentLeft();
+    setLeft(event.key === 'ArrowRight' ? 16 : -16);
+    event.preventDefault();
+  });
+  window.addEventListener('resize', clampToWorkspace, { passive: true });
+  window.__gaClampKbWorkspace = clampToWorkspace;
+}
+
 function bindKbReaderResize() {
   const splitter = document.querySelector('.kb-reader-splitter');
   const layout = document.querySelector('.kb-reader-layout');
@@ -2279,11 +2693,27 @@ function bindKbReaderResize() {
     const value = parseFloat(firstColumn);
     return Number.isFinite(value) ? value : layout.getBoundingClientRect().width * 0.58;
   };
-  const setLeft = clientX => {
+  const bounds = () => {
     const rect = layout.getBoundingClientRect();
-    const min = 280;
-    const max = Math.max(min, rect.width - 12 - 320);
+    if (rect.width <= 0) return null;
+    const available = Math.max(0, rect.width - 12);
+    const min = Math.min(280, Math.floor(available / 3));
+    return { min, max: Math.max(min, available - min) };
+  };
+  const setLeft = clientX => {
+    const range = bounds();
+    if (!range) return;
+    const { min, max } = range;
     const left = Math.round(Math.min(max, Math.max(min, startLeft + clientX - startX)));
+    layout.style.setProperty('--kb-reader-left', `${left}px`);
+  };
+  const clampToLayout = () => {
+    const range = bounds();
+    if (!range) return;
+    const value = currentLeft();
+    if (!Number.isFinite(value)) return;
+    const { min, max } = range;
+    const left = Math.round(Math.min(max, Math.max(min, value)));
     layout.style.setProperty('--kb-reader-left', `${left}px`);
   };
   const stop = event => {
@@ -2320,7 +2750,10 @@ function bindKbReaderResize() {
     setLeft(event.key === 'ArrowRight' ? 16 : -16);
     event.preventDefault();
   });
+  window.addEventListener('resize', clampToLayout, { passive: true });
+  window.__gaClampKbReader = clampToLayout;
 }
+bindKbWorkspaceResize();
 bindKbReaderResize();
 const modelChip  = document.getElementById('model-chip');
 const modelNameEl= modelChip ? modelChip.querySelector('.model-name') : null;
@@ -3322,14 +3755,18 @@ function renderSessionList() {
   for (const sess of filtered) {
     const r = state.runtime.get(sess.id);
     const busy = !!(r && r.busy);
+    const scope = normalizeKnowledgeScope(sess.knowledgeScope);
+    const scopeText = scope.origin === 'knowledge' || scope.mode !== 'all'
+      ? knowledgeScopeLabel(scope) : '';
+    const meta = [scopeText, busy ? t('status.running') : t('status.idle')].filter(Boolean).join(' · ');
     const item = document.createElement('div');
-    item.className = 'conv-item' + (currentPage === 'chat' && sess.id === state.activeId ? ' active' : '') + (busy ? '' : ' idle');
+    item.className = 'conv-item' + (sess.id === state.activeId ? ' active' : '') + (busy ? '' : ' idle');
     item.dataset.id = sess.id;
     const pinSvg = sess.pinned ? GA_ICON('pushPinSimple', 'ci-pin') : '';
     item.innerHTML =
       `<span class="ci-dot"></span><div class="ci-main">` +
       `<div class="ci-title">${pinSvg}${escapeHtml(displayTitle(sess))}</div>` +
-      `<div class="ci-meta">${busy ? t('status.running') : t('status.idle')}</div></div>` +
+      `<div class="ci-meta">${escapeHtml(meta)}</div></div>` +
       `<button class="ci-more" data-no-tooltip aria-label="${escapeHtml(t('common.more'))}">${GA_ICON('dotsThreeVertical')}</button>`;
     convListEl.appendChild(item);
   }
@@ -3405,9 +3842,13 @@ function discardEmptyDraftSessions() {
     }
   }
 }
-function newSession() {
+function newSession(knowledgeScope = null) {
+  const scope = normalizeKnowledgeScope(knowledgeScope || {
+    mode: 'all', origin: currentPage === 'kb' ? 'knowledge' : 'chat',
+  });
   const current = activeSess();
   if (current && !current.bridgeSessionId && !(current.messages && current.messages.length)) {
+    current.knowledgeScope = scope;
     setActiveSession(current.id);
     renderSessionList();
     return current;
@@ -3415,7 +3856,7 @@ function newSession() {
   discardEmptyDraftSessions();
   const localId = 'local-' + Date.now() + '-' + Math.random().toString(16).slice(2);
   const sess = { id: localId, bridgeSessionId: null, title: '', messages: [], untitled: true,
-    lastActiveTs: Date.now(), knowledgeScope: { mode: 'all' } };
+    lastActiveTs: Date.now(), knowledgeScope: scope };
   state.sessions.set(localId, sess);
   setActiveSession(sess.id);
   renderSessionList();
@@ -3443,6 +3884,7 @@ function setActiveSession(id) {
   const sess = state.sessions.get(id);
   if (!sess) return;
   sess.knowledgeScope = normalizeKnowledgeScope(sess.knowledgeScope);
+  updateKnowledgeScopeChip(sess);
   // 切会话:回显该会话绑定的模型(后端权威)。未绑定(null)则保持当前全局默认显示。
   if (sess.llmNo != null && sess.llmNo !== state.llmNo) {
     state.llmNo = sess.llmNo;
@@ -3479,8 +3921,24 @@ async function closeSession(id) {
   state.sessions.delete(id); state.runtime.delete(id);
   if (state.activeId === id) {
     const next = (sortedSessions()[0] || {}).id || null;  // 切到列表最靠上的会话
-    if (next) setActiveSession(next);
-    else { state.activeId = null; localStorage.removeItem('ga_active'); if (msgsEl) msgsEl.innerHTML = ''; refreshEmptyState(null); refreshStatusLabel(); }
+    if (next) {
+      const nextSession = state.sessions.get(next);
+      if (nextSession) void openSessionSurface(nextSession);
+    }
+    else {
+      state.activeId = null;
+      localStorage.removeItem('ga_active');
+      if (msgsEl) msgsEl.innerHTML = '';
+      refreshEmptyState(null);
+      refreshStatusLabel();
+      if (currentPage === 'kb') {
+        kbState.activeKb = null;
+        kbState.activeDoc = null;
+        kbState.documents = [];
+        kbRenderView();
+        kbRenderQa(null);
+      }
+    }
   }
   saveSessions();
   renderSessionList();
@@ -3544,9 +4002,8 @@ convListEl.addEventListener('click', (e) => {
   if (isSessionRowInteractiveTarget(e.target)) return;
   const it = e.target.closest('.conv-item');
   if (it && it.dataset.id) {
-    setActiveSession(it.dataset.id);
-    const chatNav = nav.querySelector('.nav-item[data-page="chat"]');
-    if (chatNav && !chatNav.classList.contains('active')) chatNav.click();
+    const sess = state.sessions.get(it.dataset.id);
+    if (sess) void openSessionSurface(sess);
   }
 });
 convMenu.addEventListener('click', (e) => {
@@ -4773,14 +5230,17 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('#model-menu') || e.target.closest('#model-chip') ||
       e.target.closest('#cdb-model-menu') || e.target.closest('#cdb-model-chip') ||
       e.target.closest('#chat-menu') || e.target.closest('#chat-plus-btn') ||
+      e.target.closest('#knowledge-scope-picker') ||
       e.target.closest('#cdb-menu') || e.target.closest('#cdb-plus-btn')) return;
   closeAllModelMenus();
+  closeKnowledgeScopePicker();
   window.chatComposer?.closeMenu?.();
   window.collabComposer?.closeMenu?.();
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     closeAllModelMenus();
+    closeKnowledgeScopePicker();
     window.chatComposer?.closeMenu?.();
     window.collabComposer?.closeMenu?.();
   }
@@ -6496,7 +6956,10 @@ function bindComposerInRoot(root, opts) {
   function openMenu() {
     if (!menu || !plusBtn) return;
     closeAllModelMenus?.();
-    if (ctx === 'chat') window.collabComposer?.closeMenu?.();
+    if (ctx === 'chat') {
+      closeKnowledgeScopePicker();
+      window.collabComposer?.closeMenu?.();
+    }
     else window.chatComposer?.closeMenu?.();
     menu.hidden = false;
     plusBtn.setAttribute('aria-expanded', 'true');
@@ -6525,6 +6988,10 @@ function bindComposerInRoot(root, opts) {
     if (act === 'upload') {
       window.gaSetActiveFileComposer?.(ctx);
       fileInput?.click();
+      return;
+    }
+    if (act === 'knowledge-scope' && ctx === 'chat') {
+      window.gaOpenKnowledgeScopePicker?.();
       return;
     }
     if (act === 'preset') openModal('preset-modal');

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>GenericAgent</title>
 <link rel="stylesheet" href="assets/fonts/fonts.css?v=2">
-  <link rel="stylesheet" href="styles.css?v=188">
+  <link rel="stylesheet" href="styles.css?v=192">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
@@ -191,9 +191,14 @@
                       <span data-ga-icon="lightning"></span>
                       <span data-i18n="modal.preset"></span>
                     </button>
+                    <button type="button" class="ga-menu-item" data-composer-action="knowledge-scope" role="menuitem">
+                      <span data-ga-icon="books"></span>
+                      <span data-i18n="kb.choose"></span>
+                    </button>
                   </div>
                 </div>
                 <span class="spacer"></span>
+                <span class="knowledge-scope-chip" id="knowledge-scope-chip"></span>
                 <button type="button" class="chip" id="model-chip" data-i18n-title="model.menuLabel" title=""><span class="model-name"></span> <span class="chip-ic" data-ga-icon="caretDown"></span></button>
                 <button type="button" class="send" id="send-btn" aria-label="send">
                   <span data-ga-icon="paperPlaneTilt"></span>
@@ -209,7 +214,7 @@
           </div>
         </section>
 
-        <!-- 知识库：库列表 → 文档 → 原文/对话双栏 -->
+        <!-- 知识库工作区：知识库/文档浏览器 → 原文 → 对话 -->
         <section class="page" data-page="kb">
           <div class="page-top">
             <button type="button" class="pt-icon pt-sb-toggle" aria-label="toggle sidebar">
@@ -220,41 +225,44 @@
               <span data-ga-icon="caretRight"></span>
             </button>
           </div>
-          <div class="kb-page">
-            <header class="kb-toolbar">
-              <div>
-                <div class="page-title" data-i18n="page.kb.title"></div>
-                <div class="page-sub" data-i18n="page.kb.sub"></div>
-              </div>
-              <div class="kb-actions">
-                <button type="button" class="kb-btn" id="kb-import-btn"><span data-ga-icon="folderSimplePlus"></span><span data-i18n="kb.import"></span></button>
-                <button type="button" class="kb-btn" id="kb-build-btn"><span data-ga-icon="lightning"></span><span data-i18n="kb.build"></span></button>
-              </div>
+          <div class="page-pad kb-page">
+            <header class="kb-page-head">
+              <div class="page-title" data-i18n="page.kb.title"></div>
             </header>
-            <div class="kb-import-row" id="kb-import-row" hidden>
-              <input id="kb-import-path" class="kb-path-input" data-i18n-ph="kb.pathPh" placeholder="">
-              <button type="button" class="kb-btn primary" id="kb-import-confirm" data-i18n="kb.add"></button>
-            </div>
-            <div class="kb-view" id="kb-library-view">
-              <div class="kb-library-head"><div class="kb-section-title" data-i18n="kb.libraries"></div><button type="button" class="ic-btn" id="kb-refresh-btn" data-i18n-title="kb.refresh" title=""><span data-ga-icon="arrowClockwise"></span></button></div>
-              <div class="kb-library-grid" id="kb-library-grid"></div>
-            </div>
-            <div class="kb-view" id="kb-documents-view" hidden>
-              <div class="kb-view-head"><button type="button" class="ic-btn" id="kb-back-libraries" data-i18n-title="kb.backLibraries" title=""><span data-ga-icon="caretLeft"></span></button><div class="kb-view-title" id="kb-active-kb-title"></div><button type="button" class="ic-btn" id="kb-doc-refresh-btn" data-i18n-title="kb.refresh" title=""><span data-ga-icon="arrowClockwise"></span></button></div>
-              <input class="kb-doc-search" id="kb-doc-search" data-i18n-ph="kb.searchDocs" placeholder="">
-              <div class="kb-doc-grid" id="kb-doc-list"></div>
-            </div>
-            <div class="kb-view" id="kb-reader-view" hidden>
-              <div class="kb-view-head"><button type="button" class="ic-btn" id="kb-back-documents" data-i18n-title="kb.backDocs" title=""><span data-ga-icon="caretLeft"></span></button><div class="kb-view-title" id="kb-doc-title"></div><button type="button" class="kb-link-btn" id="kb-open-doc" data-i18n="kb.open" disabled></button></div>
-              <div class="kb-reader-layout">
-                <section class="kb-reader-pane"><div class="kb-source-view" id="kb-md-view"></div></section>
-                <div class="kb-reader-splitter" role="separator" aria-orientation="vertical" aria-label="调整阅读与对话宽度" tabindex="0"></div>
-                <aside class="kb-qa-pane">
-                  <div class="kb-pane-head"><div class="kb-pane-title" data-i18n="kb.qa"></div></div>
-                  <div class="kb-qa-log" id="kb-qa-log"><div class="kb-empty" data-i18n="kb.qaEmpty"></div></div>
-                  <div class="kb-qa-compose"><textarea id="kb-question" class="kb-question" data-i18n-ph="kb.askPh" placeholder="" maxlength="4000"></textarea><button type="button" class="send kb-send" id="kb-ask-btn" data-i18n-title="act.send" title=""><span data-ga-icon="paperPlaneTilt"></span></button></div>
-                </aside>
-              </div>
+            <div class="kb-workspace">
+              <aside class="kb-browser" id="kb-browser">
+                <div class="kb-view" id="kb-library-view">
+                  <div class="kb-library-head">
+                    <div class="kb-section-title" data-i18n="kb.libraries"></div>
+                    <div class="kb-library-actions">
+                      <button type="button" class="kb-btn kb-btn-compact" id="kb-import-btn" data-i18n-title="kb.import" title=""><span data-ga-icon="folderSimplePlus"></span><span data-i18n="kb.import"></span></button>
+                      <button type="button" class="kb-btn kb-btn-compact" id="kb-build-btn" data-i18n-title="kb.build" title=""><span data-ga-icon="lightning"></span><span data-i18n="kb.build"></span></button>
+                      <button type="button" class="ic-btn" id="kb-refresh-btn" data-i18n-title="kb.refresh" title=""><span data-ga-icon="arrowClockwise"></span></button>
+                    </div>
+                  </div>
+                  <div class="kb-library-grid" id="kb-library-grid"></div>
+                </div>
+                <div class="kb-view" id="kb-documents-view" hidden>
+                  <div class="kb-view-head"><div class="kb-view-title" id="kb-active-kb-title"></div><button type="button" class="ic-btn" id="kb-doc-refresh-btn" data-i18n-title="kb.refresh" title=""><span data-ga-icon="arrowClockwise"></span></button></div>
+                  <input class="kb-doc-search" id="kb-doc-search" data-i18n-ph="kb.searchDocs" placeholder="">
+                  <div class="kb-doc-grid" id="kb-doc-list"></div>
+                </div>
+              </aside>
+              <div class="kb-workspace-splitter" id="kb-workspace-splitter" role="separator" aria-orientation="vertical" aria-label="调整知识库与预览宽度" tabindex="0"></div>
+              <main class="kb-view" id="kb-reader-view">
+                <div class="kb-reader-layout" id="kb-reader-layout">
+                  <section class="kb-reader-pane" id="kb-reader-pane">
+                    <div class="kb-view-head"><div class="kb-view-title" id="kb-doc-title"></div><button type="button" class="kb-link-btn" id="kb-open-doc" data-i18n="kb.open" disabled></button></div>
+                    <div class="kb-source-view" id="kb-md-view"></div>
+                  </section>
+                  <div class="kb-reader-splitter" id="kb-reader-splitter" role="separator" aria-orientation="vertical" aria-label="调整阅读与对话宽度" tabindex="0"></div>
+                  <aside class="kb-qa-pane">
+                    <div class="kb-pane-head"><div class="kb-pane-title" id="kb-qa-title" data-i18n="kb.qa"></div></div>
+                    <div class="kb-qa-log" id="kb-qa-log"><div class="kb-empty" data-i18n="kb.qaEmpty"></div></div>
+                    <div class="kb-qa-compose"><textarea id="kb-question" class="kb-question" data-i18n-ph="kb.askPh" placeholder="" maxlength="4000"></textarea><button type="button" class="send kb-send" id="kb-ask-btn" data-i18n-title="act.send" title=""><span data-ga-icon="paperPlaneTilt"></span></button></div>
+                  </aside>
+                </div>
+              </main>
             </div>
           </div>
         </section>
@@ -492,9 +500,20 @@
   <div class="modal" id="kb-task-modal" hidden aria-live="polite">
     <div class="modal-backdrop"></div>
     <div class="modal-card kb-task-card" role="dialog" aria-modal="true">
-      <div class="modal-head"><div class="modal-title" id="kb-task-title"></div></div>
+      <div class="modal-head kb-task-head">
+        <div class="kb-task-heading">
+          <span class="kb-task-mark" data-ga-icon="books"></span>
+          <div class="modal-title" id="kb-task-title"></div>
+        </div>
+      </div>
       <div class="modal-body kb-task-body">
-        <div class="kb-task-phase" id="kb-task-phase"></div>
+        <div class="kb-task-phase-row">
+          <div class="kb-task-phase" id="kb-task-phase"></div>
+          <div class="kb-task-progress-value" id="kb-task-progress-value"></div>
+        </div>
+        <div class="kb-task-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="kb-task-progress-bar" id="kb-task-progress-bar"></div>
+        </div>
         <div class="kb-task-current" id="kb-task-current"></div>
         <div class="kb-task-counts" id="kb-task-counts"></div>
         <div class="kb-task-result" id="kb-task-successes" hidden></div>
@@ -509,8 +528,23 @@
     <div class="modal-card kb-build-card" role="dialog" aria-modal="true">
       <div class="modal-head"><div class="modal-title" data-i18n="kb.buildOptionsTitle"></div><button class="modal-x" data-close data-i18n-title="common.close" title=""><span data-ga-icon="x"></span></button></div>
       <form class="modal-body kb-build-body" id="kb-build-form">
-        <label class="kb-build-group"><span class="kb-build-label" data-i18n="kb.buildScope"></span><select id="kb-build-scope" name="scope"></select></label>
-        <div class="kb-build-group"><span class="kb-build-label" data-i18n="kb.buildMode"></span><label><input type="radio" name="mode" value="incremental" checked> <span data-i18n="kb.buildIncremental"></span></label><label><input type="radio" name="mode" value="rebuild"> <span data-i18n="kb.buildRebuild"></span></label></div>
+        <label class="kb-build-group">
+          <span class="kb-build-label" data-i18n="kb.buildScope"></span>
+          <span class="kb-build-select-wrap"><select id="kb-build-scope" class="kb-build-select" name="scope"></select></span>
+        </label>
+        <fieldset class="kb-build-group kb-build-mode-group">
+          <legend class="kb-build-label" data-i18n="kb.buildMode"></legend>
+          <div class="kb-build-modes">
+            <label class="kb-build-mode">
+              <input type="radio" name="mode" value="incremental" checked>
+              <span class="kb-build-mode-copy"><strong data-i18n="kb.buildIncremental"></strong><small data-i18n="kb.buildIncrementalDesc"></small></span>
+            </label>
+            <label class="kb-build-mode">
+              <input type="radio" name="mode" value="rebuild">
+              <span class="kb-build-mode-copy"><strong data-i18n="kb.buildRebuild"></strong><small data-i18n="kb.buildRebuildDesc"></small></span>
+            </label>
+          </div>
+        </fieldset>
         <div class="kb-build-actions"><button type="button" class="set-btn ghost" data-close data-i18n="common.cancel"></button><button type="submit" class="set-btn primary" data-i18n="kb.buildStart"></button></div>
       </form>
     </div>
@@ -826,6 +860,6 @@
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
 <script src="phosphor-icons.js?v=2"></script>
 <script src="i18n.js?v=4"></script>
-  <script src="app.js?v=223"></script>
+  <script src="app.js?v=226"></script>
 </body>
 </html>
