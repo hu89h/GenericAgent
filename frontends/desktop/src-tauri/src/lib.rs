@@ -659,9 +659,57 @@ fn bridge_identity_matches(project_dir: &str) -> bool {
     { a == b }
 }
 
+/// Force-stop a bridge together with every process it spawned. A stale bridge can
+/// leave conductor/scheduler behind while its own port is being taken over; killing
+/// only the listener PID would make the next bridge fail on their ports.
+fn force_kill_process_tree(pid: &str) {
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("taskkill");
+        // /T is essential here: the bridge owns the managed conductor/scheduler.
+        c.args(["/F", "/T", "/PID", pid]);
+        c.creation_flags(0x08000000);
+        let _ = c.status();
+    }
+
+    #[cfg(not(windows))]
+    {
+        let Ok(root) = pid.parse::<i32>() else { return; };
+        let mut processes = Vec::new();
+        if let Ok(out) = Command::new("ps").args(["-eo", "pid=,ppid="]).output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let mut fields = line.split_whitespace();
+                let (Some(child), Some(parent)) = (fields.next(), fields.next()) else { continue; };
+                if let (Ok(child), Ok(parent)) = (child.parse::<i32>(), parent.parse::<i32>()) {
+                    processes.push((child, parent));
+                }
+            }
+        }
+
+        // Resolve descendants before killing anything, because the service processes
+        // are intentionally placed in their own sessions on POSIX systems.
+        let mut descendants = vec![root];
+        let mut index = 0;
+        while index < descendants.len() {
+            let parent = descendants[index];
+            for (child, process_parent) in &processes {
+                if *process_parent == parent && !descendants.contains(child) {
+                    descendants.push(*child);
+                }
+            }
+            index += 1;
+        }
+        for child in descendants.iter().skip(1).rev() {
+            let _ = Command::new("kill").args(["-9", &child.to_string()]).status();
+        }
+        let _ = Command::new("kill").args(["-9", &root.to_string()]).status();
+    }
+}
+
 /// Last resort when a stale bridge ignores POST /services/bridge/exit (e.g. an old build with
 /// no such endpoint): force-kill whatever process is listening on :14168 so the new bridge can
-/// bind it. Only called after an identity mismatch, so we never kill a bridge that is ours.
+/// bind it, including its managed descendants. Only called after an identity mismatch, so we
+/// never kill a bridge that is ours.
 fn force_free_bridge_port() {
     #[cfg(windows)]
     {
@@ -671,10 +719,7 @@ fn force_free_bridge_port() {
             for line in text.lines() {
                 if line.contains(":14168") && line.to_uppercase().contains("LISTENING") {
                     if let Some(pid) = line.split_whitespace().last() {
-                        let mut c = Command::new("taskkill");
-                        c.args(["/F", "/PID", pid]);
-                        c.creation_flags(0x08000000);
-                        let _ = c.status();
+                        force_kill_process_tree(pid);
                     }
                 }
             }
@@ -685,7 +730,7 @@ fn force_free_bridge_port() {
         // lsof prints the listening PIDs; kill -9 each.
         if let Ok(out) = Command::new("lsof").args(["-ti", "tcp:14168", "-sTCP:LISTEN"]).output() {
             for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-                let _ = Command::new("kill").args(["-9", pid]).status();
+                force_kill_process_tree(pid);
             }
         }
     }
@@ -842,7 +887,7 @@ fn pick_directory(title: Option<String>) -> Option<String> {
 fn stop_current_bridge() {
     request_bridge_shutdown();
     if let Some(mut child) = BRIDGE_PROCESS.lock().unwrap().take() {
-        let _ = child.kill();
+        force_kill_process_tree(&child.id().to_string());
         let _ = child.wait();
     }
     let start = Instant::now();
@@ -1122,7 +1167,7 @@ pub fn run() {
                 if label == "main" {
                     // Close the bridge before leaving the native shell. The bridge's parent
                     // watchdog remains as a fallback for crashes and other abnormal exits.
-                    request_bridge_shutdown();
+                    stop_current_bridge();
                     window.app_handle().exit(0);
                 } else if label == "setup" {
                     // Setup closed -> exit if main is not visible
