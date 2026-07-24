@@ -219,6 +219,8 @@ let bridgeUiOffline = false;
         return http(`/session/${encodeURIComponent(sid)}/cancel`, { method: 'POST', body: params || {} });
       }
       case 'kb/status': return http('/kb/status');
+      case 'kb/config/get': return http('/kb/config');
+      case 'kb/config/save': return http('/kb/config', { method: 'POST', body: params || {} });
       case 'kb/docs': {
         const id = params.kbId || params.id || '';
         return http(`/kb/docs${id ? `?kbId=${encodeURIComponent(id)}` : ''}`);
@@ -329,6 +331,8 @@ let bridgeUiOffline = false;
     saveMykeyContent: (content) => rpc('services/mykey/save', { content }),
     importMemory: (sourceDir) => rpc('memory/import', { sourceDir }),
     kbStatus: () => rpc('kb/status', {}),
+    kbConfig: () => rpc('kb/config/get', {}),
+    saveKbConfig: (params = {}) => rpc('kb/config/save', params),
     kbDocs: (params = {}) => rpc('kb/docs', params),
     kbSearch: (params = {}) => rpc('kb/search', params),
     kbRead: (params = {}) => rpc('kb/read', params),
@@ -4586,6 +4590,91 @@ function renderSettingsModels() {
   }
   applyI18n();
 }
+
+let kbConfigLoading = null;
+
+function setKbConfigBusy(form, busy) {
+  if (!form) return;
+  form.classList.toggle('is-loading', !!busy);
+  form.querySelectorAll('input, button').forEach(el => { el.disabled = !!busy; });
+}
+
+function setKbConfigStatus(form, configured, { error = false, message = '' } = {}) {
+  const status = form?.querySelector('.kb-config-status');
+  if (!status) return;
+  status.classList.toggle('is-ok', !!configured && !error);
+  status.classList.toggle('is-error', !!error);
+  status.textContent = error
+    ? (message || t('set.kbConfigLoadFailed'))
+    : (configured ? t('set.kbKeyConfigured') : t('set.kbKeyMissing'));
+}
+
+function setKbConfigForm(kind, values) {
+  const form = document.getElementById(kind === 'embedding'
+    ? 'kb-embedding-config-form'
+    : 'mineru-config-form');
+  if (!form || !values) return;
+  const baseUrl = form.elements.namedItem('baseUrl');
+  const model = form.elements.namedItem(kind === 'embedding' ? 'model' : 'modelVersion');
+  const dimension = form.elements.namedItem('dimension');
+  if (baseUrl) baseUrl.value = values.baseUrl || '';
+  if (model) model.value = kind === 'embedding' ? (values.model || '') : (values.modelVersion || '');
+  if (dimension) dimension.value = values.dimension || '';
+  const secret = form.elements.namedItem('apiKey');
+  if (secret) secret.value = '';
+  setKbConfigStatus(form, !!values.apiKeyConfigured);
+}
+
+async function loadKbServiceConfigs() {
+  if (kbConfigLoading) return kbConfigLoading;
+  const forms = [
+    document.getElementById('kb-embedding-config-form'),
+    document.getElementById('mineru-config-form'),
+  ].filter(Boolean);
+  if (!forms.length) return;
+  kbConfigLoading = (async () => {
+    forms.forEach(form => setKbConfigBusy(form, true));
+    try {
+      const result = await window.ga.kbConfig();
+      setKbConfigForm('embedding', result.embedding);
+      setKbConfigForm('mineru', result.mineru);
+    } catch (error) {
+      forms.forEach(form => setKbConfigStatus(form, false, { error: true }));
+    } finally {
+      forms.forEach(form => setKbConfigBusy(form, false));
+      kbConfigLoading = null;
+    }
+  })();
+  return kbConfigLoading;
+}
+
+async function saveKbServiceConfig(kind, form) {
+  setKbConfigBusy(form, true);
+  try {
+    const payload = Object.fromEntries(new FormData(form).entries());
+    const result = await window.ga.saveKbConfig({ [kind]: payload });
+    setKbConfigForm(kind, result[kind]);
+    if (Array.isArray(result.profiles)) {
+      state.modelProfiles = normalizeProfiles(result.profiles);
+      renderSettingsModels();
+    }
+    showChanToast(t('set.kbConfigSaved'), '', 'ok');
+  } catch (error) {
+    setKbConfigStatus(form, false, { error: true, message: t('set.kbConfigSaveFailed') });
+    showChanToast(t('set.kbConfigSaveFailed'), error.message || String(error), 'err');
+  } finally {
+    setKbConfigBusy(form, false);
+  }
+}
+
+for (const [kind, id] of [['embedding', 'kb-embedding-config-form'], ['mineru', 'mineru-config-form']]) {
+  const form = document.getElementById(id);
+  if (form) form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void saveKbServiceConfig(kind, form);
+  });
+}
+
 function openSettings() {
   openModal('settings-modal');
   renderSettingsModels();
@@ -4593,6 +4682,7 @@ function openSettings() {
   applyTheme(theme, { persist: false });
   applyAppearance(appearance, plainUi, { persist: false });
   applyChatFontSize(chatFontSize, { persist: false });
+  void loadKbServiceConfigs();
 }
 async function loadModelProfiles() {
   try {

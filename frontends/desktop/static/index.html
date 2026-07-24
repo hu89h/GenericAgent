@@ -728,6 +728,55 @@
           </button>
         </div>
         <div class="set-block">
+          <div class="set-sec-t" data-i18n="set.kbEmbedding"></div>
+          <form class="kb-config-form" id="kb-embedding-config-form">
+            <label class="kb-config-field">
+              <span data-i18n="model.apikey"></span>
+              <input name="apiKey" type="password" autocomplete="new-password" data-i18n-placeholder="model.apikeyKeep">
+            </label>
+            <label class="kb-config-field">
+              <span data-i18n="model.apibase"></span>
+              <input name="baseUrl" type="url" autocomplete="off" required>
+            </label>
+            <div class="kb-config-row">
+              <label class="kb-config-field">
+                <span data-i18n="model.model"></span>
+                <input name="model" autocomplete="off" required>
+              </label>
+              <label class="kb-config-field">
+                <span data-i18n="set.kbDimension"></span>
+                <input name="dimension" type="number" min="1" step="1" required>
+              </label>
+            </div>
+            <div class="kb-config-foot">
+              <span class="kb-config-status" id="kb-embedding-config-status"></span>
+              <button class="set-btn primary" type="submit" data-i18n="common.save"></button>
+            </div>
+          </form>
+        </div>
+        <div class="set-block">
+          <div class="set-sec-t" data-i18n="set.kbMineru"></div>
+          <form class="kb-config-form" id="mineru-config-form">
+            <label class="kb-config-field">
+              <span data-i18n="model.apikey"></span>
+              <input name="apiKey" type="password" autocomplete="new-password" data-i18n-placeholder="model.apikeyKeep">
+            </label>
+            <label class="kb-config-field">
+              <span data-i18n="model.apibase"></span>
+              <input name="baseUrl" type="url" autocomplete="off" required>
+            </label>
+            <label class="kb-config-field">
+              <span data-i18n="set.kbParserModel"></span>
+              <input name="modelVersion" autocomplete="off" required>
+            </label>
+            <a class="kb-config-link" href="https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&amp;source=minerU" target="_blank" rel="noopener noreferrer" data-i18n="set.kbMineruRegister"></a>
+            <div class="kb-config-foot">
+              <span class="kb-config-status" id="mineru-config-status"></span>
+              <button class="set-btn primary" type="submit" data-i18n="common.save"></button>
+            </div>
+          </form>
+        </div>
+        <div class="set-block">
           <div class="set-sec-t" data-i18n="set.features"></div>
           <button class="set-btn" id="import-mykey-btn" type="button" data-i18n-title="set.importMykeyTip">
             <span data-ga-icon="fileText"></span>
