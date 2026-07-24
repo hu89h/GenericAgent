@@ -23,6 +23,18 @@
 #
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── MinerU knowledge-base import (optional) ─────────────────────────────────
+# Non-Markdown files, including PDFs over 200 pages, are submitted to MinerU
+# during one unified knowledge-base import. PDF splitting and Markdown merging
+# are internal steps; no separate split operation is required.
+# mineru_config = {
+#     'api_key': '<your-mineru-api-key>',
+#     # 'base_url': 'https://mineru.net/api/v4',
+#     # 'model_version': 'vlm',
+# }
+# Register a MinerU account to obtain an API key:
+# https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&source=minerU
+
 
 # ── 1. NativeClaudeSession — Anthropic direct ────────────────────────────────
 #  Official Anthropic endpoint. apikey starting with 'sk-ant-' is auto-sent

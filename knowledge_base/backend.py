@@ -21,7 +21,6 @@ import os
 import re
 import sys
 import json
-import hashlib
 import shutil
 import threading
 
@@ -49,6 +48,8 @@ try:
         CONFIG_PATH,
         DATA_ROOT,
         ROOT,
+        canonical_source_path as _configured_canonical_source_path,
+        kb_id_for_source as _configured_kb_id_for_source,
         kb_by_id as _kb_by_id,
         load_config,
         remove_kb,
@@ -72,6 +73,8 @@ except ImportError:  # pragma: no cover - supports direct CLI execution
         CONFIG_PATH,
         DATA_ROOT,
         ROOT,
+        canonical_source_path as _configured_canonical_source_path,
+        kb_id_for_source as _configured_kb_id_for_source,
         kb_by_id as _kb_by_id,
         load_config,
         remove_kb,
@@ -208,46 +211,38 @@ def delete_kb(kb_id, delete_data=False, config_path=CONFIG_PATH):
 
 def _canonical_source_path(source_dir):
     """Return the normalized absolute source path used for KB identity."""
-    return os.path.normpath(os.path.realpath(os.path.expanduser(str(source_dir or ""))))
+    return _configured_canonical_source_path(source_dir)
 
 
 def kb_id_for_source(source_dir):
     """Return a stable, package-safe ID derived from a source directory path."""
-    canonical = _canonical_source_path(source_dir)
-    identity = os.path.normcase(canonical).replace("/", "\\")
-    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
-    return f"kb-{digest}"
+    return _configured_kb_id_for_source(source_dir)
 
 
-def _rel_to_root(path):
+def import_kb(source_dir, kb_id="", name="", overwrite=False, progress=None):
+    """Import one source directory through the unified MinerU pipeline.
+
+    ``kb_id`` remains in the function signature for bridge compatibility, but
+    the registry identity is deliberately derived from the canonical source
+    path.  PDF splitting is handled internally by the importer and never
+    becomes a separate public operation.
+    """
+    if not _build_lock.acquire(blocking=False):
+        raise RuntimeError("知识库正在构建索引，请稍后再导入")
     try:
-        return os.path.relpath(os.path.realpath(path), os.path.realpath(ROOT)).replace(os.sep, "/")
-    except Exception:
-        return str(path).replace(os.sep, "/")
-
-
-def import_kb(source_dir, kb_id="", name="", overwrite=False):
-    """Import a folder using a stable path-derived ID."""
-    src = _canonical_source_path(source_dir)
-    if not os.path.isdir(src):
-        raise ValueError(f"sourceDir is not a directory: {src}")
-    kid = kb_id_for_source(src)
-    dst = os.path.realpath(os.path.join(DATA_ROOT, kid))
-    if os.path.exists(dst):
-        if not overwrite:
-            raise ValueError(f"knowledge base already exists: {kid}")
-        shutil.rmtree(dst)
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store", "Thumbs.db")
-    shutil.copytree(src, dst, ignore=ignore)
-    upsert_kb(
-        kid,
-        path=_rel_to_root(dst),
-        preload=True,
-        name=(name or os.path.basename(src)),
-        source_path=src,
-    )
-    return {"ok": True, "kb": _kb_by_id(kid), "copiedTo": dst}
+        try:
+            from .importer import import_knowledge_base
+        except ImportError:  # pragma: no cover - supports direct CLI execution
+            from importer import import_knowledge_base
+        return import_knowledge_base(
+            source_dir,
+            kb_id=kb_id,
+            name=name,
+            overwrite=overwrite,
+            progress=progress,
+        )
+    finally:
+        _build_lock.release()
 
 
 def _index_dir(kb_path):
@@ -705,6 +700,27 @@ def _zvec_fetch_doc(kb, data_id, chunk_index, output_fields=None):
 
 # ───────────────────────── 状态 / 预加载上下文 ─────────────────────────
 
+def _imported_file_counts(kb_path):
+    """Read source-level document/asset counts from the import manifest."""
+    manifest = os.path.join(os.path.dirname(kb_path), "import_manifest.json")
+    try:
+        with open(manifest, encoding="utf-8") as handle:
+            entries = (json.load(handle) or {}).get("files") or []
+    except Exception:
+        return None
+    documents = sum(
+        1 for item in entries
+        if isinstance(item, dict)
+        and item.get("kind") == "document"
+        and item.get("status") == "ready"
+    )
+    assets = sum(
+        1 for item in entries
+        if isinstance(item, dict) and item.get("kind") == "asset"
+    )
+    return {"documents": documents, "assets": assets}
+
+
 def kb_status(kb):
     zpath = _zvec_path(kb["path"])
     zm = _zvec_meta(kb["path"])
@@ -714,21 +730,33 @@ def kb_status(kb):
             "raw_path": kb.get("raw_path", kb["path"]),
             "preload": kb["preload"], "exists": kb["exists"],
             "ready": bool(index_meta and zvec_ready), "n_docs": 0, "n_chunks": 0,
+            "image_assets": 0,
             "built_at": index_meta.get("built_at") if index_meta else None, "up_to_date": None,
             "zvec_ready": zvec_ready, "zvec_status": None,
             "index_backend": "zvec" if zvec_ready else None,
             "embedding": None}
     if not kb["exists"]:
         return info
+    imported_counts = _imported_file_counts(kb["path"])
+    scanned = None
+    try:
+        scanned = _scan(kb["path"])
+    except Exception:
+        pass
+    if imported_counts is not None:
+        info["n_docs"] = imported_counts["documents"]
+        info["image_assets"] = imported_counts["assets"]
+    elif scanned is not None:
+        info["n_docs"] = len(scanned)
     if info["ready"]:
         st = index_meta.get("stats", {})
-        info["n_docs"] = st.get("n_docs", 0)
+        info["n_docs"] = st.get("n_docs", info["n_docs"])
         info["n_chunks"] = st.get("n_chunks", 0)
         info["zvec_status"] = "ready"
         info["embedding"] = index_meta.get("embedding")
         info["sparse_embedding"] = index_meta.get("sparse_embedding")
         info["zvec_chunks"] = st.get("n_chunks", 0)
-        info["image_assets"] = st.get("image_assets")
+        info["image_assets"] = st.get("image_assets", info["image_assets"])
         if info["image_assets"] is None:
             info["image_assets"] = len(_load_image_assets(kb["path"]))
         info["zvec_bytes"] = st.get("zvec_bytes", 0)
@@ -752,7 +780,8 @@ def kb_status(kb):
                 "cost": bu.get("cost"),
             }
         try:
-            scanned = _scan(kb["path"])
+            if scanned is None:
+                scanned = _scan(kb["path"])
             info["up_to_date"] = _zvec_is_quickly_fresh(kb["path"], scanned, zm)
         except Exception:
             info["up_to_date"] = None

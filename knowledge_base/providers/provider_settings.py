@@ -113,3 +113,41 @@ def embedding_config() -> Dict[str, Any]:
             "dimension": EMBEDDING_DIMENSION,
         }
     return {}
+
+
+def mineru_config() -> Dict[str, Any]:
+    """Return MinerU import settings without requiring the importer to know mykey.
+
+    The API key may be supplied in ``mykey.py`` as ``mineru_config`` or through
+    ``MINERU_API_KEY``.  The endpoint and model have stable defaults, while
+    environment overrides keep the package usable with a private compatible
+    gateway in development and CI.
+    """
+    vars_ = _load_mykey_vars()
+    raw = vars_.get("mineru_config")
+    raw = raw if isinstance(raw, dict) else {}
+    api_key = str(
+        raw.get("api_key")
+        or raw.get("apikey")
+        or raw.get("token")
+        or vars_.get("mineru_api_key")
+        or vars_.get("mineru_key")
+        or os.environ.get("MINERU_API_KEY")
+        or os.environ.get("MINERU_TOKEN")
+        or ""
+    ).strip()
+    base_url = str(
+        raw.get("base_url")
+        or os.environ.get("MINERU_BASE_URL")
+        or "https://mineru.net/api/v4"
+    ).strip().rstrip("/")
+    model_version = str(
+        raw.get("model_version")
+        or os.environ.get("MINERU_MODEL_VERSION")
+        or "vlm"
+    ).strip() or "vlm"
+    return {
+        "api_key": api_key,
+        "base_url": base_url,
+        "model_version": model_version,
+    }

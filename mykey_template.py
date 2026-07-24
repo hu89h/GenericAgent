@@ -42,6 +42,19 @@
 #  NativeClaudeSession 会额外附加 ?beta=true，用于触发 Anthropic beta 协议。
 #
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ── MinerU 知识库导入（可选）──────────────────────────────────────────────────
+# 非 Markdown 文件（包括超过 200 页的 PDF）在导入知识库时会自动提交 MinerU；
+# 长 PDF 的分片和 Markdown 合并由导入链路内部完成，不需要单独操作。
+# mineru_config = {
+#     'api_key': '<your-mineru-api-key>',
+#     # 'base_url': 'https://mineru.net/api/v4',
+#     # 'model_version': 'vlm',
+# }
+# 注册 MinerU 账号获取 API-Key：
+# https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&source=minerU
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  运行时参数调整：在 GA REPL 里输入
 #      /session.reasoning_effort=high
 #      /session.thinking_type=adaptive

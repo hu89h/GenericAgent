@@ -7,6 +7,7 @@ editing a KB does not import Zvec or the embedding clients.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 
@@ -28,6 +29,19 @@ def resolve_path(path):
         if os.path.isdir(candidate):
             return candidate
     return os.path.normpath(os.path.join(ROOT, path))
+
+
+def canonical_source_path(source_dir):
+    """Return the normalized absolute path used for imported KB identity."""
+    return os.path.normpath(os.path.realpath(os.path.expanduser(str(source_dir or ""))))
+
+
+def kb_id_for_source(source_dir):
+    """Return a stable package-safe ID derived from the complete source path."""
+    canonical = canonical_source_path(source_dir)
+    identity = os.path.normcase(canonical).replace("/", "\\")
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"kb-{digest}"
 
 
 def _parse_scalar(value):

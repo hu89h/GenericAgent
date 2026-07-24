@@ -111,7 +111,7 @@ install_deps() {
   "$py" -m pip install --upgrade pip setuptools wheel
   local pkgs=(
     "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil
-    "llama-index-core==0.12.52.post1" "zvec>=0.6,<0.7"
+    "llama-index-core==0.12.52.post1" "zvec>=0.6,<0.7" "pypdf>=5.0"
   )
   if [[ -n "$EXTRA_PACKAGES" ]]; then
     # shellcheck disable=SC2206
