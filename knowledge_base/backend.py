@@ -561,27 +561,45 @@ def build_all(force=False, verbose=True, logfn=None, kb_id=None, mode="full"):
 # ───────────────────────────── 检索 ─────────────────────────────
 
 _zvec_store_instance = None
+_zvec_store_lock = threading.RLock()
+
+
+def _configured_embedding_dimension() -> int:
+    """Return the active embedding dimension used by both provider and Zvec."""
+    try:
+        from .providers import provider_settings
+    except ImportError:  # pragma: no cover - supports direct CLI execution
+        from providers import provider_settings
+    try:
+        value = provider_settings.embedding_config().get("dimension")
+        return max(1, int(value or ZVEC_DIM))
+    except (TypeError, ValueError):
+        return ZVEC_DIM
 
 
 def _zvec_store():
     global _zvec_store_instance
-    if _zvec_store_instance is None:
-        _zvec_store_instance = _ZvecIndex(
-            dimension=ZVEC_DIM,
-            batch_size=ZVEC_BATCH,
-            schema_version=ZVEC_SCHEMA_VERSION,
-            path_fn=_zvec_path,
-            meta_path_fn=_zvec_meta_path,
-            embedding_fn=_embed_texts,
-            sparse_embedding_fn=_embed_sparse_texts,
-            embedding_meta_fn=_embedding_meta,
-            sparse_embedding_meta_fn=_sparse_embedding_meta,
-            chunking_meta_fn=_chunking_meta,
-            image_analysis_meta_fn=_image_analysis_meta,
-            usage_fn=_usage,
-            load_assets_fn=_load_image_assets,
-            document_fingerprint_fn=_fingerprint,
-        )
+    dimension = _configured_embedding_dimension()
+    with _zvec_store_lock:
+        if _zvec_store_instance is None or _zvec_store_instance.dimension != dimension:
+            if _zvec_store_instance is not None:
+                _zvec_store_instance.clear_cache()
+            _zvec_store_instance = _ZvecIndex(
+                dimension=dimension,
+                batch_size=ZVEC_BATCH,
+                schema_version=ZVEC_SCHEMA_VERSION,
+                path_fn=_zvec_path,
+                meta_path_fn=_zvec_meta_path,
+                embedding_fn=_embed_texts,
+                sparse_embedding_fn=_embed_sparse_texts,
+                embedding_meta_fn=_embedding_meta,
+                sparse_embedding_meta_fn=_sparse_embedding_meta,
+                chunking_meta_fn=_chunking_meta,
+                image_analysis_meta_fn=_image_analysis_meta,
+                usage_fn=_usage,
+                load_assets_fn=_load_image_assets,
+                document_fingerprint_fn=_fingerprint,
+            )
     return _zvec_store_instance
 
 
@@ -608,7 +626,7 @@ def _embedding_provider():
 
 def _embedding_meta():
     provider = _embedding_provider()
-    meta = {"provider": provider, "dimension": ZVEC_DIM}
+    meta = {"provider": provider, "dimension": _configured_embedding_dimension()}
     try:
         client = _load_embeddings_provider()
         return client.embedding_meta()

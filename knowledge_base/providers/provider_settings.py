@@ -14,6 +14,8 @@ if APP_ROOT not in sys.path:
 EMBEDDING_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 EMBEDDING_MODEL = "text-embedding-v4"
 EMBEDDING_DIMENSION = 1024
+MINERU_BASE_URL = "https://mineru.net/api/v4"
+MINERU_MODEL_VERSION = "vlm"
 
 
 def embedding_cache_dir() -> str:
@@ -87,32 +89,36 @@ def embedding_config() -> Dict[str, Any]:
     add ``output_type='sparse'`` at request time.
     """
     vars_ = _load_mykey_vars()
-    cfg = vars_.get("kb_embedding_config")
-    if isinstance(cfg, dict) and cfg.get("apikey"):
-        return dict(cfg)
+    raw = vars_.get("kb_embedding_config")
+    cfg = dict(raw) if isinstance(raw, dict) else {}
 
+    # A dedicated KB block may override the endpoint/model while intentionally
+    # inheriting the Qwen key from the regular GA model configuration.  The old
+    # all-or-nothing check discarded those overrides whenever the dedicated
+    # block omitted its own key.
     qwen = _qwen_cfg(vars_)
-    if qwen:
-        return {
-            "apikey": qwen.get("apikey"),
-            "apibase": EMBEDDING_BASE_URL,
-            "model": EMBEDDING_MODEL,
-            "dimension": EMBEDDING_DIMENSION,
-        }
+    fallback_key = qwen.get("apikey") if qwen else ""
 
     # DashScope uses one API key for chat and embedding. This fallback keeps a
     # Desktop install usable when only native_oai_config is filled in
     # mykey.py, while avoiding guesses for unrelated OAI-compatible providers.
     llm = _preferred_llm_cfg(vars_)
     base = str(llm.get("apibase") or "").lower()
-    if "dashscope.aliyuncs.com" in base:
-        return {
-            "apikey": llm.get("apikey"),
-            "apibase": EMBEDDING_BASE_URL,
-            "model": EMBEDDING_MODEL,
-            "dimension": EMBEDDING_DIMENSION,
-        }
-    return {}
+    if not fallback_key and "dashscope.aliyuncs.com" in base:
+        fallback_key = llm.get("apikey") or ""
+
+    if not cfg and not fallback_key:
+        return {}
+    result = dict(cfg)
+    result["apikey"] = str(
+        result.get("apikey") or result.get("api_key") or fallback_key or ""
+    ).strip()
+    result["apibase"] = str(
+        result.get("apibase") or result.get("base_url") or EMBEDDING_BASE_URL
+    ).strip().rstrip("/")
+    result["model"] = str(result.get("model") or EMBEDDING_MODEL).strip()
+    result["dimension"] = int(result.get("dimension") or EMBEDDING_DIMENSION)
+    return result
 
 
 def mineru_config() -> Dict[str, Any]:
@@ -139,13 +145,13 @@ def mineru_config() -> Dict[str, Any]:
     base_url = str(
         raw.get("base_url")
         or os.environ.get("MINERU_BASE_URL")
-        or "https://mineru.net/api/v4"
+        or MINERU_BASE_URL
     ).strip().rstrip("/")
     model_version = str(
         raw.get("model_version")
         or os.environ.get("MINERU_MODEL_VERSION")
-        or "vlm"
-    ).strip() or "vlm"
+        or MINERU_MODEL_VERSION
+    ).strip() or MINERU_MODEL_VERSION
     return {
         "api_key": api_key,
         "base_url": base_url,

@@ -17,21 +17,28 @@ from typing import Dict, Iterable, List
 from . import provider_http, provider_settings
 
 
-_MYKEY_EMBED = provider_settings.embedding_config()
+def _runtime_config() -> dict:
+    """Load one provider snapshot for the current embedding operation.
 
-BASE_URL = str(_MYKEY_EMBED.get("apibase") or _MYKEY_EMBED.get("base_url") or "").rstrip("/")
-API_KEY = _MYKEY_EMBED.get("apikey") or ""
-MODEL = _MYKEY_EMBED.get("model") or ""
-DIMENSION = int(_MYKEY_EMBED.get("dimension") or 1024)
-MAX_TOKENS = int(_MYKEY_EMBED.get("max_tokens") or 8192)
-TIMEOUT = int(_MYKEY_EMBED.get("timeout") or 60)
-RETRIES = int(_MYKEY_EMBED.get("max_retries") or 3)
-BATCH_SIZE = int(_MYKEY_EMBED.get("batch_size") or 10)
-CONCURRENCY = max(1, int(_MYKEY_EMBED.get("concurrency") or 10))
-REQUEST_INTERVAL = max(0.0, float(_MYKEY_EMBED.get("request_interval") or 0))
-SPARSE_MODEL = MODEL
-SPARSE_DIMENSION = DIMENSION
-CACHE_ENABLED = os.environ.get("GA_KB_EMBED_CACHE", "1").strip().lower() not in ("0", "false", "no", "off")
+    Settings can be edited while the Bridge stays alive.  A snapshot keeps one
+    batch internally consistent while allowing the next operation to use the
+    new configuration without reloading this module or racing mutable globals.
+    """
+    raw = provider_settings.embedding_config()
+    return {
+        "base_url": str(raw.get("apibase") or raw.get("base_url") or "").rstrip("/"),
+        "api_key": str(raw.get("apikey") or raw.get("api_key") or ""),
+        "model": str(raw.get("model") or ""),
+        "dimension": int(raw.get("dimension") or 1024),
+        "max_tokens": int(raw.get("max_tokens") or 8192),
+        "timeout": int(raw.get("timeout") or 60),
+        "retries": int(raw.get("max_retries") or 3),
+        "batch_size": int(raw.get("batch_size") or 10),
+        "concurrency": max(1, int(raw.get("concurrency") or 10)),
+        "request_interval": max(0.0, float(raw.get("request_interval") or 0)),
+        "cache_enabled": os.environ.get("GA_KB_EMBED_CACHE", "1").strip().lower()
+        not in ("0", "false", "no", "off"),
+    }
 
 
 def _cache_dir() -> str:
@@ -44,7 +51,9 @@ def _rough_token_count(text: str) -> int:
     return max(1, len(text or "") // 2)
 
 
-def _trim_text(text: str, max_tokens: int = MAX_TOKENS) -> str:
+def _trim_text(text: str, max_tokens: int | None = None) -> str:
+    if max_tokens is None:
+        max_tokens = _runtime_config()["max_tokens"]
     text = str(text or "")
     while text and _rough_token_count(text) > max_tokens:
         ratio = max_tokens / float(_rough_token_count(text))
@@ -52,55 +61,57 @@ def _trim_text(text: str, max_tokens: int = MAX_TOKENS) -> str:
     return text
 
 
-def _post_embeddings(batch: List[str]) -> List[List[float]]:
-    if not (API_KEY and BASE_URL and MODEL):
+def _post_embeddings(batch: List[str], config: dict) -> List[List[float]]:
+    if not (config["api_key"] and config["base_url"] and config["model"]):
         raise RuntimeError("mykey.py 需要配置 kb_embedding_config.apikey/apibase/model")
     body = provider_http.embeddings(
-        model=MODEL,
-        inputs=[_trim_text(t) for t in batch],
-        base=BASE_URL,
-        key=API_KEY,
-        timeout=TIMEOUT,
-        retries=RETRIES,
+        model=config["model"],
+        inputs=[_trim_text(t, config["max_tokens"]) for t in batch],
+        base=config["base_url"],
+        key=config["api_key"],
+        timeout=config["timeout"],
+        retries=config["retries"],
     )
     rows = sorted(body.get("data") or [], key=lambda x: x.get("index", 0))
     vectors = [list(map(float, r["embedding"])) for r in rows]
     if len(vectors) != len(batch):
         raise RuntimeError(f"embedding 返回数量不匹配：请求 {len(batch)}，返回 {len(vectors)}")
     for vec in vectors:
-        if len(vec) != DIMENSION:
-            raise RuntimeError(f"embedding 维度不匹配：期望 {DIMENSION}，返回 {len(vec)}")
+        if len(vec) != config["dimension"]:
+            raise RuntimeError(f"embedding 维度不匹配：期望 {config['dimension']}，返回 {len(vec)}")
     return vectors
 
 
-def embed_texts(texts: Iterable[str], batch_size: int = BATCH_SIZE) -> List[List[float]]:
+def embed_texts(texts: Iterable[str], batch_size: int | None = None) -> List[List[float]]:
+    config = _runtime_config()
     texts = list(texts)
     return _embed_cached(
         texts,
-        batch_size=batch_size,
+        batch_size=config["batch_size"] if batch_size is None else batch_size,
         output_type="dense",
         text_type="document",
-        request_fn=_post_embeddings,
+        request_fn=lambda batch: _post_embeddings(batch, config),
         normalize_fn=lambda x: list(map(float, x)),
+        config=config,
     )
 
 
-def _post_sparse_embeddings(batch: List[str], text_type: str) -> List[Dict[int, float]]:
-    if not (API_KEY and BASE_URL and MODEL):
+def _post_sparse_embeddings(batch: List[str], text_type: str, config: dict) -> List[Dict[int, float]]:
+    if not (config["api_key"] and config["base_url"] and config["model"]):
         raise RuntimeError("mykey.py 需要配置 kb_embedding_config.apikey/apibase/model")
     body = provider_http.post_json(
         "/embeddings",
         {
-            "model": SPARSE_MODEL,
-            "input": [_trim_text(t) for t in batch],
-            "dimension": SPARSE_DIMENSION,
+            "model": config["model"],
+            "input": [_trim_text(t, config["max_tokens"]) for t in batch],
+            "dimension": config["dimension"],
             "output_type": "sparse",
             "text_type": text_type,
         },
-        base=BASE_URL,
-        key=API_KEY,
-        timeout=TIMEOUT,
-        retries=RETRIES,
+        base=config["base_url"],
+        key=config["api_key"],
+        timeout=config["timeout"],
+        retries=config["retries"],
         error_prefix="sparse embedding endpoint",
     )
     rows = sorted(body.get("data") or [], key=lambda x: x.get("index", 0))
@@ -126,31 +137,38 @@ def embed_sparse_texts(
     texts: Iterable[str],
     *,
     text_type: str = "document",
-    batch_size: int = BATCH_SIZE,
+    batch_size: int | None = None,
 ) -> List[Dict[int, float]]:
+    config = _runtime_config()
     texts = list(texts)
     text_type = "query" if text_type == "query" else "document"
     return _embed_cached(
         texts,
-        batch_size=batch_size,
+        batch_size=config["batch_size"] if batch_size is None else batch_size,
         output_type="sparse",
         text_type=text_type,
-        request_fn=lambda batch: _post_sparse_embeddings(batch, text_type),
+        request_fn=lambda batch: _post_sparse_embeddings(batch, text_type, config),
         normalize_fn=_normalize_sparse_cached,
+        config=config,
     )
 
 
-def _embed_cached(texts, *, batch_size, output_type, text_type, request_fn, normalize_fn):
-    if not CACHE_ENABLED:
+def _embed_cached(texts, *, batch_size, output_type, text_type, request_fn, normalize_fn, config):
+    if not config["cache_enabled"]:
         out = []
-        for _, vectors in _run_batches(_make_batches(texts, batch_size), request_fn):
+        for _, vectors in _run_batches(
+            _make_batches(texts, batch_size),
+            request_fn,
+            concurrency=config["concurrency"],
+            request_interval=config["request_interval"],
+        ):
             out.extend(vectors)
         return out
     os.makedirs(_cache_dir(), exist_ok=True)
     out = [None] * len(texts)
     missing = []
     for i, text in enumerate(texts):
-        key = _cache_key(text, output_type=output_type, text_type=text_type)
+        key = _cache_key(text, output_type=output_type, text_type=text_type, config=config)
         cached = _cache_get(key)
         if cached is None:
             missing.append((i, text, key))
@@ -165,6 +183,8 @@ def _embed_cached(texts, *, batch_size, output_type, text_type, request_fn, norm
         for _, rows in _run_batches(
             [(i, [text for _idx, text, _key in rows]) for i, rows in missing_batches],
             request_fn,
+            concurrency=config["concurrency"],
+            request_interval=config["request_interval"],
         ):
             batch_rows = dict(missing_batches)[_]
             for (idx, _text, key), vector in zip(batch_rows, rows):
@@ -174,16 +194,14 @@ def _embed_cached(texts, *, batch_size, output_type, text_type, request_fn, norm
     return out
 
 
-def _cache_key(text: str, *, output_type: str, text_type: str) -> str:
-    model = SPARSE_MODEL if output_type == "sparse" else MODEL
-    dimension = SPARSE_DIMENSION if output_type == "sparse" else DIMENSION
+def _cache_key(text: str, *, output_type: str, text_type: str, config: dict) -> str:
     payload = {
-        "base_url": BASE_URL,
-        "model": model,
-        "dimension": dimension,
+        "base_url": config["base_url"],
+        "model": config["model"],
+        "dimension": config["dimension"],
         "output_type": output_type,
         "text_type": text_type,
-        "text": _trim_text(text),
+        "text": _trim_text(text, config["max_tokens"]),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -221,14 +239,14 @@ def _make_batches(texts: List[str], batch_size: int) -> List[tuple[int, List[str
     return [(i, texts[i:i + size]) for i in range(0, len(texts), size)]
 
 
-def _run_batches(batches, fn):
+def _run_batches(batches, fn, *, concurrency=1, request_interval=0.0):
     if not batches:
         return []
-    if CONCURRENCY <= 1 or len(batches) == 1:
+    if concurrency <= 1 or len(batches) == 1:
         results = []
         for pos, (i, batch) in enumerate(batches):
-            if pos and REQUEST_INTERVAL:
-                time.sleep(REQUEST_INTERVAL)
+            if pos and request_interval:
+                time.sleep(request_interval)
             try:
                 vectors = fn(batch)
             except Exception:
@@ -241,7 +259,7 @@ def _run_batches(batches, fn):
         return results
     results = {}
     failed = {}
-    with ThreadPoolExecutor(max_workers=min(CONCURRENCY, len(batches))) as ex:
+    with ThreadPoolExecutor(max_workers=min(concurrency, len(batches))) as ex:
         futures = {ex.submit(fn, batch): i for i, batch in batches}
         for fut in as_completed(futures):
             idx = futures[fut]
@@ -256,31 +274,32 @@ def _run_batches(batches, fn):
         time.sleep(2)
         batch_map = dict(batches)
         for pos, idx in enumerate(sorted(failed)):
-            if pos and REQUEST_INTERVAL:
-                time.sleep(REQUEST_INTERVAL)
+            if pos and request_interval:
+                time.sleep(request_interval)
             results[idx] = fn(batch_map[idx])
     return [(i, results[i]) for i, _batch in sorted(batches, key=lambda x: x[0])]
 
 
 def embedding_meta() -> dict:
+    config = _runtime_config()
     return {
         "provider": "dashscope",
-        "base_url": BASE_URL,
-        "model": MODEL,
-        "dimension": DIMENSION,
-        "batch_size": BATCH_SIZE,
-        "concurrency": CONCURRENCY,
+        "base_url": config["base_url"],
+        "model": config["model"],
+        "dimension": config["dimension"],
+        "batch_size": config["batch_size"],
+        "concurrency": config["concurrency"],
     }
 
 
 def sparse_embedding_meta() -> dict:
+    config = _runtime_config()
     return {
         "provider": "dashscope",
-        "base_url": BASE_URL,
-        "model": SPARSE_MODEL,
-        "dimension": SPARSE_DIMENSION,
+        "base_url": config["base_url"],
+        "model": config["model"],
+        "dimension": config["dimension"],
         "output_type": "sparse",
-        "batch_size": BATCH_SIZE,
-        "concurrency": CONCURRENCY,
+        "batch_size": config["batch_size"],
+        "concurrency": config["concurrency"],
     }
-
