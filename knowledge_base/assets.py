@@ -318,7 +318,6 @@ class ImageAssetProcessor:
         image_assets_path_fn: Callable[[str], str],
         index_dir_fn: Callable[[str], str],
         merge_usage_fn: Callable[[Dict[str, Any]], None],
-        model_usage_delta_fn: Callable[[str, Dict[str, Any] | None, int], Dict[str, Any]],
         concurrency: int = 1,
     ) -> None:
         self._image_client_fn = image_client_fn
@@ -327,7 +326,6 @@ class ImageAssetProcessor:
         self._image_assets_path_fn = image_assets_path_fn
         self._index_dir_fn = index_dir_fn
         self._merge_usage_fn = merge_usage_fn
-        self._model_usage_delta_fn = model_usage_delta_fn
         self._concurrency = max(1, int(concurrency))
 
     def build_document_index(self, body: str) -> DocumentImageIndex:
@@ -848,18 +846,21 @@ class ImageAssetProcessor:
             return str(result.get("model") or "")
         return str(analysis_meta.get("model") or "")
 
+    @staticmethod
+    def _usage_tokens(usage: Any) -> tuple[int, int]:
+        """Read (prompt, completion) tokens from a provider ``usage`` block.
+
+        VLM providers report either ``prompt_tokens``/``completion_tokens``
+        (OpenAI style) or ``input_tokens``/``output_tokens``; be tolerant.
+        """
+        if not isinstance(usage, dict):
+            return 0, 0
+        prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        return prompt, completion
+
     def analyze_image_job(self, kb_path: str, job: ImageContent):
-        delta = {
-            "calls": 0,
-            "cached": 0,
-            "failed": 0,
-            "input_images": 0,
-            "input_image_bytes": 0,
-            "input_text_chars": 0,
-            "output_chars": 0,
-            "models": {},
-            "cached_models": {},
-        }
+        delta = {"calls": 0, "cached": 0, "failed": 0, "prompt_tokens": 0, "completion_tokens": 0}
         image_sha = job.image_sha
         analysis_meta = job.analysis_meta
         focus = str(job.focus or "general")
@@ -875,20 +876,13 @@ class ImageAssetProcessor:
         if cached:
             delta["cached"] += 1
             result = cached.get("result", cached)
-            usage = cached.get("usage") if isinstance(cached, dict) else None
-            model = self.cached_analysis_model(cached, result, analysis_meta) if isinstance(cached, dict) else ""
-            delta["cached_models"] = self._model_usage_delta_fn(model, usage, self.analysis_output_chars(result))
             return result, delta
         if os.environ.get("GA_KB_IMAGE_ANALYSIS_CACHE_ONLY", "").strip().lower() in ("1", "true", "yes", "on"):
             return {"error": "image analysis cache missing", "uncertain": ["image analysis cache missing"]}, delta
         try:
             client = self._image_client_fn()
             image_abs = job.image_abspath
-            image_size = os.path.getsize(image_abs)
             delta["calls"] += 1
-            delta["input_images"] += 1
-            delta["input_image_bytes"] += image_size
-            delta["input_text_chars"] += len(job.title or "") + len(job.near_text or "")
             analysis = client.analyze_image(
                 image_abs,
                 focus=focus,
@@ -898,9 +892,9 @@ class ImageAssetProcessor:
             )
             usage = analysis.pop("_usage", None)
             request_id = analysis.pop("_request_id", None)
-            output_chars = self.analysis_output_chars(analysis)
-            delta["output_chars"] += output_chars
-            delta["models"] = self._model_usage_delta_fn(str(analysis.get("model") or ""), usage, output_chars)
+            prompt_tokens, completion_tokens = self._usage_tokens(usage)
+            delta["prompt_tokens"] += prompt_tokens
+            delta["completion_tokens"] += completion_tokens
             # S1: a failed parse/analysis (error-marked) must NOT be cached —
             # otherwise garbage freezes into the permanent VLM cache and is
             # never retried.  The API call still happened, so usage above is

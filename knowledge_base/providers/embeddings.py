@@ -10,11 +10,42 @@ from __future__ import annotations
 import os
 import json
 import hashlib
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Iterable, List
 
 from . import provider_http, provider_settings
+
+
+# Real token usage reported by the embedding endpoint, accumulated per
+# ``output_type``.  Batches may run concurrently (see ``_run_batches``), so the
+# accumulator is guarded by a lock.  The KB indexer drains it around each flush
+# to record true ``api_tokens``; cache hits never call the API and so add
+# nothing here.
+_usage_lock = threading.Lock()
+_usage_acc: Dict[str, int] = {"dense": 0, "sparse": 0}
+
+
+def _add_api_tokens(output_type: str, body: Dict) -> None:
+    usage = body.get("usage") if isinstance(body, dict) else None
+    if not isinstance(usage, dict):
+        return
+    tokens = int(usage.get("total_tokens") or usage.get("prompt_tokens")
+                 or usage.get("input_tokens") or 0)
+    if tokens <= 0:
+        return
+    with _usage_lock:
+        _usage_acc[output_type] = _usage_acc.get(output_type, 0) + tokens
+
+
+def drain_usage() -> Dict[str, int]:
+    """Return accumulated embedding token usage and reset the accumulator."""
+    with _usage_lock:
+        drained = dict(_usage_acc)
+        for key in _usage_acc:
+            _usage_acc[key] = 0
+    return drained
 
 
 def _runtime_config() -> dict:
@@ -72,6 +103,7 @@ def _post_embeddings(batch: List[str], config: dict) -> List[List[float]]:
         timeout=config["timeout"],
         retries=config["retries"],
     )
+    _add_api_tokens("dense", body)
     rows = sorted(body.get("data") or [], key=lambda x: x.get("index", 0))
     vectors = [list(map(float, r["embedding"])) for r in rows]
     if len(vectors) != len(batch):
@@ -114,6 +146,7 @@ def _post_sparse_embeddings(batch: List[str], text_type: str, config: dict) -> L
         retries=config["retries"],
         error_prefix="sparse embedding endpoint",
     )
+    _add_api_tokens("sparse", body)
     rows = sorted(body.get("data") or [], key=lambda x: x.get("index", 0))
     vectors: List[Dict[int, float]] = []
     for row in rows:

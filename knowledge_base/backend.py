@@ -113,7 +113,7 @@ ZVEC_VECTOR_WEIGHT = float(os.environ.get("GA_KB_VECTOR_WEIGHT", "1.2"))
 ZVEC_SPARSE_WEIGHT = float(os.environ.get("GA_KB_SPARSE_WEIGHT", "1.0"))
 IMAGE_ANALYSIS_CONCURRENCY = max(1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY", "1")))
 
-_local = threading.local()
+_local = threading.local()          # per-thread non-fatal search diagnostics
 _build_lock = threading.Lock()
 _build_state_lock = threading.Lock()
 _LOCK_PORT = 45764                  # 跨进程单飞锁端口（与 indexer 45763 / scheduler 45762 错开）
@@ -140,14 +140,6 @@ def _update_build_state(**changes):
 def _build_state_snapshot():
     with _build_state_lock:
         return dict(build_state)
-
-
-def clear_last_hits():
-    _local.last_hits = []
-
-
-def get_last_hits():
-    return list(getattr(_local, "last_hits", []) or [])
 
 
 # Knowledge-base registry functions are implemented in config.py.
@@ -300,18 +292,14 @@ def _usage_tracker():
     global _usage_tracker_instance
     if _usage_tracker_instance is None:
         _usage_tracker_instance = _UsageTracker(
-            image_meta_fn=_image_analysis_meta,
-            embedding_meta_fn=_embedding_meta,
-            sparse_embedding_meta_fn=_sparse_embedding_meta,
-            embedding_provider_fn=_embedding_provider,
             index_dir_fn=_index_dir,
             usage_path_fn=_build_usage_path,
         )
     return _usage_tracker_instance
 
 
-def _empty_usage(kb_id="", kb_path=""):
-    return _usage_tracker().empty(kb_id, kb_path)
+def _empty_usage():
+    return _usage_tracker().empty()
 
 
 def _usage():
@@ -320,14 +308,6 @@ def _usage():
 
 def _set_usage(value):
     _usage_tracker().set_current(value)
-
-
-def _add_model_usage(model, usage, output_chars=0):
-    _usage_tracker().add_model_usage(model, usage, output_chars)
-
-
-def _model_usage_delta(model, usage, output_chars=0):
-    return _usage_tracker().model_usage_delta(model, usage, output_chars)
 
 
 def _merge_image_analysis_usage(usage_delta):
@@ -342,21 +322,22 @@ def _load_build_usage(kb_path):
     return _usage_tracker().load(kb_path)
 
 
-def _calculate_build_cost(usage):
-    return _usage_tracker().calculate_cost(usage)
-
-
 def _build_usage_summary(usage):
+    ia = usage.get("image_analysis", {})
+    em = usage.get("embedding", {})
+    sem = usage.get("sparse_embedding", {})
     return {
-        "image_calls": usage.get("image_analysis", {}).get("calls", 0),
-        "image_cached": usage.get("image_analysis", {}).get("cached", 0),
-        "image_models": usage.get("image_analysis", {}).get("models", {}),
-        "image_cached_models": usage.get("image_analysis", {}).get("cached_models", {}),
-        "embedding_calls": usage.get("embedding", {}).get("calls", 0),
-        "embedding_estimated_input_tokens": usage.get("embedding", {}).get("estimated_input_tokens", 0),
-        "sparse_embedding_calls": usage.get("sparse_embedding", {}).get("calls", 0),
-        "sparse_embedding_estimated_input_tokens": usage.get("sparse_embedding", {}).get("estimated_input_tokens", 0),
-        "cost": _calculate_build_cost(usage),
+        "image_calls": ia.get("calls", 0),
+        "image_cached": ia.get("cached", 0),
+        "image_failed": ia.get("failed", 0),
+        "image_prompt_tokens": ia.get("prompt_tokens", 0),
+        "image_completion_tokens": ia.get("completion_tokens", 0),
+        "embedding_calls": em.get("calls", 0),
+        "embedding_texts": em.get("texts", 0),
+        "embedding_api_tokens": em.get("api_tokens", 0),
+        "sparse_embedding_calls": sem.get("calls", 0),
+        "sparse_embedding_texts": sem.get("texts", 0),
+        "sparse_embedding_api_tokens": sem.get("api_tokens", 0),
     }
 
 
@@ -423,8 +404,7 @@ def _image_assets():
             image_cache_dir_fn=_image_cache_dir,
             image_assets_path_fn=_image_assets_path,
             index_dir_fn=_index_dir,
-        merge_usage_fn=_merge_image_analysis_usage,
-            model_usage_delta_fn=_model_usage_delta,
+            merge_usage_fn=_merge_image_analysis_usage,
             concurrency=IMAGE_ANALYSIS_CONCURRENCY,
         )
     return _image_assets_instance
@@ -559,13 +539,6 @@ def _records(
     )
 
 
-def build_kb(kb, force=False, verbose=True, logfn=None, mode="full"):
-    """Compatibility facade for the build coordinator."""
-    return _build_coordinator().build_kb(
-        kb, force=force, verbose=verbose, logfn=logfn, mode=mode
-    )
-
-
 def _build_summary(results):
     return _BuildCoordinator.build_summary(results)
 
@@ -618,6 +591,7 @@ def _zvec_store():
                 usage_fn=_usage,
                 load_assets_fn=_load_image_assets_build,
                 document_fingerprint_fn=_fingerprint,
+                embedding_usage_drain_fn=_drain_embedding_usage,
             )
     return _zvec_store_instance
 
@@ -678,6 +652,15 @@ def _load_embeddings_provider():
 def _embed_texts_with_provider(texts):
     client = _load_embeddings_provider()
     return client.embed_texts(texts)
+
+
+def _drain_embedding_usage():
+    """Return real embedding token usage since the last drain, per output type.
+
+    Delegates to the provider accumulator ({"dense": n, "sparse": m}); cache
+    hits contribute nothing because they never reach the API.
+    """
+    return _load_embeddings_provider().drain_usage()
 
 
 def _zvec_meta(kb_path):
@@ -810,15 +793,14 @@ def kb_status(kb):
                 "image_calls": ia.get("calls", 0),
                 "image_cached": ia.get("cached", 0),
                 "image_failed": ia.get("failed", 0),
-                "image_models": ia.get("models", {}),
-                "image_cached_models": ia.get("cached_models", {}),
+                "image_prompt_tokens": ia.get("prompt_tokens", 0),
+                "image_completion_tokens": ia.get("completion_tokens", 0),
                 "embedding_calls": em.get("calls", 0),
                 "embedding_texts": em.get("texts", 0),
-                "embedding_estimated_input_tokens": em.get("estimated_input_tokens", 0),
+                "embedding_api_tokens": em.get("api_tokens", 0),
                 "sparse_embedding_calls": sem.get("calls", 0),
                 "sparse_embedding_texts": sem.get("texts", 0),
-                "sparse_embedding_estimated_input_tokens": sem.get("estimated_input_tokens", 0),
-                "cost": bu.get("cost"),
+                "sparse_embedding_api_tokens": sem.get("api_tokens", 0),
             }
         try:
             if scanned is None:
@@ -959,12 +941,10 @@ def _retrieval():
 
 def search(query, top_k=6, kb_id=None, snippet_chars=_SNIPPET, file_name=None, title=None, mode="rrf"):
     _local.search_errors = []
-    results = _retrieval().search(
+    return _retrieval().search(
         query, top_k=top_k, kb_id=kb_id, snippet_chars=snippet_chars,
         file_name=file_name, title=title, mode=mode,
     )
-    _local.last_hits = results
-    return results
 
 
 def document_exists(file_name=None, title=None, kb_id=None):
@@ -1105,19 +1085,6 @@ def build(kb_id=None, force=False, mode="full", logfn=None):
     }
 
 
-def answer_image(image_id=None, image_path=None, question="", data_id=None, ref=None):
-    asset = read_image(image_id=image_id, image_path=image_path, data_id=data_id, ref=ref)
-    if asset.get("error"):
-        return asset
-    client = _load_image_client()
-    return client.answer_image_question(
-        asset.get("image_abspath") or os.path.join(_kb_by_id(asset.get("kb_id"))["path"], asset.get("image_path", "")),
-        question=question or "",
-        title=asset.get("title", ""),
-        context=asset,
-    )
-
-
 def resolve_open_target(kb_id="", data_id="", image_id="", image_path="", ref="", ref_key=""):
     """Resolve Desktop /kb/open to an original document or indexed image."""
     is_image_target = bool(image_id or image_path or "::image::" in str(data_id or ""))
@@ -1178,6 +1145,12 @@ def main(argv=None):
     if args.search:
         for r in search(args.search, top_k=args.top_k):
             print(f"[{r['score']}] {r['ref']} #{r['chunk_index']} :: {r['snippet'][:120]}")
+        diagnostics = search_diagnostics()
+        if diagnostics:
+            print("\n诊断（非致命，本次检索遇到的问题）：")
+            for d in diagnostics:
+                kb_label = d.get("kb_id") or "-"
+                print(f"  [{d.get('source', '?')}] {kb_label}: {d.get('error', '')}")
         return 0
     if args.build or args.rebuild:
         if args.text_only and args.images_only:

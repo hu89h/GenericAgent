@@ -139,14 +139,12 @@ class KnowledgeBaseRetriever:
 
     @staticmethod
     def _path_is_within(root: str, path: str) -> bool:
-        root_real = os.path.realpath(root)
-        path_real = os.path.realpath(path)
-        return path_real == root_real or path_real.startswith(root_real + os.sep)
-
-    @staticmethod
-    def _folder_from_file_name(file_name: str) -> str:
-        rel = str(file_name or "").replace("\\", "/")
-        return rel.split("/", 1)[0] if "/" in rel else ""
+        try:
+            root_real = os.path.realpath(root)
+            path_real = os.path.realpath(path)
+            return path_real == root_real or os.path.commonpath((root_real, path_real)) == root_real
+        except (OSError, ValueError):
+            return False
 
     @staticmethod
     def _reference_terms(query: str) -> list[str]:
@@ -375,16 +373,12 @@ class KnowledgeBaseRetriever:
                 "kb_id": kb["id"],
                 "score": round(score, 6),
                 "score_type": score_type,
-                "rank": len(out) + 1,
                 "data_id": data_id,
                 "chunk_index": chunk_index,
                 "title": ttl[:160],
                 "file_name": rel,
                 "ref": f"{kb['id']}/{rel}",
                 "abspath": os.path.join(kb["path"], rel),
-                "folder": self._folder_from_file_name(rel),
-                "format": fields.get("kind") or "text",
-                "n_chunks": 0,
                 "kind": fields.get("kind") or "text",
                 "image_path": fields.get("image_path") or "",
                 "source_data_id": fields.get("source_data_id") or "",
@@ -465,7 +459,6 @@ class KnowledgeBaseRetriever:
             seen.add(data_id)
             body = self._asset_body(asset)
             hit = self._asset_hit(kb, asset, body=body, query=query, snippet_chars=snippet_chars)
-            hit["rank"] = len(out) + 1
             out.append(hit)
             if len(out) >= top_k:
                 break
@@ -478,16 +471,12 @@ class KnowledgeBaseRetriever:
             "kb_id": kb["id"],
             "score": 1.0,
             "score_type": "ref_exact",
-            "rank": 0,
             "data_id": asset.get("data_id") or "",
             "chunk_index": 0,
             "title": (asset.get("display_label") or asset.get("title") or "图片")[:160],
             "file_name": rel,
             "ref": asset.get("source_ref") or f"{kb['id']}/{rel}",
             "abspath": os.path.join(kb["path"], rel),
-            "folder": self._folder_from_file_name(rel),
-            "format": "image",
-            "n_chunks": 0,
             "kind": "image",
             "image_id": asset.get("image_id", ""),
             "occurrence_id": asset.get("occurrence_id", -1),
@@ -552,8 +541,8 @@ class KnowledgeBaseRetriever:
         # Embed the query once up front: the vector is identical across every
         # knowledge base, so computing it inside the per-KB loop only multiplied
         # cache reads (or network calls when the cache is disabled). A failure
-        # here is KB-independent, so it is recorded once and disables that whole
-        # channel rather than being reported per KB.
+        # here is KB-independent, so it disables that whole channel rather than
+        # aborting the search.
         dense_vector = sparse_vector = None
         if mode in ("rrf", "vector"):
             try:
@@ -1111,13 +1100,8 @@ class KnowledgeBaseRetriever:
         source_root = os.path.realpath(source_root_value) if source_root_value else ""
         external_path = os.path.realpath(os.path.join(source_root, source_rel)) if source_root and source_rel else ""
         external_is_safe = bool(source_root and source_rel and self._path_is_within(source_root, external_path))
-        originals_root = os.path.realpath(os.path.join(package_root, "originals"))
-        legacy_original_path = os.path.realpath(os.path.join(originals_root, source_rel)) if source_rel else ""
-        legacy_original_is_safe = bool(source_rel and self._path_is_within(originals_root, legacy_original_path))
         if external_is_safe and os.path.isfile(external_path):
             source_path = external_path
-        elif legacy_original_is_safe and os.path.isfile(legacy_original_path):
-            source_path = legacy_original_path
         else:
             source_path = processed_path
         if not os.path.isfile(source_path):
@@ -1129,6 +1113,6 @@ class KnowledgeBaseRetriever:
             "source_file_name": source_rel or processed_rel,
             "title": os.path.basename(source_rel or processed_rel),
             "path": source_path,
-            "is_original": bool(source_rel and source_path in {external_path, legacy_original_path}),
+            "is_original": bool(source_rel and source_path == external_path),
             "ref": document["ref"],
         }, kind="document")

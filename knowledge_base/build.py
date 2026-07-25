@@ -307,7 +307,7 @@ class BuildCoordinator:
             processed=0,
             total=len(scanned),
         )
-        usage.set_usage(usage.empty_usage(kb["id"], kb["path"]))
+        usage.set_usage(usage.empty_usage())
         mode_label = {"full": "完整", "text": "文本", "images": "图片资产"}[mode]
         try:
             index.require_zvec()

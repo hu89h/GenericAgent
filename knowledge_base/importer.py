@@ -46,7 +46,7 @@ def _path_is_within(root: Path, path: Path) -> bool:
         root_value = os.path.realpath(str(root))
         path_value = os.path.realpath(str(path))
         return path_value == root_value or os.path.commonpath((root_value, path_value)) == root_value
-    except ValueError:
+    except (OSError, ValueError):
         return False
 
 

@@ -193,7 +193,7 @@ class KnowledgeBaseToolsMixin:
     @staticmethod
     def _clean_hit(hit):
         keep = (
-            "score", "score_type", "rank", "folder", "format", "occurrence_id",
+            "score", "score_type", "occurrence_id",
             "header_path", "snippet", "body", "description", "table_markdown",
             "related_text", "related_text_refs", "near_text", "uncertain", "caption",
             "display_label",

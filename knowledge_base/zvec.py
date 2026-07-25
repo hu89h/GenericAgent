@@ -37,6 +37,7 @@ class ZvecIndex:
         usage_fn: Callable[[], Dict[str, Any]],
         load_assets_fn: Callable[[str], list],
         document_fingerprint_fn: Callable[[list], Dict[str, Any]],
+        embedding_usage_drain_fn: Callable[[], Dict[str, int]],
     ) -> None:
         self.dimension = int(dimension)
         self.batch_size = max(1, int(batch_size))
@@ -52,6 +53,7 @@ class ZvecIndex:
         self._usage_fn = usage_fn
         self._load_assets_fn = load_assets_fn
         self._document_fingerprint_fn = document_fingerprint_fn
+        self._embedding_usage_drain_fn = embedding_usage_drain_fn
         self._local = threading.local()
         self._cache_lock = threading.RLock()
         self._connection_caches = []
@@ -250,27 +252,21 @@ class ZvecIndex:
                 return
             texts = [item["body"] for item in batch]
             usage = self._usage_fn()["embedding"]
+            sparse_usage = self._usage_fn()["sparse_embedding"]
             usage["calls"] += 1
             usage["texts"] += len(texts)
-            chars = sum(len(text or "") for text in texts)
-            usage["input_chars"] += chars
-            usage["estimated_input_tokens"] += max(1, chars // 2)
-            try:
-                vectors = self._embedding_fn(texts)
-            except Exception:
-                usage["failed"] += 1
-                raise
-
-            sparse_usage = self._usage_fn()["sparse_embedding"]
             sparse_usage["calls"] += 1
             sparse_usage["texts"] += len(texts)
-            sparse_usage["input_chars"] += chars
-            sparse_usage["estimated_input_tokens"] += max(1, chars // 2)
-            try:
-                sparse_vectors = self._sparse_embedding_fn(texts, text_type="document")
-            except Exception:
-                sparse_usage["failed"] += 1
-                raise
+            # Clear any stale accumulator, then attribute this flush's real
+            # provider token usage (dense + sparse) after both calls return.
+            # Cache hits inside the embedding client report no tokens, so
+            # api_tokens reflects only text that actually reached the API.
+            self._embedding_usage_drain_fn()
+            vectors = self._embedding_fn(texts)
+            sparse_vectors = self._sparse_embedding_fn(texts, text_type="document")
+            tokens = self._embedding_usage_drain_fn()
+            usage["api_tokens"] += int(tokens.get("dense") or 0)
+            sparse_usage["api_tokens"] += int(tokens.get("sparse") or 0)
 
             docs = []
             for item, vector, sparse_vector in zip(batch, vectors, sparse_vectors):
