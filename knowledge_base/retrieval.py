@@ -198,10 +198,7 @@ class KnowledgeBaseRetriever:
             else:
                 self._asset_catalogs.pop(str(path), None)
 
-    def _assets_for_kb(self, kb: dict, cache: dict[str, list] | None = None) -> list:
-        return self._asset_catalog(kb).assets
-
-    def _asset_by_data_id(self, kb: dict, data_id: str, cache: dict[str, list] | None = None) -> dict:
+    def _asset_by_data_id(self, kb: dict, data_id: str) -> dict:
         return self._asset_catalog(kb).by_data_id.get(data_id, {})
 
     def _asset_image_abspath(self, kb: dict, asset: dict) -> str:
@@ -213,10 +210,8 @@ class KnowledgeBaseRetriever:
         path = os.path.realpath(os.path.join(root, rel))
         return path if self._path_is_within(root, path) else ""
 
-    def _enrich_hit_with_asset(
-        self, kb: dict, hit: dict, asset_cache: dict[str, list] | None = None
-    ) -> dict:
-        asset = self._asset_by_data_id(kb, hit.get("data_id") or "", asset_cache)
+    def _enrich_hit_with_asset(self, kb: dict, hit: dict) -> dict:
+        asset = self._asset_by_data_id(kb, hit.get("data_id") or "")
         if not asset:
             hit.setdefault("kind", "text")
             return hit
@@ -333,7 +328,6 @@ class KnowledgeBaseRetriever:
         vector_field: str,
         score_type: str,
         error_source: str,
-        asset_cache: dict[str, list],
     ) -> list[dict]:
         path = self._zvec_path(kb["path"])
         if not os.path.isdir(path):
@@ -400,29 +394,27 @@ class KnowledgeBaseRetriever:
                 "snippet": self._snippet(body, query, snippet_chars),
                 "body": body,
             }, kind="image" if fields.get("kind") == "image" else "document")
-            out.append(self._enrich_hit_with_asset(kb, hit, asset_cache))
+            out.append(self._enrich_hit_with_asset(kb, hit))
             if len(out) >= top_k:
                 break
         return out
 
     def _search_one_zvec(
         self, kb: dict, query: str, top_k: int, snippet_chars: int,
-        *, file_name: str | None, title: str | None, asset_cache: dict[str, list]
+        *, file_name: str | None, title: str | None
     ) -> list[dict]:
         return self._search_one_zvec_field(
             kb, query, top_k, snippet_chars, file_name=file_name, title=title,
             vector_field="embedding", score_type="zvec", error_source="dense",
-            asset_cache=asset_cache,
         )
 
     def _search_one_zvec_sparse(
         self, kb: dict, query: str, top_k: int, snippet_chars: int,
-        *, file_name: str | None, title: str | None, asset_cache: dict[str, list]
+        *, file_name: str | None, title: str | None
     ) -> list[dict]:
         return self._search_one_zvec_field(
             kb, query, top_k, snippet_chars, file_name=file_name, title=title,
             vector_field="sparse_embedding", score_type="zvec_sparse", error_source="sparse",
-            asset_cache=asset_cache,
         )
 
     def _search_exact_image_refs(
@@ -434,7 +426,6 @@ class KnowledgeBaseRetriever:
         *,
         file_name: str | None,
         title: str | None,
-        asset_cache: dict[str, list],
     ) -> list[dict]:
         refs = []
         for term in self._reference_terms(query):
@@ -531,7 +522,6 @@ class KnowledgeBaseRetriever:
         if mode not in ("rrf", "vector", "sparse"):
             raise ValueError("mode must be one of: rrf, vector, sparse")
         by_key = {}
-        asset_cache: dict[str, list] = {}
 
         def add_hits(hits: list[dict], source_weight: float) -> None:
             for index, result in enumerate(hits or [], 1):
@@ -558,7 +548,7 @@ class KnowledgeBaseRetriever:
             add_hits(
                 self._search_exact_image_refs(
                     kb, query, top_k, snippet_chars,
-                    file_name=file_name, title=title, asset_cache=asset_cache,
+                    file_name=file_name, title=title,
                 ),
                 4.0,
             )
@@ -569,7 +559,7 @@ class KnowledgeBaseRetriever:
                 add_hits(
                     self._search_one_zvec(
                         kb, query, top_k, snippet_chars,
-                        file_name=file_name, title=title, asset_cache=asset_cache,
+                        file_name=file_name, title=title,
                     ),
                     self._vector_weight,
                 )
@@ -577,7 +567,7 @@ class KnowledgeBaseRetriever:
                 add_hits(
                     self._search_one_zvec_sparse(
                         kb, query, top_k, snippet_chars,
-                        file_name=file_name, title=title, asset_cache=asset_cache,
+                        file_name=file_name, title=title,
                     ),
                     1.0,
                 )
