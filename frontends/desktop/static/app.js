@@ -820,7 +820,6 @@ function kbPhaseText(job) {
     queued: 'queued',
     scanning: 'scanning',
     scanned: 'preparing',
-    splitting: 'preparing',
     starting: 'preparing',
     processing: 'processing',
     indexing: 'indexing',
@@ -1104,6 +1103,20 @@ async function openSessionSurface(sess) {
   if (currentPage !== 'chat') gaGoPage('chat');
 }
 
+function kbCitationLabel(citation) {
+  const direct = kbText(citation?.citation_label).trim();
+  if (direct) return direct;
+  const rawSource = kbText(citation?.source_file_name || citation?.file_name).replaceAll('\\', '/');
+  const source = rawSource.split('/').pop();
+  if (citation?.image_id) {
+    const image = kbText(
+      citation.display_label || citation.caption || citation.ref_key || citation.title,
+    ).trim() || t('kb.image');
+    return source ? `${image} · ${source}` : image;
+  }
+  return source || kbText(citation?.title).trim() || t('kb.openCitation');
+}
+
 function kbAppendCitations(row, msg) {
   if (msg.role !== 'assistant' || !Array.isArray(msg.citations) || !msg.citations.length) return;
   const bubble = row.querySelector(':scope > .bubble.md');
@@ -1118,9 +1131,7 @@ function kbAppendCitations(row, msg) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'kb-citation-btn';
-    button.textContent = citation.image_id
-      ? `🖼 ${citation.title || citation.file_name || citation.ref || citation.image_id}`
-      : (citation.title || citation.file_name || citation.ref || citation.data_id || t('kb.openCitation'));
+    button.textContent = citation.image_id ? `🖼 ${kbCitationLabel(citation)}` : kbCitationLabel(citation);
     button.title = t('kb.openCitation');
     button.addEventListener('click', () => void kbOpenCitation(citation));
     citations.appendChild(button);
@@ -1173,6 +1184,7 @@ async function kbOpenCitation(citation) {
       kbId: citation.kb_id,
       dataId: citation.data_id,
       imageId: citation.image_id,
+      refKey: citation.ref_key,
       ref: citation.ref,
     });
     if (result?.error) throw new Error(result.error);
@@ -1227,12 +1239,6 @@ function kbSetTask(job, kind) {
   if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = kbPhaseText(job);
   if (kbPageEls.taskCurrent) {
     let current = kbText(job.current);
-    if (current && job.partCount) {
-      current = `${current} · ${kbFormat(t('kb.partProgress'), {
-        current: job.partIndex || 1,
-        total: job.partCount,
-      })}`;
-    }
     if (job.errorCode) current = kbErrorText(job.errorCode);
     kbPageEls.taskCurrent.textContent = current;
   }

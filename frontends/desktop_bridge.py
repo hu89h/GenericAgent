@@ -2128,7 +2128,11 @@ def _kb_error_code(error) -> str:
         return ""
     if "api" in text and ("key" in text or "token" in text):
         return "api_key_missing"
-    if "number of pages exceeds limit" in text or "page limit" in text:
+    if (
+        "number of pages exceeds limit" in text
+        or "page limit" in text
+        or "超过 200 页" in str(error or "")
+    ):
         return "page_limit"
     if "too large" in text or "file size" in text:
         return "file_too_large"
@@ -2153,14 +2157,6 @@ def _kb_public_job_item(item: dict) -> dict:
     error_code = _kb_error_code(item.get("error"))
     if error_code:
         public["errorCode"] = error_code
-    for source_key, target_key in (
-        ("part_count", "partCount"),
-        ("part_index", "partIndex"),
-        ("first_page", "firstPage"),
-        ("last_page", "lastPage"),
-    ):
-        if item.get(source_key) is not None:
-            public[target_key] = item[source_key]
     return public
 
 
@@ -2191,14 +2187,6 @@ def _kb_job_snapshot(job: dict) -> dict:
         "startedAt": job.get("startedAt"),
         "updatedAt": job.get("updatedAt"),
     }
-    for source_key, target_key in (
-        ("part_index", "partIndex"),
-        ("part_count", "partCount"),
-        ("first_page", "firstPage"),
-        ("last_page", "lastPage"),
-    ):
-        if job.get(source_key) is not None:
-            snapshot[target_key] = job[source_key]
     error_code = _kb_error_code(job.get("error"))
     if error_code:
         snapshot["errorCode"] = error_code
@@ -2247,6 +2235,14 @@ async def kb_search_handler(request):
             title=data.get("title"),
             mode=data.get("mode", "rrf"),
         )
+        from knowledge_base.references import public_reference
+        public_results = []
+        for hit in result or []:
+            item = {**hit, **public_reference(hit, kind=hit.get("kind"))}
+            for key in ("abspath", "image_abspath", "image_path", "source_ref"):
+                item.pop(key, None)
+            public_results.append(item)
+        result = public_results
         return json_ok({"ok": True, "query": query, "results": result})
     except (TypeError, ValueError) as error:
         return json_ok({"ok": False, "error": str(error)}, status=400)
@@ -2264,6 +2260,15 @@ async def kb_read_handler(request):
             ref=data.get("ref"),
             max_chars=data.get("maxChars", data.get("max_chars", 200000)),
         )
+        if isinstance(result, dict):
+            from knowledge_base.references import public_reference
+            result = {
+                **result,
+                **public_reference(result, kind=result.get("kind") or "document"),
+            }
+            result = dict(result)
+            for key in ("path", "abspath", "source_ref"):
+                result.pop(key, None)
         return json_ok(result, status=404 if result.get("error") else 200)
     except (TypeError, ValueError) as error:
         return json_ok({"ok": False, "error": str(error)}, status=400)
@@ -2326,7 +2331,18 @@ async def kb_image_handler(request):
             image_path=data.get("imagePath", data.get("image_path")),
             data_id=data.get("dataId", data.get("data_id")),
             ref=data.get("ref"),
+            ref_key=data.get("refKey", data.get("ref_key")),
+            query=data.get("query"),
         )
+        if isinstance(result, dict):
+            from knowledge_base.references import public_reference
+            result = {
+                **result,
+                **public_reference(result, kind="image"),
+            }
+            result = dict(result)
+            for key in ("image_abspath", "image_path", "path", "source_ref"):
+                result.pop(key, None)
         return json_ok(result, status=404 if result.get("error") else 200)
     except Exception as error:
         return json_ok({"ok": False, "error": str(error)}, status=500)
@@ -2377,6 +2393,7 @@ async def kb_open_handler(request):
             image_id=data.get("imageId", data.get("image_id")) or "",
             image_path=data.get("imagePath", data.get("image_path")) or "",
             ref=data.get("ref") or "",
+            ref_key=data.get("refKey", data.get("ref_key")) or "",
         )
         if not path:
             return json_ok({"ok": False, "error": "target_not_found"}, status=404)
@@ -2414,8 +2431,6 @@ async def kb_import_handler(request):
             "ignored": 0,
             "skipped": 0,
             "assets": 0,
-            "split_files": 0,
-            "parts": 0,
         },
         "files": [],
         "current": "",
@@ -2440,11 +2455,6 @@ async def kb_import_handler(request):
                 current["current"] = str(
                     event.get("name") or _kb_display_name(event.get("current"))
                 )
-            for key in ("part_index", "part_count", "first_page", "last_page"):
-                if event.get(key) is not None:
-                    current[key] = event[key]
-                elif key in current and event.get("source"):
-                    current.pop(key, None)
             for key in current["counts"]:
                 if key not in event:
                     continue
@@ -2470,9 +2480,6 @@ async def kb_import_handler(request):
                     row["error"] = str(event.get("error") or "")
                 if event.get("current"):
                     row["current"] = _kb_display_name(event["current"])
-                for key in ("part_index", "part_count", "first_page", "last_page"):
-                    if event.get(key) is not None:
-                        row[key] = event[key]
             current["updatedAt"] = int(time.time())
 
     def run_import():
