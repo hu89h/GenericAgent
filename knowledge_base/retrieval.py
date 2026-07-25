@@ -538,6 +538,12 @@ class KnowledgeBaseRetriever:
                     by_key[key] = item
                 item["_rrf"] += source_weight / (60.0 + index)
                 item["_sources"].append(result.get("score_type") or "unknown")
+                # The fused RRF score always accumulates above; this only picks
+                # which channel's metadata (snippet/body/title) the merged hit
+                # displays.  Prefer a sparse hit, then any zvec hit, over an
+                # exact-ref hit: exact-ref carries only a thin reference payload,
+                # while zvec hits carry the full body/snippet.  Ordering of
+                # channels in add_hits does not matter because of this rule.
                 if result.get("score_type") == "zvec_sparse" or item.get("score_type") not in ("zvec", "zvec_sparse"):
                     item.update(result)
 
@@ -564,6 +570,12 @@ class KnowledgeBaseRetriever:
             if not kb.get("exists"):
                 self._record_search_error(kb, "config", "knowledge base directory is missing")
                 continue
+            # Exact figure/table-number matches (图3-1, 表4.1, ...) are injected
+            # for every mode, on purpose — including mode="vector" and
+            # mode="sparse".  When the user names a specific figure/table, that
+            # asset must pin to the top regardless of the retrieval channel, so
+            # this runs before the mode gate below.  Its high weight (4.0) makes
+            # such a hit outrank ordinary dense/sparse results after RRF fusion.
             add_hits(
                 self._search_exact_image_refs(
                     kb, query, top_k, snippet_chars,

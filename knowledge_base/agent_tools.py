@@ -28,6 +28,7 @@ KB_TOOL_SCHEMAS = [
                         "type": "string",
                         "enum": ["rrf", "vector", "sparse"],
                         "default": "rrf",
+                        "description": "检索通道：rrf 融合向量+稀疏（默认，通用问答用它）；vector 仅语义向量（找相近含义）；sparse 仅稀疏向量（偏关键词/术语）。注意：无论选哪种 mode，当 query 里出现明确的图表编号（如 图3-1、表4.1）时，对应图表都会被精确匹配并置顶，不受 mode 影响。",
                     },
                     "top_k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
                 },
