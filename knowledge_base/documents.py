@@ -50,16 +50,28 @@ def fingerprint(scanned):
 
 
 def chunking_meta():
+    # Only the effective target size drives chunking (see chunk_document_records:
+    # target_size = max(128, MD_CHUNK_SIZES[-1])). The leading sizes are legacy
+    # from an abandoned two-level hierarchy and never affect output, so we
+    # fingerprint the effective size alone -- configs that yield the same
+    # target (e.g. "768" vs "1024,768") share the index instead of forcing a
+    # spurious rebuild.
     return {
         "chunker": "docling_hierarchical_packer",
-        "markdown_hierarchical_chunk_sizes": list(MD_CHUNK_SIZES),
+        "markdown_chunk_target_size": max(128, int(MD_CHUNK_SIZES[-1])),
         "markdown_parser": "docling.document_converter.DocumentConverter+HierarchicalChunker",
         "markdown_packer": "ga_structural_blocks_v2_image_occurrences",
     }
 
 
 def read_textfile(path):
-    for encoding in ("utf-8", "gb18030", "latin-1"):
+    # latin-1 is deliberately absent: with errors="strict" it decodes any byte
+    # sequence without raising, so it would mask real encoding problems as
+    # mojibake and make the controlled utf-8/replace fallback below dead code.
+    # KB sources are UTF-8 markdown from the docling/MinerU pipeline; gb18030
+    # covers legacy Chinese files. Anything else falls to utf-8/replace, which
+    # surfaces corruption visibly (U+FFFD) instead of silently.
+    for encoding in ("utf-8", "gb18030"):
         try:
             with open(path, encoding=encoding, errors="strict") as handle:
                 return handle.read()

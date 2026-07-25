@@ -423,8 +423,12 @@ class KnowledgeBaseToolsMixin:
         pending = getattr(self, "_pending_inline_blocks", None)
         if pending is None:
             self._pending_inline_blocks = pending = []
-        if len(pending) // 2 >= _MAX_INLINE_IMAGES:
-            return "[kb_image_view] 本轮最多查看 3 张图片。"
+        # Count actual injected images (image_url blocks) rather than assuming
+        # a fixed 2 blocks per image — robust if the text/image block layout
+        # ever changes.
+        injected = sum(1 for block in pending if block.get("type") == "image_url")
+        if injected >= _MAX_INLINE_IMAGES:
+            return f"[kb_image_view] 本轮最多查看 {_MAX_INLINE_IMAGES} 张图片。"
         path = str(info.get("image_abspath") or "")
         if not os.path.isfile(path):
             return "[kb_image_view] 图片文件不存在，无法注入原图；可使用已返回的图片描述回答。"

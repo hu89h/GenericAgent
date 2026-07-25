@@ -212,15 +212,11 @@ def _qa_prompt(question: str, title: str, context: Dict[str, object]) -> str:
     )
 
 
-def answer_image_question(
-    path: str,
-    *,
-    question: str,
-    title: str = "",
-    context: Dict[str, object] | None = None,
-) -> Dict[str, object]:
-    if not runtime_image_qa_on():
-        raise RuntimeError("GA_KB_RUNTIME_IMAGE_QA 未开启，无法实时图片问答")
+def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
+    """Shared single-image vision call: POST one text+image message, parse the
+    JSON reply, and stamp model/prompt_version/usage/request_id.  Callers own
+    the enablement gate and the prompt; this is the common transport body that
+    analyze_image and answer_image_question previously duplicated."""
     cfg = _config()
     if not (cfg["api_key"] and cfg["base_url"] and cfg["model"]):
         raise RuntimeError("mykey.py 需要配置支持视觉输入的模型（kb_vision_config 或 native_oai_*）")
@@ -230,7 +226,7 @@ def answer_image_question(
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": _qa_prompt(question, title, context or {})},
+                    {"type": "text", "text": prompt_text},
                     {"type": "image_url", "image_url": {"url": _data_url(path)}},
                 ],
             }
@@ -250,6 +246,18 @@ def answer_image_question(
     if body.get("id"):
         result["_request_id"] = body.get("id")
     return result
+
+
+def answer_image_question(
+    path: str,
+    *,
+    question: str,
+    title: str = "",
+    context: Dict[str, object] | None = None,
+) -> Dict[str, object]:
+    if not runtime_image_qa_on():
+        raise RuntimeError("GA_KB_RUNTIME_IMAGE_QA 未开启，无法实时图片问答")
+    return _vision_chat(path, _qa_prompt(question, title, context or {}))
 
 
 def analyze_image(
@@ -262,32 +270,4 @@ def analyze_image(
 ) -> Dict[str, object]:
     if not enabled():
         return {}
-    cfg = _config()
-    if not (cfg["api_key"] and cfg["base_url"] and cfg["model"]):
-        raise RuntimeError("mykey.py 需要配置支持视觉输入的模型（kb_vision_config 或 native_oai_*）")
-    body = provider_http.chat_completions(
-        model=cfg["model"],
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": _prompt(focus, title, near_text, ref_candidates or [])},
-                    {"type": "image_url", "image_url": {"url": _data_url(path)}},
-                ],
-            }
-        ],
-        base=cfg["base_url"],
-        key=cfg["api_key"],
-        timeout=cfg["timeout"],
-        retries=cfg["retries"],
-        extra={"temperature": 0},
-    )
-    content = body["choices"][0]["message"]["content"]
-    result = _extract_json(content)
-    result["model"] = cfg["model"]
-    result["prompt_version"] = prompt_version()
-    if isinstance(body.get("usage"), dict):
-        result["_usage"] = body["usage"]
-    if body.get("id"):
-        result["_request_id"] = body.get("id")
-    return result
+    return _vision_chat(path, _prompt(focus, title, near_text, ref_candidates or []))
