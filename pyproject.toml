@@ -15,7 +15,6 @@ dependencies = [
     "simple-websocket-server>=0.4",
     "aiohttp>=3.9",
     "psutil>=5.9",
-    "docling-slim[format-markdown,feat-chunking]==2.115.0",
     "zvec>=0.6,<0.7",
     "pypdf>=5.0",
 ]

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import re
-from functools import lru_cache
 
 
 INDEX_SUBDIR = ".kb_index"
@@ -57,9 +56,9 @@ def chunking_meta():
     # target (e.g. "768" vs "1024,768") share the index instead of forcing a
     # spurious rebuild.
     return {
-        "chunker": "docling_hierarchical_packer",
+        "chunker": "markdown_sections_packer",
         "markdown_chunk_target_size": max(128, int(MD_CHUNK_SIZES[-1])),
-        "markdown_parser": "docling.document_converter.DocumentConverter+HierarchicalChunker",
+        "markdown_parser": "ga_markdown_sections_v1",
         "markdown_packer": "ga_structural_blocks_v2_image_occurrences",
     }
 
@@ -68,9 +67,9 @@ def read_textfile(path):
     # latin-1 is deliberately absent: with errors="strict" it decodes any byte
     # sequence without raising, so it would mask real encoding problems as
     # mojibake and make the controlled utf-8/replace fallback below dead code.
-    # KB sources are UTF-8 markdown from the docling/MinerU pipeline; gb18030
-    # covers legacy Chinese files. Anything else falls to utf-8/replace, which
-    # surfaces corruption visibly (U+FFFD) instead of silently.
+    # KB sources are UTF-8 markdown from the document-conversion pipeline;
+    # gb18030 covers legacy Chinese files. Anything else falls to utf-8/replace,
+    # which surfaces corruption visibly (U+FFFD) instead of silently.
     for encoding in ("utf-8", "gb18030"):
         try:
             with open(path, encoding=encoding, errors="strict") as handle:
@@ -169,12 +168,12 @@ def _marker(kind, value, replacements, marker_occurrences=None, occurrence_ids=N
 
 
 def _protect_markdown_blocks(text, image_index=None):
-    """Hide Markdown constructs Docling normalizes before chunking.
+    """Collapse tables/code/lists/images into single-line markers before chunking.
 
-    Docling is used for heading hierarchy, but its Markdown importer converts
-    tables and image references into semantic document items.  The KB must keep
-    the original Markdown because the image index resolves those paths later
-    and the source reader displays the original table/code formatting.
+    Section splitting works on headings alone, so multi-line constructs are
+    hidden behind markers to keep them off the heading scan and intact as one
+    unit.  The originals are restored after packing: the image index resolves
+    those paths later and the source reader displays the original formatting.
     """
     lines = text.splitlines()
     replacements = {}
@@ -296,47 +295,6 @@ def _restore_markdown_blocks(text, replacements):
     )
 
 
-@lru_cache(maxsize=1)
-def _docling_components():
-    """Create the lightweight Docling converter/chunker once per process."""
-    try:
-        from docling.chunking import HierarchicalChunker
-        from docling.datamodel.base_models import InputFormat
-        from docling.document_converter import DocumentConverter
-    except ImportError as exc:  # pragma: no cover - packaging error
-        raise RuntimeError(
-            "知识库 Markdown 分块需要 docling-slim[format-markdown,feat-chunking]"
-        ) from exc
-    return (
-        DocumentConverter(allowed_formats=[InputFormat.MD]),
-        InputFormat.MD,
-        HierarchicalChunker(),
-    )
-
-
-def _header_path(headings):
-    values = []
-    for heading in headings or []:
-        value = re.sub(r"\s+", " ", str(heading or "")).strip()
-        if value:
-            values.append(value)
-    return "/" + "/".join(values) + "/" if values else "/"
-
-
-def _docling_blocks(text, image_index=None):
-    protected, replacements, marker_occurrences = _protect_markdown_blocks(text, image_index)
-    converter, input_format, chunker = _docling_components()
-    converted = converter.convert_string(protected, input_format)
-    blocks = []
-    for chunk in chunker.chunk(converted.document):
-        body = str(getattr(chunk, "text", "") or "").strip()
-        if not body:
-            continue
-        meta = getattr(chunk, "meta", None)
-        blocks.append((_header_path(getattr(meta, "headings", None)), body))
-    return blocks, replacements, marker_occurrences
-
-
 def _best_split_position(text, target):
     limit = min(len(text), target)
     for separator in ("\n\n", "\n", "。", "！", "？", ". ", "；", ";", " "):
@@ -402,7 +360,7 @@ def _split_structural_block(body, target_size, replacements):
     return _split_plain_block(body, target_size)
 
 
-def _pack_docling_blocks(blocks, replacements, target_size, marker_occurrences=None):
+def _pack_blocks(blocks, replacements, target_size, marker_occurrences=None):
     records = []
     current_header = None
     current_body = ""
@@ -461,11 +419,6 @@ def _pack_docling_blocks(blocks, replacements, target_size, marker_occurrences=N
     return records
 
 
-def _manual_markdown_blocks(text):
-    """Small structural fallback for malformed Markdown, without old parents."""
-    return _markdown_sections(text)
-
-
 def chunk_document_records(text, *, ext="", file_name="", image_index=None):
     ext = (ext or "").lower().lstrip(".")
     if ext not in {"md", "markdown"}:
@@ -474,23 +427,12 @@ def chunk_document_records(text, *, ext="", file_name="", image_index=None):
     if not text:
         return []
     target_size = max(128, int(MD_CHUNK_SIZES[-1]))
-    marker_occurrences = {}
-    try:
-        blocks, replacements, marker_occurrences = _docling_blocks(text, image_index)
-    except RuntimeError as error:
-        if "docling-slim" in str(error):
-            raise
-        protected, replacements, marker_occurrences = _protect_markdown_blocks(text, image_index)
-        blocks = _manual_markdown_blocks(protected)
-    except Exception:
-        # This is only a malformed-Markdown fallback.  Valid documents always
-        # use Docling; the fallback has no parent/leaf compatibility behavior.
-        protected, replacements, marker_occurrences = _protect_markdown_blocks(text, image_index)
-        blocks = _manual_markdown_blocks(protected)
-    if not blocks:
-        protected, replacements, marker_occurrences = _protect_markdown_blocks(text, image_index)
-        blocks = [("/", protected)]
-    return _pack_docling_blocks(blocks, replacements, target_size, marker_occurrences)
+    # Markers hide multi-line constructs so the heading scan sees only headings
+    # and single-line marker rows; _markdown_sections then splits on headings
+    # and always returns a non-empty result for non-empty text.
+    protected, replacements, marker_occurrences = _protect_markdown_blocks(text, image_index)
+    blocks = _markdown_sections(protected)
+    return _pack_blocks(blocks, replacements, target_size, marker_occurrences)
 
 
 def chunk_document_text(text, *, ext="", file_name=""):
