@@ -108,6 +108,7 @@ class KnowledgeBaseRetriever:
         imported_document_entries: Callable[[str], list[dict]] | None = None,
         query_factor: int = 4,
         vector_weight: float = 1.2,
+        sparse_weight: float = 1.0,
         snippet_width: int = 220,
         output_fields: list[str] | None = None,
     ) -> None:
@@ -130,6 +131,7 @@ class KnowledgeBaseRetriever:
         self._imported_document_entries = imported_document_entries or (lambda _path: [])
         self._query_factor = max(1, int(query_factor))
         self._vector_weight = float(vector_weight)
+        self._sparse_weight = float(sparse_weight)
         self._snippet_width = max(1, int(snippet_width))
         self._output_fields = list(output_fields or _DEFAULT_OUTPUT_FIELDS)
         self._asset_catalogs: dict[str, tuple[tuple[int, int], _AssetCatalog]] = {}
@@ -600,7 +602,7 @@ class KnowledgeBaseRetriever:
                         kb, query, top_k, snippet_chars,
                         file_name=file_name, title=title, query_vector=sparse_vector,
                     ),
-                    1.0,
+                    self._sparse_weight,
                 )
         results = list(by_key.values())
         for result in results:

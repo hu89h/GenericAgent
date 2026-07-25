@@ -13,7 +13,7 @@ import os
 import re
 import threading
 import time
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict
@@ -91,6 +91,11 @@ class DocumentImageIndex:
         self._body_ref_candidates: list[str] = []
         self.occurrences: list[ImageOccurrence] = []
         self._by_start: dict[int, int] = {}
+        # Sorted spans for binary-search interval queries (see
+        # occurrence_ids_between).  Filled by _build once occurrences exist.
+        self._occ_starts: list[int] = []
+        self._occ_ends: list[int] = []
+        self._occ_monotone_ends = True
         self.related_index: dict[str, Any] = {}
         self._prepare_context()
         self._build()
@@ -139,11 +144,26 @@ class DocumentImageIndex:
             })
 
     def occurrence_ids_between(self, start: int, end: int) -> list[int]:
-        return [
-            occurrence.occurrence_id
-            for occurrence in self.occurrences
-            if occurrence.start < end and occurrence.end > start
-        ]
+        """Occurrence ids whose [start, end) span overlaps [start, end).
+
+        Occurrences are non-overlapping and sorted by both start and end
+        (image markers cannot nest), so the overlapping set is a contiguous
+        index range found with two binary searches instead of an O(n) scan
+        per call — this runs 4× per packed block during ingestion.
+        """
+        if not self._occ_monotone_ends:
+            return [
+                occurrence.occurrence_id
+                for occurrence in self.occurrences
+                if occurrence.start < end and occurrence.end > start
+            ]
+        # start < end  → index < bisect_left(starts, end)
+        hi = bisect_left(self._occ_starts, end)
+        # end > start  → index >= bisect_right(ends, start)
+        lo = bisect_right(self._occ_ends, start)
+        if lo >= hi:
+            return []
+        return [self.occurrences[i].occurrence_id for i in range(lo, hi)]
 
     def occurrence_id_at(self, position: int) -> int | None:
         occurrence_id = self._by_start.get(position)
@@ -249,6 +269,7 @@ class DocumentImageIndex:
             self.occurrences.append(occurrence)
             self._by_start[occurrence.start] = occurrence_id
 
+        self._index_occurrence_spans()
         self.related_index = self._build_related_index()
         for occurrence in self.occurrences:
             if occurrence.ref_key:
@@ -261,6 +282,23 @@ class DocumentImageIndex:
                 )
             occurrence.related_text = related_text
             occurrence.related_text_refs = related_refs
+
+    def _index_occurrence_spans(self) -> None:
+        """Cache parallel start/end arrays for binary-search interval queries.
+
+        ``_MD_IMAGE_RE.finditer`` yields non-overlapping matches in document
+        order, so ``occurrences`` is already sorted by both ``start`` and
+        ``end``.  We verify monotone ends and fall back to a linear scan if
+        that assumption is ever violated (defensive; keeps correctness).
+        """
+        self._occ_starts = [occ.start for occ in self.occurrences]
+        self._occ_ends = [occ.end for occ in self.occurrences]
+        monotone = all(
+            self._occ_starts[i] <= self._occ_starts[i + 1]
+            and self._occ_ends[i] <= self._occ_ends[i + 1]
+            for i in range(len(self.occurrences) - 1)
+        )
+        self._occ_monotone_ends = monotone
 
     def assign_chunks(self, chunks: list[dict]) -> None:
         for chunk_index, chunk in enumerate(chunks):

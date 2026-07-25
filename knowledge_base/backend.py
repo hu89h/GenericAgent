@@ -110,7 +110,7 @@ ZVEC_DIM = int(os.environ.get("GA_KB_ZVEC_DIM", os.environ.get("GA_KB_EMBED_DIM"
 ZVEC_BATCH = int(os.environ.get("GA_KB_ZVEC_BATCH", "256"))
 ZVEC_QUERY_FACTOR = max(1, int(os.environ.get("GA_KB_ZVEC_QUERY_FACTOR", "4")))
 ZVEC_VECTOR_WEIGHT = float(os.environ.get("GA_KB_VECTOR_WEIGHT", "1.2"))
-ZVEC_SPARSE_WEIGHT = 1.0
+ZVEC_SPARSE_WEIGHT = float(os.environ.get("GA_KB_SPARSE_WEIGHT", "1.0"))
 IMAGE_ANALYSIS_CONCURRENCY = max(1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY", "1")))
 
 _local = threading.local()
@@ -950,6 +950,7 @@ def _retrieval():
             imported_document_entries=_imported_document_entries,
             query_factor=ZVEC_QUERY_FACTOR,
             vector_weight=ZVEC_VECTOR_WEIGHT,
+            sparse_weight=ZVEC_SPARSE_WEIGHT,
             snippet_width=_SNIPPET,
             output_fields=_ZVEC_OUTPUT_FIELDS,
         )

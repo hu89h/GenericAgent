@@ -394,12 +394,18 @@ def _pack_docling_blocks(blocks, replacements, target_size, marker_occurrences=N
     records = []
     current_header = None
     current_body = ""
+    # Restored length of current_body, tracked incrementally.  Markers never
+    # span the "\n\n" join between pieces (see _split_structural_block), so
+    # restoration distributes over concatenation and we avoid re-restoring the
+    # whole accumulated body on every append (was O(n²) per structural block).
+    current_restored = 0
 
     def flush():
-        nonlocal current_body, current_header
+        nonlocal current_body, current_header, current_restored
         if not current_body.strip():
             current_body = ""
             current_header = None
+            current_restored = 0
             return
         raw_body = current_body.strip()
         occurrence_ids = []
@@ -414,24 +420,31 @@ def _pack_docling_blocks(blocks, replacements, target_size, marker_occurrences=N
         ))
         current_body = ""
         current_header = None
+        current_restored = 0
 
     for header_path, body in blocks:
         prefix = _chunk_prefix(header_path)
-        effective_target = max(128, target_size - len(prefix))
+        prefix_len = len(prefix)
+        effective_target = max(128, target_size - prefix_len)
         for piece in _split_structural_block(body, effective_target, replacements):
+            piece_restored = len(_restore_markdown_blocks(piece, replacements))
             if current_header is not None and header_path != current_header:
                 flush()
             if not current_body:
                 current_header = header_path
                 current_body = piece
+                current_restored = piece_restored
                 continue
-            candidate = current_body + "\n\n" + piece
-            if len(prefix + _restore_markdown_blocks(candidate, replacements)) > target_size:
+            # restored length of (current_body + "\n\n" + piece)
+            candidate_restored = current_restored + 2 + piece_restored
+            if prefix_len + candidate_restored > target_size:
                 flush()
                 current_header = header_path
                 current_body = piece
+                current_restored = piece_restored
             else:
-                current_body = candidate
+                current_body = current_body + "\n\n" + piece
+                current_restored = candidate_restored
     flush()
     return records
 
