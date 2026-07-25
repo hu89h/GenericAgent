@@ -529,7 +529,6 @@ def import_knowledge_base(
         upsert_kb(
             kid,
             path=os.path.relpath(processed, ROOT).replace(os.sep, "/"),
-            preload=True,
             name=(name or source_root.name),
             source_path=str(source_root),
         )

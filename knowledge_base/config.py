@@ -143,7 +143,6 @@ def load_config(path=CONFIG_PATH):
             "path": absolute_path,
             "raw_path": raw_path,
             "source_path": str(config.get("source_path") or ""),
-            "preload": bool(config.get("preload", False)),
             "exists": os.path.isdir(absolute_path),
         })
     return result
@@ -180,12 +179,11 @@ def _dump_raw_config(data, path=CONFIG_PATH):
                 lines.append(f"    source_path: {str(config.get('source_path')).replace(os.sep, '/')}")
             if config.get("name"):
                 lines.append(f"    name: {config.get('name')}")
-            lines.append(f"    preload: {'true' if config.get('preload') else 'false'}")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
 
 
-def upsert_kb(kb_id, path=None, preload=None, name=None, old_id=None,
+def upsert_kb(kb_id, path=None, name=None, old_id=None,
               config_path=CONFIG_PATH, source_path=None):
     """Create/update a registry entry and return normalized config rows."""
     kb_id = str(kb_id or "").strip()
@@ -203,8 +201,6 @@ def upsert_kb(kb_id, path=None, preload=None, name=None, old_id=None,
             entry["source_path"] = source
         else:
             entry.pop("source_path", None)
-    if preload is not None:
-        entry["preload"] = bool(preload)
     if name is not None:
         display_name = str(name).strip()
         if display_name and display_name != kb_id:

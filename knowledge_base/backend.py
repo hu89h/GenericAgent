@@ -7,8 +7,7 @@
 - GA 运行时检索和读取依赖 Zvec，不依赖外部项目的 domain_sop/分词链；
 - 每个知识库的 zvec 集合与 zvec_meta.json 放在该知识库路径下的 `.kb_index/`；
 - 增量构建：源文件 mtime+size 指纹未变则跳过；
-- search() 返回「命中定位 + 命中内容」，read_chunk() 精确取单个 chunk 原文用于补充核对；
-- preload=true 的库可生成「知识库目录概览」注入上下文。
+- search() 返回「命中定位 + 命中内容」，read_chunk() 精确取单个 chunk 原文用于补充核对。
 
 CLI：
     python -m knowledge_base.backend --build           # 增量构建所有配置库
@@ -752,7 +751,7 @@ def kb_status(kb):
     index_meta = zm
     info = {"id": kb["id"], "name": kb["name"], "path": kb["path"],
             "raw_path": kb.get("raw_path", kb["path"]),
-            "preload": kb["preload"], "exists": kb["exists"],
+            "exists": kb["exists"],
             "ready": bool(index_meta and zvec_ready), "n_docs": 0, "n_chunks": 0,
             "image_assets": 0,
             "built_at": index_meta.get("built_at") if index_meta else None, "up_to_date": None,
@@ -830,48 +829,6 @@ def status():
         },
         "configured": bool(kbs),
     }
-
-
-def _folder_breakdown(kb, limit=8):
-    """按顶层目录统计文档数（用于 preload 概览）。"""
-    counts = {}
-    for rel, _ap, _st in _scan(kb["path"]):
-        rel = rel.replace("\\", "/")
-        folder = rel.split("/", 1)[0] if "/" in rel else "(根目录)"
-        counts[folder] = counts.get(folder, 0) + 1
-    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
-
-
-def preload_context():
-    """为 preload=true 的知识库生成「知识库目录概览」，在开启会话时注入上下文。"""
-    kbs = [kb for kb in load_config() if kb.get("preload")]
-    ready = [kb for kb in kbs if os.path.isdir(_zvec_path(kb["path"]))]
-    if not kbs:
-        return ""
-    lines = ["[本地知识库已加载]（preload）"]
-    if not ready:
-        if _build_state_snapshot()["running"]:
-            lines.append("索引正在后台构建中，稍候即可检索。")
-        else:
-            lines.append("索引尚未就绪（可在客户端「知识库」重建，或运行 python -m knowledge_base.backend --build）。")
-    total_docs = 0
-    for kb in ready:
-        m = _zvec_meta(kb["path"])
-        nd = m.get("stats", {}).get("n_docs", 0)
-        total_docs += nd
-        fb = _folder_breakdown(kb)
-        fb_s = "；".join(f"{name}({cnt})" for name, cnt in fb)
-        lines.append(f"- {kb['id']}：{kb['path']}（{nd} 篇文档）" + (f"｜主要目录：{fb_s}" if fb_s else ""))
-    if ready:
-        lines.append(f"合计约 {total_docs} 篇文档。回答前服务器会自动注入「[本地知识库命中]」检索结果；")
-        lines.append("如需进一步核对原文，可在 code_run 中：")
-        lines.append("  from knowledge_base import backend")
-        lines.append('  backend.search("关键词", top_k=5)  # 检索；backend.read_chunk(data_id, chunk_index)  # 读原文核对')
-    return "\n".join(lines)
-
-
-def is_preload_enabled():
-    return any(kb.get("preload") for kb in load_config())
 
 
 def _imported_document_titles(kb_path):
@@ -1126,12 +1083,11 @@ def main(argv=None):
     p.add_argument("--add", nargs=2, metavar=("ID", "PATH"), help="新增/更新知识库：--add 库ID 文件夹路径")
     p.add_argument("--rm", metavar="ID", help="移除知识库配置（不删除原始文件）")
     p.add_argument("--name", help="配合 --add：设置展示名")
-    p.add_argument("--preload", action="store_true", help="配合 --add：开启会话预加载")
     args = p.parse_args(argv)
 
     if args.add:
         kid, path = args.add
-        kbs = upsert_kb(kid, path=path, preload=args.preload, name=args.name)
+        kbs = upsert_kb(kid, path=path, name=args.name)
         print(json.dumps({"ok": True, "knowledge_bases": [k["id"] for k in kbs]}, ensure_ascii=False))
         print("提示：运行 `python -m knowledge_base.backend --build` 构建索引（或重启 Web 服务自动构建）。")
         return 0
