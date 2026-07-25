@@ -52,7 +52,21 @@ _FIGURE_FOCUS_RE = re.compile(
 
 
 def enabled() -> bool:
-    return provider_http.env_bool("GA_KB_IMAGE_ANALYSIS")
+    """Whether build-time image analysis is on.
+
+    Precedence: an explicit ``GA_KB_IMAGE_ANALYSIS`` env var wins (so a one-off
+    build can force it on/off), otherwise the durable
+    ``kb_vision_config['enabled']`` flag in mykey.py decides, defaulting to
+    off when neither is set.
+    """
+    env_val = os.environ.get("GA_KB_IMAGE_ANALYSIS")
+    if env_val is not None and env_val.strip() != "":
+        return env_val.strip().lower() in ("1", "true", "yes", "on")
+    try:
+        cfg_enabled = provider_settings.vision_config().get("enabled")
+    except Exception:
+        cfg_enabled = None
+    return bool(cfg_enabled)
 
 
 def build_analysis_meta() -> Dict[str, object]:

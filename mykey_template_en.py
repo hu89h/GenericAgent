@@ -35,6 +35,20 @@
 # Register a MinerU account to obtain an API key:
 # https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&source=minerU
 
+# ── Knowledge-base image understanding (vision model, optional) ──────────────
+# 'enabled': True turns on build-time image analysis: a vision model reads each
+# image and writes its caption/table/description into the index so retrieval can
+# match on it (off = images kept as placeholders only, not searchable text).
+# Leave apibase/apikey/model empty to reuse native_oai_config (that model must
+# accept image input); or point to a dedicated vision model. The env var
+# GA_KB_IMAGE_ANALYSIS, when explicitly set, takes precedence over this flag.
+# kb_vision_config = {
+#     'enabled': True,
+#     # 'apibase': 'https://.../v1',
+#     # 'apikey': '<your-vision-api-key>',
+#     # 'model': '<vision-capable-model>',
+# }
+
 
 # ── 1. NativeClaudeSession — Anthropic direct ────────────────────────────────
 #  Official Anthropic endpoint. apikey starting with 'sk-ant-' is auto-sent

@@ -54,6 +54,18 @@
 # 注册 MinerU 账号获取 API-Key：
 # https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&source=minerU
 
+# ── 知识库图片理解（视觉模型，可选）───────────────────────────────────────────
+# 'enabled': True 持久开启构建期图片分析：用视觉模型读图，把图注/表格/描述写进
+# 索引供检索命中（关闭则图片只保留占位，不进正文检索）。
+# apibase/apikey/model 留空时复用 native_oai_config（该模型需支持视觉输入）；
+# 也可单独指定视觉专用模型。环境变量 GA_KB_IMAGE_ANALYSIS 若显式设置则优先。
+# kb_vision_config = {
+#     'enabled': True,
+#     # 'apibase': 'https://.../v1',
+#     # 'apikey': '<your-vision-api-key>',
+#     # 'model': '<vision-capable-model>',
+# }
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  运行时参数调整：在 GA REPL 里输入
 #      /session.reasoning_effort=high
