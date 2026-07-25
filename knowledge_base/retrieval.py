@@ -742,32 +742,45 @@ class KnowledgeBaseRetriever:
         path = self._zvec_path(target["path"])
         if not os.path.isdir(path):
             return {"error": "[索引未就绪]"}
+        # Chunks are written contiguously as 0..n-1 (build.py enumerates them;
+        # image assets carry their own ::image:: data_id and never interleave),
+        # so probe in windows and stop at the first window that comes back short
+        # instead of always fetching `limit` (400) doc ids for a small document.
+        limit = max(1, int(limit))
+        window = min(64, limit)
+        chunks, title, file_name = [], "", ""
         try:
             col = self._zvec_conn(path)
-            n = max(1, int(limit))
-            ids = [self._zvec_doc_id(data_id, index) for index in range(n)]
-            got = col.fetch(
-                ids,
-                output_fields=["data_id", "chunk_index", "file_name", "title", "body"],
-                include_vector=False,
-            )
+            start = 0
+            while start < limit:
+                end = min(start + window, limit)
+                ids = [self._zvec_doc_id(data_id, index) for index in range(start, end)]
+                got = col.fetch(
+                    ids,
+                    output_fields=["data_id", "chunk_index", "file_name", "title", "body"],
+                    include_vector=False,
+                )
+                found = 0
+                for index in range(start, end):
+                    doc = got.get(self._zvec_doc_id(data_id, index)) if isinstance(got, dict) else None
+                    if not doc:
+                        continue
+                    found += 1
+                    fields = getattr(doc, "fields", None) or {}
+                    body = fields.get("body") or ""
+                    title = title or fields.get("title") or ""
+                    file_name = file_name or fields.get("file_name") or ""
+                    preview = re.sub(r"\s+", " ", body).strip()[:preview_chars]
+                    chunks.append({
+                        "chunk_index": int(fields.get("chunk_index") or index),
+                        "chars": len(body),
+                        "preview": preview,
+                    })
+                if found < len(ids):
+                    break
+                start = end
         except Exception as error:
             return {"error": f"[Zvec 读取失败] {error}"}
-        chunks, title, file_name = [], "", ""
-        for index in range(max(1, int(limit))):
-            doc = got.get(self._zvec_doc_id(data_id, index)) if isinstance(got, dict) else None
-            if not doc:
-                continue
-            fields = getattr(doc, "fields", None) or {}
-            body = fields.get("body") or ""
-            title = title or fields.get("title") or ""
-            file_name = file_name or fields.get("file_name") or ""
-            preview = re.sub(r"\s+", " ", body).strip()[:preview_chars]
-            chunks.append({
-                "chunk_index": int(fields.get("chunk_index") or index),
-                "chars": len(body),
-                "preview": preview,
-            })
         if not chunks:
             return {"error": f"[未找到] data_id={data_id} 无 chunk"}
         return {"title": title, "file_name": file_name, "n_chunks": len(chunks), "chunks": chunks}
