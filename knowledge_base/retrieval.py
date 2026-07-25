@@ -328,6 +328,7 @@ class KnowledgeBaseRetriever:
         vector_field: str,
         score_type: str,
         error_source: str,
+        query_vector,
     ) -> list[dict]:
         path = self._zvec_path(kb["path"])
         if not os.path.isdir(path):
@@ -339,10 +340,6 @@ class KnowledgeBaseRetriever:
         try:
             zvec = self._require_zvec()
             col = self._zvec_conn(path)
-            if vector_field == "sparse_embedding":
-                query_vector = self._embed_sparse_texts([query], text_type="query")[0]
-            else:
-                query_vector = self._embed_texts([query])[0]
             rows = col.query(
                 zvec.Query(vector_field, vector=query_vector),
                 topk=query_topk,
@@ -401,20 +398,22 @@ class KnowledgeBaseRetriever:
 
     def _search_one_zvec(
         self, kb: dict, query: str, top_k: int, snippet_chars: int,
-        *, file_name: str | None, title: str | None
+        *, file_name: str | None, title: str | None, query_vector
     ) -> list[dict]:
         return self._search_one_zvec_field(
             kb, query, top_k, snippet_chars, file_name=file_name, title=title,
             vector_field="embedding", score_type="zvec", error_source="dense",
+            query_vector=query_vector,
         )
 
     def _search_one_zvec_sparse(
         self, kb: dict, query: str, top_k: int, snippet_chars: int,
-        *, file_name: str | None, title: str | None
+        *, file_name: str | None, title: str | None, query_vector
     ) -> list[dict]:
         return self._search_one_zvec_field(
             kb, query, top_k, snippet_chars, file_name=file_name, title=title,
             vector_field="sparse_embedding", score_type="zvec_sparse", error_source="sparse",
+            query_vector=query_vector,
         )
 
     def _search_exact_image_refs(
@@ -539,6 +538,23 @@ class KnowledgeBaseRetriever:
                 if result.get("score_type") == "zvec_sparse" or item.get("score_type") not in ("zvec", "zvec_sparse"):
                     item.update(result)
 
+        # Embed the query once up front: the vector is identical across every
+        # knowledge base, so computing it inside the per-KB loop only multiplied
+        # cache reads (or network calls when the cache is disabled). A failure
+        # here is KB-independent, so it is recorded once and disables that whole
+        # channel rather than being reported per KB.
+        dense_vector = sparse_vector = None
+        if mode in ("rrf", "vector"):
+            try:
+                dense_vector = self._embed_texts([query])[0]
+            except Exception as error:
+                self._record_search_error({"id": ""}, "dense", error)
+        if mode in ("rrf", "sparse"):
+            try:
+                sparse_vector = self._embed_sparse_texts([query], text_type="query")[0]
+            except Exception as error:
+                self._record_search_error({"id": ""}, "sparse", error)
+
         for kb in self._load_config():
             if kb_id and kb["id"] != kb_id:
                 continue
@@ -555,19 +571,19 @@ class KnowledgeBaseRetriever:
             if not os.path.isdir(self._zvec_path(kb["path"])):
                 self._record_search_error(kb, "zvec", "Zvec index directory is missing")
                 continue
-            if mode in ("rrf", "vector"):
+            if mode in ("rrf", "vector") and dense_vector is not None:
                 add_hits(
                     self._search_one_zvec(
                         kb, query, top_k, snippet_chars,
-                        file_name=file_name, title=title,
+                        file_name=file_name, title=title, query_vector=dense_vector,
                     ),
                     self._vector_weight,
                 )
-            if mode in ("rrf", "sparse"):
+            if mode in ("rrf", "sparse") and sparse_vector is not None:
                 add_hits(
                     self._search_one_zvec_sparse(
                         kb, query, top_k, snippet_chars,
-                        file_name=file_name, title=title,
+                        file_name=file_name, title=title, query_vector=sparse_vector,
                     ),
                     1.0,
                 )
