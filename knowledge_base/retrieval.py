@@ -238,7 +238,8 @@ class KnowledgeBaseRetriever:
         for key in ("related_text", "related_text_refs", "near_text", "uncertain"):
             if key in asset:
                 hit[key] = asset.get(key)
-        return with_reference(hit, kind="image")
+        hit["kind"] = "image"
+        return hit
 
     @staticmethod
     def _doc_name_candidates(file_name: str | None = None, title: str | None = None) -> list[str]:
@@ -366,7 +367,9 @@ class KnowledgeBaseRetriever:
             data_id = fields.get("data_id") or ""
             chunk_index = int(fields.get("chunk_index") or 0)
             body = clean_public_text(fields.get("body") or "")
-            hit = with_reference({
+            # Reference fields are normalized once for the whole result set in
+            # search(); building this raw hit and enriching it is enough here.
+            hit = {
                 "kb_id": kb["id"],
                 "score": round(score, 6),
                 "score_type": score_type,
@@ -390,7 +393,7 @@ class KnowledgeBaseRetriever:
                 "header_path": fields.get("header_path") or "",
                 "snippet": self._snippet(body, query, snippet_chars),
                 "body": body,
-            }, kind="image" if fields.get("kind") == "image" else "document")
+            }
             out.append(self._enrich_hit_with_asset(kb, hit))
             if len(out) >= top_k:
                 break
@@ -467,9 +470,9 @@ class KnowledgeBaseRetriever:
         return out
 
     def _asset_hit(self, kb: dict, asset: dict, *, body: str, query: str, snippet_chars: int) -> dict:
-        """Convert an indexed image asset into the stable search-result contract."""
+        """Build the raw image-asset hit; reference fields are normalized once in search()."""
         rel = asset.get("file_name") or ""
-        return with_reference({
+        return {
             "kb_id": kb["id"],
             "score": 1.0,
             "score_type": "ref_exact",
@@ -503,7 +506,7 @@ class KnowledgeBaseRetriever:
             "source_ref": asset.get("source_ref", ""),
             "snippet": self._snippet(body, query, snippet_chars),
             "body": body,
-        }, kind="image")
+        }
 
     def search(
         self,
