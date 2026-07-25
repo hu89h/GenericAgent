@@ -13,7 +13,9 @@ import os
 import re
 import threading
 import time
+from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict
 from urllib.parse import unquote
 
@@ -24,7 +26,248 @@ _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"
 _REF_CANDIDATE_RE = re.compile(
     r"(?:图|表)\s*[0-9０-９]{1,3}(?:\s*[-－–—.．·]\s*[0-9０-９]{1,3}){0,3}"
 )
+_SOURCE_LINE_RE = re.compile(r"^(?:资料)?来源\b|^source\b", re.IGNORECASE)
 _MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+
+
+@dataclass(slots=True)
+class ImageOccurrence:
+    """One occurrence of an image reference inside one source document."""
+
+    occurrence_id: int
+    path: str
+    start: int
+    end: int
+    alt: str = ""
+    title: str = ""
+    section: str = ""
+    near_text: str = ""
+    ref_candidates: list[str] = field(default_factory=list)
+    ref_key: str = ""
+    related_text: str = ""
+    related_text_refs: list[dict] = field(default_factory=list)
+    chunk_index: int = -1
+
+
+@dataclass(slots=True)
+class ImageContent:
+    """Unique image content shared by all occurrences with the same hash."""
+
+    image_sha: str
+    image_path: str
+    image_abspath: str
+    focus: str
+    title: str
+    near_text: str
+    ref_candidates: list[str]
+    analysis_meta: dict[str, Any]
+    focus_rank: int = 0
+    contexts: list[str] = field(default_factory=list)
+
+
+class DocumentImageIndex:
+    """Precompute image context once for one Markdown document.
+
+    The index owns occurrence-level information only.  File hashes and VLM
+    results are added later by :class:`ImageAssetProcessor`, so parsing a
+    document never performs file IO or network work.
+    """
+
+    def __init__(self, processor: "ImageAssetProcessor", body: str) -> None:
+        self.body = str(body or "").replace("\x00", " ").replace("\r\n", "\n").replace("\r", "\n").strip()
+        self._processor = processor
+        self._lines = self.body.splitlines()
+        self._line_starts = []
+        offset = 0
+        for line in self._lines:
+            self._line_starts.append(offset)
+            offset += len(line) + 1
+        self._line_clean: list[str] = []
+        self._line_ref_candidates: list[list[str]] = []
+        self._line_has_image: list[bool] = []
+        self._line_is_source: list[bool] = []
+        self._line_headings: list[tuple[str, int]] = []
+        self._paragraphs: list[dict[str, Any]] = []
+        self._body_ref_candidates: list[str] = []
+        self.occurrences: list[ImageOccurrence] = []
+        self._by_start: dict[int, int] = {}
+        self.related_index: dict[str, Any] = {}
+        self._prepare_context()
+        self._build()
+
+    @classmethod
+    def build(cls, processor: "ImageAssetProcessor", body: str) -> "DocumentImageIndex":
+        return cls(processor, body)
+
+    def _line_index(self, position: int) -> int:
+        if not self._line_starts:
+            return 0
+        return max(0, min(
+            len(self._lines) - 1,
+            bisect_right(self._line_starts, max(0, position)) - 1,
+        ))
+
+    def _prepare_context(self) -> None:
+        """Cache line and paragraph metadata shared by every occurrence."""
+        self._body_ref_candidates = self._processor.extract_ref_candidates(self.body)
+        heading = ""
+        heading_line = -1
+        for line_index, line in enumerate(self._lines):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                heading = stripped.lstrip("#").strip()
+                heading_line = line_index
+            cleaned = self._processor._clean_caption_line(line)
+            self._line_clean.append(cleaned)
+            self._line_ref_candidates.append(
+                self._processor.extract_ref_candidates(cleaned)
+            )
+            self._line_has_image.append(bool(_MD_IMAGE_RE.search(line)))
+            self._line_is_source.append(bool(_SOURCE_LINE_RE.match(cleaned)))
+            self._line_headings.append((heading, heading_line))
+
+        for paragraph_index, (offset, paragraph) in enumerate(
+            self._processor.paragraphs_with_offsets(self.body)
+        ):
+            self._paragraphs.append({
+                "paragraph_index": paragraph_index,
+                "offset": offset,
+                "raw": paragraph,
+                "text": re.sub(r"\s+", " ", paragraph).strip(),
+                "has_image": bool(_MD_IMAGE_RE.search(paragraph)),
+                "ref_candidates": self._processor.extract_ref_candidates(paragraph),
+            })
+
+    def occurrence_ids_between(self, start: int, end: int) -> list[int]:
+        return [
+            occurrence.occurrence_id
+            for occurrence in self.occurrences
+            if occurrence.start < end and occurrence.end > start
+        ]
+
+    def occurrence_id_at(self, position: int) -> int | None:
+        occurrence_id = self._by_start.get(position)
+        return occurrence_id
+
+    def _caption(self, position: int, max_scan: int = 12) -> str:
+        line_index = self._line_index(position)
+        scanned = 0
+        for candidate_line in range(line_index + 1, len(self._lines)):
+            scanned += 1
+            if scanned > 6:
+                break
+            if self._line_has_image[candidate_line]:
+                break
+            value = self._line_clean[candidate_line]
+            if not value:
+                continue
+            if self._line_is_source[candidate_line]:
+                continue
+            if self._line_ref_candidates[candidate_line]:
+                return value
+
+        scanned = 0
+        for candidate_line in range(line_index - 1, max(-1, line_index - max_scan - 1), -1):
+            scanned += 1
+            value = self._line_clean[candidate_line]
+            if not value or self._line_is_source[candidate_line]:
+                continue
+            if self._line_ref_candidates[candidate_line]:
+                return value
+            if scanned >= max_scan:
+                break
+        return ""
+
+    def _heading(self, position: int) -> str:
+        line_index = self._line_index(position)
+        heading, heading_line = self._line_headings[line_index]
+        return heading if heading and line_index - heading_line <= 80 else ""
+
+    def _near_text(self, position: int, window: int = 300) -> str:
+        start = max(0, position - window)
+        end = min(len(self.body), position + window)
+        near = _MD_IMAGE_RE.sub(
+            lambda match: f"[图片:{(match.group(1) or 'image').strip()}]",
+            self.body[start:end],
+        )
+        return re.sub(r"\s+", " ", near).strip()
+
+    def _build_related_index(self) -> dict[str, Any]:
+        candidates = list(self._body_ref_candidates)
+        for occurrence in self.occurrences:
+            for value in (occurrence.title, occurrence.near_text):
+                for candidate in self._processor.extract_ref_candidates(value):
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+        mapping = {candidate: self._processor.local_ref_key(candidate) for candidate in candidates}
+        index: dict[str, Any] = {"__mapping": mapping}
+        for paragraph in self._paragraphs:
+            if paragraph["has_image"]:
+                continue
+            keys = []
+            for candidate in paragraph["ref_candidates"]:
+                key = mapping.get(candidate) or self._processor.local_ref_key(candidate)
+                if key and key not in keys:
+                    keys.append(key)
+            for key in keys:
+                if self._processor.is_caption_like(paragraph["raw"], key):
+                    continue
+                index.setdefault(key, []).append({
+                    "paragraph_index": paragraph["paragraph_index"],
+                    "offset": paragraph["offset"],
+                    "text": paragraph["text"],
+                })
+        return index
+
+    def _build(self) -> None:
+        refs = self._processor.scan_image_refs(self.body)
+        for occurrence_id, ref in enumerate(refs):
+            caption = self._caption(ref["start"])
+            alt = (ref.get("alt") or "").strip()
+            title = alt if alt and alt.lower() != "image" else (caption or alt or "image")
+            occurrence = ImageOccurrence(
+                occurrence_id=occurrence_id,
+                path=ref.get("path", ""),
+                start=int(ref.get("start", 0)),
+                end=int(ref.get("end", 0)),
+                alt=alt,
+                title=title,
+                section=self._heading(ref["start"]),
+                near_text=self._near_text(ref["start"]),
+            )
+            occurrence.ref_candidates = self._processor.collect_ref_candidates(
+                occurrence.title, caption, occurrence.near_text
+            )
+            occurrence.ref_key = next(
+                (
+                    self._processor.local_ref_key(candidate)
+                    for candidate in occurrence.ref_candidates
+                    if self._processor.local_ref_key(candidate)
+                ),
+                "",
+            )
+            self.occurrences.append(occurrence)
+            self._by_start[occurrence.start] = occurrence_id
+
+        self.related_index = self._build_related_index()
+        for occurrence in self.occurrences:
+            if occurrence.ref_key:
+                related_text, related_refs = self._processor.related_text_for_ref_key(
+                    occurrence.ref_key, self.related_index
+                )
+            else:
+                related_text, related_refs = self._processor.related_text_for_image(
+                    occurrence.title, self.related_index
+                )
+            occurrence.related_text = related_text
+            occurrence.related_text_refs = related_refs
+
+    def assign_chunks(self, chunks: list[dict]) -> None:
+        for chunk_index, chunk in enumerate(chunks):
+            occurrence_ids = chunk.pop("_image_occurrence_ids", []) or []
+            for occurrence_id in occurrence_ids:
+                if 0 <= int(occurrence_id) < len(self.occurrences):
+                    self.occurrences[int(occurrence_id)].chunk_index = chunk_index
 
 
 class ImageAssetProcessor:
@@ -36,7 +279,6 @@ class ImageAssetProcessor:
         image_cache_dir_fn: Callable[[str], str],
         image_assets_path_fn: Callable[[str], str],
         index_dir_fn: Callable[[str], str],
-        read_text_fn: Callable[[str], str],
         merge_usage_fn: Callable[[Dict[str, Any]], None],
         model_usage_delta_fn: Callable[[str, Dict[str, Any] | None, int], Dict[str, Any]],
         concurrency: int = 1,
@@ -46,10 +288,12 @@ class ImageAssetProcessor:
         self._image_cache_dir_fn = image_cache_dir_fn
         self._image_assets_path_fn = image_assets_path_fn
         self._index_dir_fn = index_dir_fn
-        self._read_text_fn = read_text_fn
         self._merge_usage_fn = merge_usage_fn
         self._model_usage_delta_fn = model_usage_delta_fn
         self._concurrency = max(1, int(concurrency))
+
+    def build_document_index(self, body: str) -> DocumentImageIndex:
+        return DocumentImageIndex.build(self, body)
 
     def scan_image_refs(self, body: str):
         out = []
@@ -73,58 +317,12 @@ class ImageAssetProcessor:
         out.sort(key=lambda row: (row["start"], row["end"]))
         return out
 
-    def context_heading(self, text: str, pos: int) -> str:
-        before = (text or "")[:max(0, pos)]
-        for line in reversed(before.splitlines()[-80:]):
-            value = line.strip()
-            if value.startswith("#"):
-                return value.lstrip("#").strip()
-        return ""
-
-    def image_title(self, alt: str, body: str, pos: int) -> str:
-        alt = (alt or "").strip()
-        if alt and alt.lower() != "image":
-            return alt
-        after = self.image_after_title_line(body, pos)
-        if after and re.search(r"(图|表)\s*\d|图[一二三四五六七八九十]|表[一二三四五六七八九十]", after):
-            return after
-        return alt or "image"
-
-    def near_text(self, body: str, pos: int, window: int = 300) -> str:
-        text = body or ""
-        start = max(0, pos - window)
-        end = min(len(text), pos + window)
-        near = _MD_IMAGE_RE.sub(lambda match: f"[图片:{(match.group(1) or 'image').strip()}]", text[start:end])
-        return re.sub(r"\s+", " ", near).strip()
-
     @staticmethod
-    def image_line_index(body: str, pos: int):
-        lines = (body or "").splitlines()
-        offset = 0
-        for index, line in enumerate(lines):
-            next_offset = offset + len(line) + 1
-            if offset <= pos < next_offset:
-                return index, lines
-            offset = next_offset
-        return 0, lines
-
-    def image_after_title_line(self, body: str, pos: int, max_scan: int = 6) -> str:
-        image_line, lines = self.image_line_index(body, pos)
-        scanned = 0
-        for line in lines[image_line + 1:]:
-            scanned += 1
-            if scanned > max_scan:
-                break
-            value = line.strip()
-            if not value:
-                continue
-            if _MD_IMAGE_RE.search(value):
-                return ""
-            return _MD_IMAGE_RE.sub("", value).strip().strip("*").strip()
-        return ""
-
-    def image_post_title_context(self, body: str, pos: int) -> str:
-        return self.image_after_title_line(body, pos)
+    def _clean_caption_line(value: str) -> str:
+        value = _MD_IMAGE_RE.sub("", str(value or ""))
+        value = re.sub(r"\\([~*_#])", r"\1", value)
+        value = re.sub(r"^[*_`]+|[*_`]+$", "", value.strip())
+        return re.sub(r"\s+", " ", value).strip()
 
     @staticmethod
     def to_half_width(value: str) -> str:
@@ -206,37 +404,6 @@ class ImageAssetProcessor:
         folded_key = re.sub(r"[-.]", "", compact_key)
         return bool(folded_key and folded_title.startswith(folded_key))
 
-    def build_related_index(self, text: str):
-        candidates = self.extract_ref_candidates(text)
-        for ref in self.scan_image_refs(text):
-            title = self.image_title(ref.get("alt", ""), text, ref["start"])
-            post_title = self.image_post_title_context(text, ref["start"])
-            for value in (title, post_title):
-                value = str(value or "").strip()
-                if value and value not in candidates:
-                    candidates.append(value)
-        if not candidates:
-            return {}
-        mapping = {candidate: self.local_ref_key(candidate) for candidate in candidates}
-        index = {"__mapping": mapping}
-        for paragraph_index, (offset, paragraph) in enumerate(self.paragraphs_with_offsets(text)):
-            if _MD_IMAGE_RE.search(paragraph):
-                continue
-            keys = []
-            for candidate in self.extract_ref_candidates(paragraph):
-                key = mapping.get(candidate) or self.local_ref_key(candidate)
-                if key and key not in keys:
-                    keys.append(key)
-            for key in keys:
-                if self.is_caption_like(paragraph, key):
-                    continue
-                index.setdefault(key, []).append({
-                    "paragraph_index": paragraph_index,
-                    "offset": offset,
-                    "text": re.sub(r"\s+", " ", paragraph).strip(),
-                })
-        return index
-
     def related_text_for_ref_key(self, ref_key: str, related_index, limit: int = 5, max_chars: int = 1800):
         key = self.local_ref_key(ref_key)
         if not key:
@@ -288,7 +455,6 @@ class ImageAssetProcessor:
             ("章节", "section"),
             ("图题", "title"),
             ("图表编号", "ref_key"),
-            ("图片路径", "image_path"),
             ("图片描述", "description"),
             ("表格", "table_markdown"),
             ("正文引用", "related_text"),
@@ -322,35 +488,90 @@ class ImageAssetProcessor:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         os.replace(temp, path)
 
-    def write_assets(self, kb_path: str, assets) -> None:
+    def write_assets(self, kb_path: str, assets, validation=None) -> None:
         os.makedirs(self._index_dir_fn(kb_path), exist_ok=True)
+        content_fields = ("description", "table_markdown", "uncertain", "analysis_error")
+        contents = []
+        content_by_id = {}
+        occurrences = []
+        for raw_asset in assets or []:
+            asset = dict(raw_asset or {})
+            image_id = str(asset.get("image_id") or "")
+            if image_id and image_id not in content_by_id:
+                content = {"image_id": image_id}
+                for key in content_fields:
+                    content[key] = asset.get(key, "" if key != "uncertain" else [])
+                content_by_id[image_id] = content
+                contents.append(content)
+            for key in content_fields:
+                asset.pop(key, None)
+            occurrences.append(asset)
         payload = {
-            "schema_version": 5,
+            "schema_version": 6,
             "built_at": int(time.time()),
             "analysis": self._image_meta_fn(),
-            "n_assets": len(assets),
-            "assets": assets,
+            "n_assets": len(occurrences),
+            "n_contents": len(contents),
+            "validation": validation if isinstance(validation, dict) else {},
+            "contents": contents,
+            "assets": occurrences,
         }
-        with open(self._image_assets_path_fn(kb_path), "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        path = self._image_assets_path_fn(kb_path)
+        temp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
+        try:
+            with open(temp, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+            os.replace(temp, path)
+        finally:
+            try:
+                os.remove(temp)
+            except OSError:
+                pass
 
     def load_assets(self, kb_path: str):
+        path = self._image_assets_path_fn(kb_path)
         try:
-            with open(self._image_assets_path_fn(kb_path), encoding="utf-8") as handle:
+            with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
             assets = payload.get("assets") if isinstance(payload, dict) else None
-            return assets if isinstance(assets, list) else []
-        except Exception:
+            if not isinstance(assets, list):
+                raise RuntimeError(f"图片资产文件格式无效：{path}")
+            contents = payload.get("contents") if isinstance(payload, dict) else None
+            if not isinstance(contents, list):
+                return assets
+            content_by_id = {
+                str(content.get("image_id") or ""): content
+                for content in contents
+                if isinstance(content, dict) and content.get("image_id")
+            }
+            expanded = []
+            for asset in assets:
+                item = dict(asset or {})
+                content = content_by_id.get(str(item.get("image_id") or ""))
+                if content:
+                    for key in ("description", "table_markdown", "uncertain", "analysis_error"):
+                        item[key] = content.get(key, "" if key != "uncertain" else [])
+                expanded.append(item)
+            return expanded
+        except FileNotFoundError:
             return []
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"读取图片资产失败：{path}: {error}") from error
 
-    def image_source_fingerprint(self, kb_path: str, scanned):
+    def image_source_fingerprint(self, kb_path: str, scanned, image_indexes=None):
+        if image_indexes is None:
+            raise ValueError("image source fingerprint requires prebuilt document image indexes")
         fingerprint = {}
         for rel, ap, _mt, _size in scanned:
             if os.path.splitext(rel)[1].lower() not in (".md", ".markdown"):
                 continue
-            text = self._read_text_fn(ap)
-            for ref in self.scan_image_refs(text):
-                image_rel = os.path.normpath(os.path.join(os.path.dirname(rel), ref["path"])).replace(os.sep, "/")
+            image_index = image_indexes.get(rel)
+            if image_index is None:
+                continue
+            for occurrence in image_index.occurrences:
+                image_rel = os.path.normpath(
+                    os.path.join(os.path.dirname(rel), occurrence.path)
+                ).replace(os.sep, "/")
                 image_abs = os.path.realpath(os.path.join(kb_path, image_rel))
                 root = os.path.realpath(kb_path)
                 if not (image_abs == root or image_abs.startswith(root + os.sep)) or not os.path.isfile(image_abs):
@@ -370,88 +591,145 @@ class ImageAssetProcessor:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def image_records_for_chunk(
-        self, kb, rel, ap, data_id, chunk_index, body, title, log,
-        image_jobs=None, related_index=None,
+    @staticmethod
+    def _display_label(ref_key: str, caption: str, title: str) -> str:
+        caption = str(caption or "").strip()
+        if caption:
+            return caption
+        ref_key = str(ref_key or "").strip()
+        if ref_key:
+            return ref_key
+        return str(title or "图片").strip() or "图片"
+
+    def image_records_for_document(
+        self, kb, rel, data_id, body, title, log,
+        image_jobs=None, image_index=None,
     ):
+        """Build one canonical asset record for every image reference in a document.
+
+        ``image_index`` is built once from the complete Markdown document.  The
+        builder passes the same index to chunking and asset creation so context
+        and chunk ownership cannot drift apart.
+        """
         if os.path.splitext(rel)[1].lower() not in (".md", ".markdown"):
-            return []
-        refs = self.scan_image_refs(body)
-        if not refs:
-            return []
+            return {"assets": [], "missing": [], "referenced": 0}
+        image_index = image_index or self.build_document_index(body)
+        occurrences = image_index.occurrences
+        if not occurrences:
+            return {"assets": [], "missing": [], "referenced": 0}
         try:
             client = self._image_client_fn()
         except Exception as exc:
             client = None
             log(f"  [warn] 图片模块不可用，仅建立基础图片资产：{exc}")
         assets = []
+        missing = []
         kb_root = os.path.realpath(kb["path"])
         analysis_meta = self._image_meta_fn()
-        for seq, ref in enumerate(refs):
-            image_rel = os.path.normpath(os.path.join(os.path.dirname(rel), ref["path"])).replace(os.sep, "/")
+        analysis_enabled = client is not None and getattr(client, "enabled", lambda: False)()
+        local_jobs = image_jobs if image_jobs is not None else {}
+        for occurrence in occurrences:
+            image_rel = os.path.normpath(
+                os.path.join(os.path.dirname(rel), occurrence.path)
+            ).replace(os.sep, "/")
             image_abs = os.path.realpath(os.path.join(kb["path"], image_rel))
             if not (image_abs == kb_root or image_abs.startswith(kb_root + os.sep)) or not os.path.isfile(image_abs):
+                missing.append({
+                    "path": image_rel,
+                    "alt_text": occurrence.alt,
+                    "caption": occurrence.title,
+                })
+                log(f"  [warn] 图片引用未找到：{rel} -> {image_rel}")
                 continue
             try:
                 image_sha = self._sha256_file(image_abs)
             except Exception:
-                image_sha = hashlib.sha1(f"{rel}:{chunk_index}:{ref['path']}:{seq}".encode("utf-8")).hexdigest()
-            image_title = self.image_title(ref.get("alt", ""), body, ref["start"])
-            post_title_context = self.image_post_title_context(body, ref["start"])
-            near = self.near_text(body, ref["start"])
-            section = self.context_heading(body, ref["start"])
-            ref_candidates = self.collect_ref_candidates(image_title, post_title_context, near)
-            focus = client.understanding_focus(image_title, near, ref_candidates) if client is not None else "general"
-            ref_key = next((self.local_ref_key(candidate) for candidate in ref_candidates if self.local_ref_key(candidate)), "")
-            if ref_key:
-                related_text, related_refs = self.related_text_for_ref_key(ref_key, related_index or {})
-            else:
-                related_text, related_refs = self.related_text_for_image(image_title, related_index or {})
-            analysis = {}
-            if client is not None and getattr(client, "enabled", lambda: False)():
-                job = {
-                    "image_sha": image_sha,
-                    "image_path": image_rel,
-                    "image_abspath": image_abs,
-                    "focus": focus,
-                    "title": image_title,
-                    "near_text": near,
-                    "ref_candidates": ref_candidates,
-                    "analysis_meta": analysis_meta,
-                }
-                if image_jobs is not None:
-                    image_jobs.setdefault(image_sha, job)
+                image_sha = hashlib.sha1(
+                    f"{rel}:{occurrence.occurrence_id}:{occurrence.path}".encode("utf-8")
+                ).hexdigest()
+            focus = (
+                client.understanding_focus(
+                    occurrence.title,
+                    occurrence.near_text,
+                    occurrence.ref_candidates,
+                )
+                if client is not None
+                else "general"
+            )
+            if analysis_enabled:
+                job = ImageContent(
+                    image_sha=image_sha,
+                    image_path=image_rel,
+                    image_abspath=image_abs,
+                    focus=focus,
+                    title=occurrence.title,
+                    near_text=occurrence.near_text,
+                    ref_candidates=list(occurrence.ref_candidates),
+                    analysis_meta=analysis_meta,
+                )
+                existing = local_jobs.get(image_sha)
+                if existing is None:
+                    job.focus_rank = {"general": 0, "figure": 1, "table": 2}.get(focus, 0)
+                    job.contexts = [occurrence.near_text] if occurrence.near_text else []
+                    local_jobs[image_sha] = job
                 else:
-                    analysis, usage_delta = self.analyze_image_job(kb["path"], job)
-                    self._merge_usage_fn(usage_delta)
-            ref_sig = hashlib.sha1(f"{image_rel}:{seq}".encode("utf-8")).hexdigest()[:8]
+                    current_rank = int(existing.focus_rank)
+                    new_rank = {"general": 0, "figure": 1, "table": 2}.get(focus, 0)
+                    if new_rank > current_rank:
+                        existing.focus = focus
+                        existing.title = occurrence.title
+                        existing.near_text = occurrence.near_text
+                        existing.ref_candidates = list(occurrence.ref_candidates)
+                        existing.focus_rank = new_rank
+                    else:
+                        merged = list(existing.ref_candidates or [])
+                        for candidate in occurrence.ref_candidates:
+                            if candidate not in merged:
+                                merged.append(candidate)
+                        existing.ref_candidates = merged
+                    contexts = existing.contexts
+                    if occurrence.near_text and occurrence.near_text not in contexts and len(contexts) < 3:
+                        contexts.append(occurrence.near_text)
+                        existing.near_text = "\n".join(contexts)[:1200]
+            ref_sig = f"occ{occurrence.occurrence_id:06d}"
+            image_data_id = f"{data_id}::image::{image_sha[:16]}::{ref_sig}"
+            ref_key = occurrence.ref_key
+            display_label = self._display_label(ref_key, occurrence.title, title)
             asset = {
                 "kind": "image",
                 "image_id": image_sha,
-                "data_id": f"{data_id}::image::{image_sha[:16]}::{chunk_index}::{seq}-{ref_sig}",
+                "occurrence_id": occurrence.occurrence_id,
+                "data_id": image_data_id,
                 "chunk_index": 0,
-                "parent_data_id": data_id,
-                "parent_chunk_index": chunk_index,
-                "title": image_title,
+                "source_data_id": data_id,
+                "source_chunk_index": int(occurrence.chunk_index),
+                "title": occurrence.title,
+                "caption": occurrence.title if occurrence.title.lower() != "image" else "",
+                "display_label": display_label,
+                "source_file_name": title,
+                "source_ref": f"{kb['id']}/{rel}",
                 "file_name": rel,
                 "image_path": image_rel,
                 "image_abspath": image_abs,
-                "alt_text": ref.get("alt", ""),
-                "section": section,
+                "alt_text": occurrence.alt,
+                "section": occurrence.section,
                 "understanding_focus": focus,
                 "ref_key": ref_key,
-                "near_text": near,
-                "related_text": related_text,
-                "related_text_refs": related_refs,
-                "_related_index": related_index or {},
-                "description": analysis.get("description", ""),
-                "table_markdown": analysis.get("table_markdown", ""),
-                "uncertain": analysis.get("uncertain", []),
-                "analysis_error": analysis.get("error", ""),
+                "near_text": occurrence.near_text,
+                "related_text": occurrence.related_text,
+                "related_text_refs": occurrence.related_text_refs,
+                "description": "",
+                "table_markdown": "",
+                "uncertain": [],
+                "analysis_error": "",
             }
             asset["body"] = self.asset_body(asset)
             assets.append(asset)
-        return assets
+        if image_jobs is None and local_jobs:
+            analyses = self.analyze_image_jobs(kb, local_jobs, log)
+            for asset in assets:
+                self.apply_image_analysis(asset, analyses.get(asset.get("image_id")))
+        return {"assets": assets, "missing": missing, "referenced": len(occurrences)}
 
     @staticmethod
     def analysis_output_chars(analysis) -> int:
@@ -465,7 +743,7 @@ class ImageAssetProcessor:
             return str(result.get("model") or "")
         return str(analysis_meta.get("model") or "")
 
-    def analyze_image_job(self, kb_path: str, job):
+    def analyze_image_job(self, kb_path: str, job: ImageContent):
         delta = {
             "calls": 0,
             "cached": 0,
@@ -477,9 +755,9 @@ class ImageAssetProcessor:
             "models": {},
             "cached_models": {},
         }
-        image_sha = job["image_sha"]
-        analysis_meta = job["analysis_meta"]
-        focus = str(job.get("focus") or "general")
+        image_sha = job.image_sha
+        analysis_meta = job.analysis_meta
+        focus = str(job.focus or "general")
         cached = self.load_cached_analysis(kb_path, image_sha, analysis_meta, focus)
         if cached:
             delta["cached"] += 1
@@ -492,18 +770,18 @@ class ImageAssetProcessor:
             return {"error": "image analysis cache missing", "uncertain": ["image analysis cache missing"]}, delta
         try:
             client = self._image_client_fn()
-            image_abs = job["image_abspath"]
+            image_abs = job.image_abspath
             image_size = os.path.getsize(image_abs)
             delta["calls"] += 1
             delta["input_images"] += 1
             delta["input_image_bytes"] += image_size
-            delta["input_text_chars"] += len(job.get("title") or "") + len(job.get("near_text") or "")
+            delta["input_text_chars"] += len(job.title or "") + len(job.near_text or "")
             analysis = client.analyze_image(
                 image_abs,
                 focus=focus,
-                title=job.get("title") or "",
-                near_text=job.get("near_text") or "",
-                ref_candidates=job.get("ref_candidates") or [],
+                title=job.title or "",
+                near_text=job.near_text or "",
+                ref_candidates=job.ref_candidates or [],
             )
             usage = analysis.pop("_usage", None)
             request_id = analysis.pop("_request_id", None)
@@ -512,7 +790,7 @@ class ImageAssetProcessor:
             delta["models"] = self._model_usage_delta_fn(str(analysis.get("model") or ""), usage, output_chars)
             self.save_cached_analysis(kb_path, image_sha, analysis_meta, {
                 "image_sha256": image_sha,
-                "image_path": job.get("image_path") or "",
+                "image_path": job.image_path or "",
                 "focus": focus,
                 "analysis": analysis_meta,
                 "usage": usage,
@@ -531,13 +809,13 @@ class ImageAssetProcessor:
         asset["uncertain"] = analysis.get("uncertain", [])
         asset["analysis_error"] = analysis.get("error", "")
         asset["ref_key"] = self.local_ref_key(analysis.get("ref_key") or "") or asset.get("ref_key", "")
-        related_text, related_refs = self.related_text_for_ref_key(asset["ref_key"], asset.get("_related_index") or {})
-        asset["related_text"] = related_text
-        asset["related_text_refs"] = related_refs
+        asset["display_label"] = self._display_label(
+            asset.get("ref_key", ""), asset.get("caption", ""), asset.get("title", "")
+        )
         asset["body"] = self.asset_body(asset)
         return asset
 
-    def analyze_image_jobs(self, kb, image_jobs, log):
+    def analyze_image_jobs(self, kb, image_jobs: dict[str, ImageContent], log):
         if not image_jobs:
             return {}
         jobs = list(image_jobs.values())
@@ -557,7 +835,7 @@ class ImageAssetProcessor:
             for job in jobs:
                 analysis, delta = self.analyze_image_job(kb["path"], job)
                 self._merge_usage_fn(delta)
-                results[job["image_sha"]] = analysis
+                results[job.image_sha] = analysis
                 done += 1
                 if done % 50 == 0 or done == len(jobs):
                     log(f"  图片分析进度 {done}/{len(jobs)}")
@@ -571,10 +849,10 @@ class ImageAssetProcessor:
                 except Exception as exc:
                     analysis, delta = {"error": str(exc), "uncertain": [str(exc)]}, {"failed": 1}
                 self._merge_usage_fn(delta)
-                results[job["image_sha"]] = analysis
+                results[job.image_sha] = analysis
                 done += 1
                 if analysis.get("error"):
-                    log(f"  [warn] 图片分析失败 {job.get('image_path')}: {analysis.get('error')}")
+                    log(f"  [warn] 图片分析失败 {job.image_path}: {analysis.get('error')}")
                 if done % 50 == 0 or done == len(jobs):
                     log(f"  图片分析进度 {done}/{len(jobs)}")
         return results

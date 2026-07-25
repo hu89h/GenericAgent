@@ -1,8 +1,8 @@
 """Small synchronous client for the MinerU v4 document parsing API.
 
-The client owns only HTTP interaction.  Knowledge-base persistence, PDF
-splitting, and result assembly live in :mod:`knowledge_base.importer` so a
-long PDF remains one user-visible import item.
+The client owns only HTTP interaction.  Knowledge-base persistence lives in
+:mod:`knowledge_base.importer`; PDF page-limit validation happens before a
+remote job is submitted.
 """
 from __future__ import annotations
 

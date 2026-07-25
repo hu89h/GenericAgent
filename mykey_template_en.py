@@ -24,9 +24,9 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── MinerU knowledge-base import (optional) ─────────────────────────────────
-# Non-Markdown files, including PDFs over 200 pages, are submitted to MinerU
-# during one unified knowledge-base import. PDF splitting and Markdown merging
-# are internal steps; no separate split operation is required.
+# Non-Markdown files are submitted to MinerU during one unified knowledge-base
+# import. PDFs over 200 pages are rejected before submission and must be split
+# by the user first.
 # mineru_config = {
 #     'api_key': '<your-mineru-api-key>',
 #     # 'base_url': 'https://mineru.net/api/v4',

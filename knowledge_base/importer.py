@@ -2,9 +2,9 @@
 
 The importer keeps the public operation intentionally small: import one source
 directory.  Markdown is copied directly, while supported non-Markdown files
-go through MinerU.  PDF page splitting is an internal preparation step and all
-parts are merged back into one generated Markdown document before the KB is
-registered.
+go through MinerU.  PDFs larger than the service limit are rejected before any
+remote job is submitted; the importer deliberately does not split or merge
+PDFs.
 """
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ import shutil
 import tempfile
 import time
 import zipfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, unquote
@@ -40,15 +39,6 @@ SUPPORTED_EXTS = mineru.SUPPORTED_EXTS
 _IMAGE_SUFFIXES = tuple(sorted(IMAGE_EXTS | {".tif", ".tiff"}))
 _MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
-
-
-@dataclass(frozen=True)
-class PDFPart:
-    path: Path
-    index: int
-    count: int
-    first_page: int
-    last_page: int
 
 
 def _path_is_within(root: Path, path: Path) -> bool:
@@ -212,17 +202,11 @@ def _find_markdown(directory: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def _load_pypdf():
+def _pdf_page_count(path: Path) -> int:
     try:
-        from pypdf import PdfReader, PdfWriter
+        from pypdf import PdfReader
     except ImportError as error:
-        raise RuntimeError("自动分片需要 pypdf，请先安装项目依赖") from error
-    return PdfReader, PdfWriter
-
-
-def _split_pdf(path: Path, output_dir: Path) -> list[PDFPart]:
-    """Split only when needed; short PDFs keep their original path."""
-    PdfReader, PdfWriter = _load_pypdf()
+        raise RuntimeError("PDF 页数检查需要 pypdf，请先安装项目依赖") from error
     try:
         with path.open("rb") as handle:
             reader = PdfReader(handle, strict=False)
@@ -230,32 +214,21 @@ def _split_pdf(path: Path, output_dir: Path) -> list[PDFPart]:
                 try:
                     decrypted = reader.decrypt("")
                 except Exception as error:
-                    raise RuntimeError(f"PDF 已加密，无法自动分片：{path.name}") from error
+                    raise RuntimeError(f"PDF 已加密，无法读取页数：{path.name}") from error
                 if not decrypted:
-                    raise RuntimeError(f"PDF 已加密，无法自动分片：{path.name}")
+                    raise RuntimeError(f"PDF 已加密，无法读取页数：{path.name}")
             page_count = len(reader.pages)
             if page_count <= 0:
                 raise RuntimeError(f"PDF 没有可处理的页面：{path.name}")
-            if page_count <= MAX_PDF_PAGES:
-                return [PDFPart(path, 1, 1, 1, page_count)]
-            output_dir.mkdir(parents=True, exist_ok=True)
-            part_count = (page_count + MAX_PDF_PAGES - 1) // MAX_PDF_PAGES
-            parts: list[PDFPart] = []
-            for index in range(part_count):
-                first = index * MAX_PDF_PAGES
-                last = min(first + MAX_PDF_PAGES, page_count)
-                output = output_dir / f"part-{index + 1:04d}-of-{part_count:04d}.pdf"
-                writer = PdfWriter()
-                for page_index in range(first, last):
-                    writer.add_page(reader.pages[page_index])
-                with output.open("wb") as handle_out:
-                    writer.write(handle_out)
-                parts.append(PDFPart(output, index + 1, part_count, first + 1, last))
-            return parts
+            if page_count > MAX_PDF_PAGES:
+                raise ValueError(
+                    f"PDF 超过 {MAX_PDF_PAGES} 页，暂不支持，请拆分后重新导入：{path.name}"
+                )
+            return page_count
     except RuntimeError:
         raise
     except Exception as error:
-        raise RuntimeError(f"读取或分片 PDF 失败：{path.name}：{error}") from error
+        raise RuntimeError(f"读取 PDF 页数失败：{path.name}：{error}") from error
 
 
 def _emit(progress: Callable[[dict], None] | None, phase: str, counts: dict[str, int], **extra: Any) -> None:
@@ -302,7 +275,6 @@ def import_knowledge_base(
     stage_parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".import-", dir=str(stage_parent))).resolve()
     processed_root = stage / "processed"
-    input_parts_root = stage / ".pdf_parts"
     downloads_root = stage / ".mineru_downloads"
     extract_root = stage / ".mineru_extract"
 
@@ -314,7 +286,7 @@ def import_knowledge_base(
         "scanned": len(files), "total": 0, "completed": 0,
         "markdown": 0, "converting": 0, "ready": 0,
         "succeeded": 0, "failed": 0, "ignored": 0, "skipped": 0,
-        "assets": 0, "split_files": 0, "parts": 0,
+        "assets": 0,
     }
 
     def output_rel_for(source_rel: str) -> str:
@@ -396,75 +368,41 @@ def import_knowledge_base(
             source = spec["source"]
             path = spec["path"]
             entry = spec["entry"]
-            try:
-                parts = (
-                    _split_pdf(path, input_parts_root / hashlib.sha256(source.encode("utf-8")).hexdigest()[:16])
-                    if path.suffix.lower() == ".pdf"
-                    else [PDFPart(path, 1, 1, 1, 1)]
-                )
-            except Exception as error:
-                entry.update(status="failed", error=str(error))
-                counts["failed"] += 1
-                counts["completed"] += 1
-                _emit(progress, "processing", counts, source=source, current=source, file_status="failed", error=str(error))
-                continue
-            if len(parts) > 1:
-                entry["part_count"] = len(parts)
-                entry["parts"] = [
-                    {
-                        "index": part.index,
-                        "first_page": part.first_page,
-                        "last_page": part.last_page,
-                        "status": "queued",
-                        "error": "",
-                    }
-                    for part in parts
-                ]
-                counts["split_files"] += 1
-                counts["parts"] += len(parts)
-            for part in parts:
-                upload_rel = source
-                if len(parts) > 1:
-                    source_path = Path(source)
-                    upload_rel = (
-                        source_path.parent
-                        / f"{source_path.stem}.__part_{part.index:04d}_of_{part.count:04d}{source_path.suffix}"
-                    ).as_posix()
-                upload_specs.append({"source": source, "path": part.path, "relative_path": upload_rel, "part": part})
-        _emit(progress, "splitting", counts, current="PDF 分片已准备，开始提交 MinerU")
+            if path.suffix.lower() == ".pdf":
+                try:
+                    _pdf_page_count(path)
+                except Exception as error:
+                    entry.update(status="failed", error=str(error))
+                    _emit(
+                        progress,
+                        "processing",
+                        counts,
+                        source=source,
+                        name=path.name,
+                        current=source,
+                        file_status="failed",
+                        error=str(error),
+                    )
+                    continue
+            upload_specs.append({"source": source, "path": path, "relative_path": source})
+        _emit(progress, "processing", counts, current="开始提交 MinerU")
 
         jobs_by_relative: dict[str, dict[str, Any]] = {}
         if upload_specs:
             def on_mineru_update(job: mineru.MinerUFile) -> None:
-                spec = jobs_by_relative[job.relative_path]
+                spec = jobs_by_relative.get(job.relative_path)
+                if spec is None:
+                    return
                 entry = entry_by_source[spec["source"]]
-                part = spec["part"]
-                if entry.get("parts"):
-                    part_row = entry["parts"][part.index - 1]
-                    part_row.update(status=job.state, error=job.error)
-                    statuses = [row["status"] for row in entry["parts"]]
-                    entry["status"] = (
-                        "failed" if "failed" in statuses
-                        else "downloaded" if all(status == "downloaded" for status in statuses)
-                        else "processing"
-                    )
-                else:
-                    entry.update(status=job.state, error=job.error)
-                display = spec["source"]
-                if part.count > 1:
-                    display += f"（分片 {part.index}/{part.count}）"
+                entry.update(status=job.state, error=job.error)
                 _emit(
                     progress,
                     "processing",
                     counts,
                     source=spec["source"],
                     name=Path(spec["source"]).name,
-                    current=display,
+                    current=spec["source"],
                     file_status=entry["status"],
-                    part_index=part.index,
-                    part_count=part.count,
-                    first_page=part.first_page,
-                    last_page=part.last_page,
                     error=job.error,
                 )
 
@@ -484,33 +422,24 @@ def import_knowledge_base(
                 _emit(progress, "processing", counts, current="MinerU 提交失败", error=str(error))
             jobs_by_relative.update({job.relative_path: {**jobs_by_relative[job.relative_path], "job": job} for job in jobs})
 
-            by_source: dict[str, list[dict[str, Any]]] = {}
             for spec in upload_specs:
-                by_source.setdefault(spec["source"], []).append(spec)
-            for source, specs in by_source.items():
+                source = spec["source"]
                 entry = entry_by_source[source]
-                if any("job" not in jobs_by_relative.get(spec["relative_path"], {}) for spec in specs):
-                    entry.setdefault("error", "MinerU 未返回全部任务结果")
-                    entry["status"] = "failed"
-                jobs = [jobs_by_relative[spec["relative_path"]]["job"] for spec in specs if "job" in jobs_by_relative[spec["relative_path"]]]
-                if len(jobs) != len(specs) or any(job.state != "downloaded" for job in jobs):
-                    errors = []
-                    inherited_error = str(entry.get("error") or "")
-                    for spec in specs:
-                        job = jobs_by_relative.get(spec["relative_path"], {}).get("job")
-                        if not job or job.state != "downloaded":
-                            part = spec["part"]
-                            label = f"分片 {part.index}/{part.count}" if part.count > 1 else "MinerU 任务"
-                            errors.append(
-                                f"{label}：{getattr(job, 'error', '') or inherited_error or 'MinerU 处理失败'}"
-                            )
-                    entry.update(status="failed", error="；".join(errors))
+                job = jobs_by_relative.get(spec["relative_path"], {}).get("job")
+                if not job or job.state != "downloaded":
+                    error = getattr(job, "error", "") or entry.get("error") or "MinerU 处理失败"
+                    entry.update(status="failed", error=error)
                     counts["failed"] += 1
                     counts["completed"] += 1
                     _emit(
-                        progress, "processing", counts,
-                        source=source, name=Path(source).name, current=source,
-                        file_status="failed", error=entry["error"],
+                        progress,
+                        "processing",
+                        counts,
+                        source=source,
+                        name=Path(source).name,
+                        current=source,
+                        file_status="failed",
+                        error=error,
                     )
                     continue
 
@@ -518,32 +447,23 @@ def import_knowledge_base(
                 target = processed_root / target_rel
                 output_key = hashlib.sha256(source.encode("utf-8")).hexdigest()[:8]
                 asset_root = Path(f"{target.stem}.assets-{output_key}")
-                bodies: list[str] = []
                 try:
-                    for spec in sorted(specs, key=lambda item: item["part"].index):
-                        part = spec["part"]
-                        job = jobs_by_relative[spec["relative_path"]]["job"]
-                        part_key = Path(f"part-{part.index:04d}") if len(specs) > 1 else Path(".")
-                        extract_dir = extract_root / output_key / part_key
-                        _safe_extract_zip(downloads_root / f"{job.data_id}.zip", extract_dir)
-                        markdown = _find_markdown(extract_dir)
-                        if markdown is None:
-                            raise ValueError(
-                                f"MinerU {('分片 ' + str(part.index) + '/' + str(part.count) + ' ') if part.count > 1 else ''}结果中未找到 Markdown 文档"
-                            )
-                        namespace = asset_root / part_key
-                        extra_images = [Path(spec["path"])] if Path(source).suffix.lower() in IMAGE_EXTS else []
-                        body, _ = _prepare_markdown(
-                            markdown,
-                            extract_dir,
-                            target,
-                            processed_root,
-                            asset_namespace=namespace,
-                            extra_images=extra_images,
-                        )
-                        bodies.append(body.strip())
+                    extract_dir = extract_root / output_key
+                    _safe_extract_zip(downloads_root / f"{job.data_id}.zip", extract_dir)
+                    markdown = _find_markdown(extract_dir)
+                    if markdown is None:
+                        raise ValueError("MinerU 结果中未找到 Markdown 文档")
+                    extra_images = [Path(spec["path"])] if Path(source).suffix.lower() in IMAGE_EXTS else []
+                    body, _ = _prepare_markdown(
+                        markdown,
+                        extract_dir,
+                        target,
+                        processed_root,
+                        asset_namespace=asset_root,
+                        extra_images=extra_images,
+                    )
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text("\n\n".join(body for body in bodies if body) + "\n", encoding="utf-8")
+                    target.write_text(body.strip() + "\n", encoding="utf-8")
                     entry.update(status="ready", error="", processed=[target_rel])
                     counts["ready"] += 1
                     counts["succeeded"] += 1
@@ -575,7 +495,7 @@ def import_knowledge_base(
         counts["succeeded"] = counts["ready"]
         counts["completed"] = counts["ready"] + counts["failed"]
         manifest = {
-            "schema_version": 4,
+            "schema_version": 5,
             "imported_at": int(time.time()),
             "source_dir_name": source_root.name,
             "files": entries,
@@ -630,7 +550,7 @@ def import_knowledge_base(
         _emit(progress, "completed", counts, current="导入完成", files=entries, result=result)
         return result
     finally:
-        for path in (input_parts_root, downloads_root, extract_root):
+        for path in (downloads_root, extract_root):
             shutil.rmtree(path, ignore_errors=True)
         if stage.exists():
             shutil.rmtree(stage, ignore_errors=True)

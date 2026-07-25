@@ -21,13 +21,13 @@ class DocumentServices:
     extract_text: Callable[..., str]
     chunk_document_records: Callable[..., list]
     build_sources: Callable[..., Dict[str, Any]]
-    write_parent_chunks: Callable[..., None]
+    display_names: Callable[..., dict]
 
 
 @dataclass(frozen=True)
 class ImageServices:
-    build_image_related_index: Callable[..., dict]
-    image_records_for_chunk: Callable[..., list]
+    build_document_index: Callable[..., Any]
+    image_records_for_document: Callable[..., dict]
     analyze_image_jobs: Callable[..., dict]
     apply_image_analysis: Callable[..., None]
     write_image_assets: Callable[..., None]
@@ -79,6 +79,8 @@ class BuildCoordinator:
         include_text=True,
         include_images=True,
         progressfn=None,
+        text_cache=None,
+        image_indexes=None,
     ):
         """Generate the records consumed by the Zvec index builder."""
         services = self._services
@@ -87,46 +89,47 @@ class BuildCoordinator:
         kb_id = kb["id"]
         n_files = len(scanned)
         n_ok = n_empty = 0
-        parent_chunks = []
         image_records = []
         image_jobs = {}
         image_count = 0
+        image_referenced = 0
+        image_missing = []
+        source_titles = documents.display_names(kb["path"])
 
         for i, (rel, ap, _mt, _sz) in enumerate(scanned, 1):
             ext = os.path.splitext(rel)[1].lower().lstrip(".")
             data_id = f"{kb_id}::{rel}"
-            title = os.path.basename(rel)
-            try:
-                text = documents.extract_text(ap)
-            except Exception as exc:
-                log(f"  [warn] 抽取失败 {rel}: {exc}")
-                text = ""
+            title = os.path.basename(source_titles.get(rel) or os.path.basename(rel))
+            cached = (text_cache or {}).get(rel)
+            if isinstance(cached, dict) and "text" in cached:
+                text = cached["text"]
+            else:
+                try:
+                    text = documents.extract_text(ap)
+                except Exception as exc:
+                    log(f"  [warn] 抽取失败 {rel}: {exc}")
+                    text = ""
+                if text_cache is not None:
+                    text_cache[rel] = {"text": text}
 
-            related_index = (
-                images.build_image_related_index(text) if include_images else {}
+            image_index = (
+                (image_indexes or {}).get(rel)
+                if include_images
+                else None
             )
+            if include_images and image_index is None and ext in ("md", "markdown"):
+                image_index = images.build_document_index(text)
             try:
                 chunk_records = documents.chunk_document_records(
-                    text, ext=ext, file_name=rel
+                    text, ext=ext, file_name=rel, image_index=image_index
                 )
             except Exception as exc:
                 log(f"  [warn] Markdown 分块失败 {rel}: {exc}")
                 chunk_records = []
 
-            text_chunk_records = [
-                chunk for chunk in chunk_records
-                if chunk.get("chunk_role") != "parent"
-            ]
-            for chunk in chunk_records:
-                if chunk.get("chunk_role") == "parent":
-                    parent_chunks.append({
-                        "data_id": data_id,
-                        "parent_chunk_index": int(chunk.get("parent_chunk_index", -1)),
-                        "title": title,
-                        "file_name": rel,
-                        "header_path": chunk.get("header_path", ""),
-                        "body": chunk.get("body", ""),
-                    })
+            text_chunk_records = list(chunk_records)
+            if image_index is not None:
+                image_index.assign_chunks(text_chunk_records)
 
             if not text_chunk_records:
                 n_empty += 1
@@ -142,32 +145,34 @@ class BuildCoordinator:
                     "file_name": rel,
                     "kind": "text",
                     "image_path": "",
-                    "parent_data_id": "",
-                    "parent_chunk_index": int(chunk.get("parent_chunk_index", -1)),
+                    "source_data_id": "",
+                    "source_chunk_index": -1,
                     "header_path": chunk.get("header_path", ""),
-                    "chunk_role": chunk.get("chunk_role", "leaf"),
                     "body": body,
                 }
                 if include_text:
                     # Text records can be embedded while documents are scanned;
                     # image records remain buffered until VLM analysis finishes.
                     yield record
-                if include_images:
-                    chunk_images = images.image_records_for_chunk(
-                        kb,
-                        rel,
-                        ap,
-                        data_id,
-                        chunk_index,
-                        body,
-                        title,
-                        log,
-                        image_jobs=image_jobs,
-                        related_index=related_index,
-                    )
-                    for image_record in chunk_images:
-                        image_count += 1
-                        image_records.append(image_record)
+            if include_images:
+                image_result = images.image_records_for_document(
+                    kb,
+                    rel,
+                    data_id,
+                    text,
+                    title,
+                    log,
+                    image_jobs=image_jobs,
+                    image_index=image_index,
+                )
+                document_images = image_result.get("assets", [])
+                image_records.extend(document_images)
+                image_count += len(document_images)
+                image_referenced += int(image_result.get("referenced", 0) or 0)
+                image_missing.extend(
+                    {"file_name": rel, **item}
+                    for item in image_result.get("missing", [])
+                )
 
             if i % 100 == 0 or i == n_files:
                 if callable(progressfn):
@@ -190,16 +195,26 @@ class BuildCoordinator:
             {
                 key: value
                 for key, value in record.items()
-                if not key.startswith("_") and key != "body"
+                if not key.startswith("_") and key not in {"body", "image_abspath"}
             }
             for record in image_records
             if record.get("kind") == "image"
         ]
-        images.write_image_assets(kb["path"], stored_assets)
-        documents.write_parent_chunks(kb["path"], parent_chunks)
-        log(
-            f"  抽取完成：{n_files} 文件，有效 {n_ok}，无正文 {n_empty}，图片资产 {image_count}"
+        images.write_image_assets(
+            kb["path"],
+            stored_assets,
+            validation={
+                "referenced": image_referenced,
+                "indexed": len(stored_assets),
+                "missing": image_missing,
+            },
         )
+        log(
+            f"  抽取完成：{n_files} 文件，有效 {n_ok}，无正文 {n_empty}，"
+            f"图片引用 {image_referenced}，已登记 {image_count}"
+        )
+        if image_missing:
+            log(f"  [warn] {len(image_missing)} 个图片引用未登记，详见 image_assets.json.validation.missing")
         yield from image_records
 
     def _finalize_build_result(self, kb, scanned, z_status, z_stats, log):
@@ -303,8 +318,29 @@ class BuildCoordinator:
                 kb, scanned, "up-to-date", meta.get("stats") or {}, log
             )
 
+        text_cache = {}
+        image_indexes = {}
+        if mode != "text":
+            for rel, ap, _mt, _sz in scanned:
+                ext = os.path.splitext(rel)[1].lower().lstrip(".")
+                if ext not in ("md", "markdown"):
+                    continue
+                cached = text_cache.get(rel)
+                if isinstance(cached, dict) and "text" in cached:
+                    text = cached["text"]
+                else:
+                    try:
+                        text = documents.extract_text(ap)
+                    except Exception as exc:
+                        log(f"  [warn] 抽取失败 {rel}: {exc}")
+                        text = ""
+                    text_cache[rel] = {"text": text}
+                image_indexes[rel] = services.images.build_document_index(text)
         sources = documents.build_sources(
-            kb["path"], scanned, mode="text" if mode == "text" else "full"
+            kb["path"],
+            scanned,
+            mode="text" if mode == "text" else "full",
+            image_indexes=image_indexes,
         )
         services.update_build_state(
             phase="extracting",
@@ -322,6 +358,8 @@ class BuildCoordinator:
             log,
             include_text=mode in ("full", "text"),
             include_images=mode in ("full", "images"),
+            text_cache=text_cache,
+            image_indexes=image_indexes,
             progressfn=lambda processed, total: services.update_build_state(
                 phase="extracting", processed=processed, total=total
             ),

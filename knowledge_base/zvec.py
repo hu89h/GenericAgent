@@ -87,10 +87,9 @@ class ZvecIndex:
                     zvec.FieldSchema("title", zvec.DataType.STRING),
                     zvec.FieldSchema("kind", zvec.DataType.STRING),
                     zvec.FieldSchema("image_path", zvec.DataType.STRING),
-                    zvec.FieldSchema("parent_data_id", zvec.DataType.STRING),
-                    zvec.FieldSchema("parent_chunk_index", zvec.DataType.INT64),
+                    zvec.FieldSchema("source_data_id", zvec.DataType.STRING),
+                    zvec.FieldSchema("source_chunk_index", zvec.DataType.INT64),
                     zvec.FieldSchema("header_path", zvec.DataType.STRING),
-                    zvec.FieldSchema("chunk_role", zvec.DataType.STRING),
                     zvec.FieldSchema("body", zvec.DataType.STRING),
                 ],
                 vectors=[
@@ -121,6 +120,21 @@ class ZvecIndex:
         for attr in ("_querier", "_obj", "_schema"):
             with contextlib.suppress(Exception):
                 setattr(collection, attr, None)
+
+    @staticmethod
+    def _rename_with_retry(source: str, destination: str) -> None:
+        """Rename an index directory across short-lived Windows file locks."""
+        last_error = None
+        for delay in (0, 0.1, 0.25, 0.5, 1, 2):
+            if delay:
+                time.sleep(delay)
+            try:
+                os.rename(source, destination)
+                return
+            except PermissionError as error:
+                last_error = error
+        if last_error is not None:
+            raise last_error
 
     def clear_cache(self, path: str | None = None) -> None:
         # Tool calls run in worker threads while Bridge requests usually run
@@ -271,10 +285,9 @@ class ZvecIndex:
                         "title": item["title"],
                         "kind": item.get("kind", "text"),
                         "image_path": item.get("image_path", ""),
-                        "parent_data_id": item.get("parent_data_id", ""),
-                        "parent_chunk_index": int(item.get("parent_chunk_index", -1)),
+                        "source_data_id": item.get("source_data_id", ""),
+                        "source_chunk_index": int(item.get("source_chunk_index", -1)),
                         "header_path": item.get("header_path", ""),
-                        "chunk_role": item.get("chunk_role", "leaf"),
                         "body": item["body"],
                     },
                 ))
@@ -304,10 +317,9 @@ class ZvecIndex:
                 "title": record.get("title", "") or "",
                 "kind": kind,
                 "image_path": record.get("image_path", "") or "",
-                "parent_data_id": record.get("parent_data_id", "") or "",
-                "parent_chunk_index": int(record.get("parent_chunk_index", -1)),
+                "source_data_id": record.get("source_data_id", "") or "",
+                "source_chunk_index": int(record.get("source_chunk_index", -1)),
                 "header_path": record.get("header_path", "") or "",
-                "chunk_role": record.get("chunk_role", "leaf") or "leaf",
                 "body": body,
             })
             n_chunks += 1
@@ -403,10 +415,10 @@ class ZvecIndex:
             meta_temp_path = self._write_json_temp(meta_path, meta)
 
             if os.path.exists(path):
-                backup_path = f"{path}.bak.{os.getpid()}.{int(time.time())}"
-                os.rename(path, backup_path)
+                backup_path = f"{path}.bak.{os.getpid()}.{time.time_ns()}"
+                self._rename_with_retry(path, backup_path)
             try:
-                os.rename(temp_path, path)
+                self._rename_with_retry(temp_path, path)
                 os.replace(meta_temp_path, meta_path)
                 meta_temp_path = ""
             except Exception:
@@ -414,7 +426,7 @@ class ZvecIndex:
                 if os.path.exists(path):
                     shutil.rmtree(path, ignore_errors=True)
                 if backup_path and os.path.exists(backup_path):
-                    os.rename(backup_path, path)
+                    self._rename_with_retry(backup_path, path)
                     backup_path = ""
                 raise
 
@@ -431,7 +443,7 @@ class ZvecIndex:
                 self.clear_cache(path)
                 if os.path.exists(path):
                     shutil.rmtree(path, ignore_errors=True)
-                os.rename(backup_path, path)
+                self._rename_with_retry(backup_path, path)
                 backup_path = ""
             raise
         finally:

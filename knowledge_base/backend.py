@@ -104,8 +104,7 @@ DOCUMENT_IMAGE_EXTS = frozenset({
     ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp", ".tif", ".tiff",
 })
 BUILD_USAGE_FILE = "build_usage.json"
-PARENT_CHUNKS_FILE = "parent_chunks.json"
-ZVEC_SCHEMA_VERSION = 6
+ZVEC_SCHEMA_VERSION = 9
 _SNIPPET = 220
 ZVEC_DIM = int(os.environ.get("GA_KB_ZVEC_DIM", os.environ.get("GA_KB_EMBED_DIM", "1024")))
 ZVEC_BATCH = int(os.environ.get("GA_KB_ZVEC_BATCH", "256"))
@@ -203,6 +202,8 @@ def delete_kb(kb_id, delete_data=False, config_path=CONFIG_PATH):
                 data_deleted = True
 
         removed = remove_kb(kb_id, config_path=config_path)
+        if _retrieval_instance is not None:
+            _retrieval_instance.clear_asset_cache(kb.get("path"))
         return {
             "removed": bool(removed),
             "kb_id": kb_id,
@@ -228,8 +229,8 @@ def import_kb(source_dir, kb_id="", name="", overwrite=False, progress=None):
 
     ``kb_id`` remains in the function signature for bridge compatibility, but
     the registry identity is deliberately derived from the canonical source
-    path.  PDF splitting is handled internally by the importer and never
-    becomes a separate public operation.
+    path.  PDFs over the current service limit are rejected before MinerU
+    submission; this importer does not split or merge PDF parts.
     """
     if not _build_lock.acquire(blocking=False):
         raise RuntimeError("知识库正在构建索引，请稍后再导入")
@@ -269,55 +270,27 @@ def _image_assets_path(kb_path):
     return os.path.join(_index_dir(kb_path), IMAGE_ASSETS_FILE)
 
 
-def _parent_chunks_path(kb_path):
-    return os.path.join(_index_dir(kb_path), PARENT_CHUNKS_FILE)
-
-
 def _build_usage_path(kb_path):
     return os.path.join(_index_dir(kb_path), BUILD_USAGE_FILE)
 
 
 # ─────────────────────────── 文档扫描与抽取 ───────────────────────────
 
-def _build_sources(kb_path, scanned, mode="full"):
+def _build_sources(kb_path, scanned, mode="full", image_indexes=None):
     sources = {
         "documents": _fingerprint(scanned),
         "chunking": _chunking_meta(),
     }
     if mode != "text":
+        if image_indexes is None:
+            raise ValueError("构建图片来源指纹需要预先生成的文档图片索引")
         sources.update({
-            "images": _image_source_fingerprint(kb_path, scanned),
+            "images": _image_source_fingerprint(
+                kb_path, scanned, image_indexes=image_indexes
+            ),
             "image_analysis": _image_analysis_meta(),
         })
     return sources
-
-
-def _write_parent_chunks(kb_path, parent_chunks):
-    os.makedirs(_index_dir(kb_path), exist_ok=True)
-    with open(_parent_chunks_path(kb_path), "w", encoding="utf-8") as f:
-        json.dump(parent_chunks or [], f, ensure_ascii=False, indent=2)
-
-
-def _load_parent_chunks(kb_path):
-    try:
-        with open(_parent_chunks_path(kb_path), encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def _parent_chunk_body(kb_path, data_id, parent_chunk_index):
-    try:
-        parent_chunk_index = int(parent_chunk_index)
-    except Exception:
-        return ""
-    if parent_chunk_index < 0:
-        return ""
-    for row in _load_parent_chunks(kb_path):
-        if row.get("data_id") == data_id and int(row.get("parent_chunk_index", -1)) == parent_chunk_index:
-            return row.get("body") or ""
-    return ""
 
 
 _usage_tracker_instance = None
@@ -436,8 +409,7 @@ def _image_assets():
             image_cache_dir_fn=_image_cache_dir,
             image_assets_path_fn=_image_assets_path,
             index_dir_fn=_index_dir,
-            read_text_fn=_read_textfile,
-            merge_usage_fn=_merge_image_analysis_usage,
+        merge_usage_fn=_merge_image_analysis_usage,
             model_usage_delta_fn=_model_usage_delta,
             concurrency=IMAGE_ANALYSIS_CONCURRENCY,
         )
@@ -448,28 +420,30 @@ def _local_ref_key(value):
     return _image_assets().local_ref_key(value)
 
 
-def _build_image_related_index(text):
-    return _image_assets().build_related_index(text)
+def _build_document_index(text):
+    return _image_assets().build_document_index(text)
 
 
 def _asset_body(asset):
     return _image_assets().asset_body(asset)
 
 
-def _write_image_assets(kb_path, assets):
-    _image_assets().write_assets(kb_path, assets)
+def _write_image_assets(kb_path, assets, validation=None):
+    _image_assets().write_assets(kb_path, assets, validation=validation)
+    if _retrieval_instance is not None:
+        _retrieval_instance.clear_asset_cache(kb_path)
 
 
 def _load_image_assets(kb_path):
     return _image_assets().load_assets(kb_path)
 
 
-def _image_source_fingerprint(kb_path, scanned):
-    return _image_assets().image_source_fingerprint(kb_path, scanned)
+def _image_source_fingerprint(kb_path, scanned, image_indexes=None):
+    return _image_assets().image_source_fingerprint(kb_path, scanned, image_indexes=image_indexes)
 
 
-def _image_records_for_chunk(*args, **kwargs):
-    return _image_assets().image_records_for_chunk(*args, **kwargs)
+def _image_records_for_document(*args, **kwargs):
+    return _image_assets().image_records_for_document(*args, **kwargs)
 
 
 def _apply_image_analysis(asset, analysis):
@@ -495,11 +469,11 @@ def _build_coordinator():
                     extract_text=extract_text,
                     chunk_document_records=chunk_document_records,
                     build_sources=_build_sources,
-                    write_parent_chunks=_write_parent_chunks,
+                    display_names=_imported_document_titles,
                 ),
                 images=_ImageServices(
-                    build_image_related_index=_build_image_related_index,
-                    image_records_for_chunk=_image_records_for_chunk,
+                    build_document_index=_build_document_index,
+                    image_records_for_document=_image_records_for_document,
                     analyze_image_jobs=_analyze_image_jobs,
                     apply_image_analysis=_apply_image_analysis,
                     write_image_assets=_write_image_assets,
@@ -529,7 +503,15 @@ def _build_coordinator():
     return _build_coordinator_instance
 
 
-def _records(kb, scanned, log, include_text=True, include_images=True, progressfn=None):
+def _records(
+    kb,
+    scanned,
+    log,
+    include_text=True,
+    include_images=True,
+    progressfn=None,
+    image_indexes=None,
+):
     return _build_coordinator().records(
         kb,
         scanned,
@@ -537,6 +519,7 @@ def _records(kb, scanned, log, include_text=True, include_images=True, progressf
         include_text=include_text,
         include_images=include_images,
         progressfn=progressfn,
+        image_indexes=image_indexes,
     )
 
 
@@ -702,7 +685,7 @@ def _append_zvec_image_index(kb, records, sources, force=False, logfn=None):
 
 _ZVEC_OUTPUT_FIELDS = [
     "data_id", "chunk_index", "kb_id", "file_name", "title", "kind",
-    "image_path", "parent_data_id", "parent_chunk_index", "header_path", "chunk_role", "body",
+    "image_path", "source_data_id", "source_chunk_index", "header_path", "body",
 ]
 
 
@@ -880,7 +863,14 @@ def _imported_document_titles(kb_path):
         source = str(entry.get("source") or "")
         title = os.path.basename(source) or source
         for rel in entry.get("processed") or []:
-            titles[str(rel).replace("\\", "/")] = title
+            normalized = str(rel).replace("\\", "/").lstrip("/")
+            if not normalized:
+                continue
+            titles[normalized] = title
+            if normalized.startswith("processed/"):
+                titles[normalized[len("processed/"):]] = title
+            else:
+                titles[f"processed/{normalized}"] = title
     return titles
 
 
@@ -919,7 +909,6 @@ def _retrieval():
             load_image_assets=_load_image_assets,
             local_ref_key=_local_ref_key,
             asset_body=_asset_body,
-            parent_chunk_body=_parent_chunk_body,
             record_search_error=_record_search_error,
             imported_document_titles=_imported_document_titles,
             imported_document_entries=_imported_document_entries,
@@ -952,6 +941,12 @@ def read_chunk(data_id=None, chunk_index=0, kb_id=None, ref=None, max_chars=4000
     )
 
 
+def reference_for_chunk(data_id=None, chunk_index=0, kb_id=None, ref=None):
+    return _retrieval().reference_for_chunk(
+        data_id=data_id, chunk_index=chunk_index, kb_id=kb_id, ref=ref,
+    )
+
+
 def list_chunks(data_id=None, kb_id=None, ref=None, preview_chars=80, limit=400):
     return _retrieval().list_chunks(
         data_id=data_id, kb_id=kb_id, ref=ref,
@@ -959,9 +954,10 @@ def list_chunks(data_id=None, kb_id=None, ref=None, preview_chars=80, limit=400)
     )
 
 
-def read_image(image_id=None, image_path=None, data_id=None, ref=None, kb_id=None):
+def read_image(image_id=None, image_path=None, data_id=None, ref=None, kb_id=None, ref_key=None, query=None):
     return _retrieval().read_image(
-        image_id=image_id, image_path=image_path, data_id=data_id, ref=ref, kb_id=kb_id,
+        image_id=image_id, image_path=image_path, data_id=data_id, ref=ref,
+        kb_id=kb_id, ref_key=ref_key, query=query,
     )
 
 
@@ -1085,42 +1081,28 @@ def answer_image(image_id=None, image_path=None, question="", data_id=None, ref=
     )
 
 
-def resolve_open_target(kb_id="", data_id="", image_id="", image_path="", ref=""):
+def resolve_open_target(kb_id="", data_id="", image_id="", image_path="", ref="", ref_key=""):
     """Resolve Desktop /kb/open to an original document or indexed image."""
-    if image_id or image_path:
-        asset = read_image(image_id=image_id, image_path=image_path, data_id=data_id, ref=ref)
-        if not asset.get("error"):
-            path = asset.get("image_abspath") or ""
-            if path and os.path.isfile(path):
-                return path
-    # A document reference points at the processed Markdown for retrieval, but
-    # opening it in the desktop UI should take the user to the imported source.
-    if not data_id or "::image::" not in str(data_id):
-        source = resolve_source_document(
-            kb_id=kb_id,
+    is_image_target = bool(image_id or image_path or "::image::" in str(data_id or ""))
+    if is_image_target:
+        asset = read_image(
+            image_id=image_id,
+            image_path=image_path,
             data_id=data_id,
             ref=ref,
+            kb_id=kb_id,
+            ref_key=ref_key,
         )
-        if source.get("is_original") and os.path.isfile(source.get("path") or ""):
-            return source["path"]
-    if data_id and "::image::" in data_id:
-        asset = read_image(data_id=data_id)
         if not asset.get("error"):
             path = asset.get("image_abspath") or ""
             if path and os.path.isfile(path):
                 return path
-    if ref:
-        resolved = resolve_file(ref)
-        if resolved:
-            return resolved
-    kid = kb_id or (str(data_id).split("::", 1)[0] if "::" in str(data_id) else "")
-    kb = _kb_by_id(kid) if kid else None
-    if kb and data_id and "::" in data_id:
-        rel = data_id.split("::", 1)[1].split("::image::", 1)[0]
-        target = os.path.realpath(os.path.join(kb["path"], rel))
-        root = os.path.realpath(kb["path"])
-        if (target == root or target.startswith(root + os.sep)) and os.path.isfile(target):
-            return target
+        return None
+
+    source = resolve_source_document(kb_id=kb_id, data_id=data_id, ref=ref)
+    source_path = source.get("path") or ""
+    if source_path and os.path.isfile(source_path):
+        return source_path
     return None
 
 

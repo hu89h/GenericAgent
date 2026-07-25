@@ -108,7 +108,7 @@ jobs:
           mkdir -p "$RUNTIME/wheels"
           "$PY" -m pip download --dest "$RUNTIME/wheels" \
             "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil \
-            "llama-index-core==0.12.52.post1" "zvec>=0.6,<0.7" "pypdf>=5.0" \
+            "docling-slim[format-markdown,feat-chunking]==2.115.0" "zvec>=0.6,<0.7" "pypdf>=5.0" \
             fastapi uvicorn websockets pydantic setuptools wheel
 
           # Runtime source (project root minus heavy/dev/build dirs)
@@ -325,7 +325,7 @@ jobs:
           mkdir -p "$RUNTIME/wheels"
           "$PY" -m pip download --dest "$RUNTIME/wheels" \
             "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil \
-            "llama-index-core==0.12.52.post1" "zvec>=0.6,<0.7" "pypdf>=5.0" \
+            "docling-slim[format-markdown,feat-chunking]==2.115.0" "zvec>=0.6,<0.7" "pypdf>=5.0" \
             fastapi uvicorn websockets pydantic setuptools wheel
 
           # Runtime source (project root minus heavy/dev/build dirs)
@@ -533,7 +533,7 @@ jobs:
           mkdir -p "$RUNTIME_SRC/wheels"
           "$PY" -m pip download --dest "$RUNTIME_SRC/wheels" \
             "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil \
-            "llama-index-core==0.12.52.post1" "zvec>=0.6,<0.7" "pypdf>=5.0" \
+            "docling-slim[format-markdown,feat-chunking]==2.115.0" "zvec>=0.6,<0.7" "pypdf>=5.0" \
             fastapi uvicorn websockets pydantic setuptools wheel
 
           # Runtime source (project root minus heavy/dev/build dirs) — bsdtar exclude syntax.

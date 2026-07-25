@@ -10,19 +10,72 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+from collections import defaultdict
 from typing import Any, Callable
+
+from .references import clean_public_text, public_reference, section_label, with_reference
 
 
 _SPLIT = re.compile(r"\s+")
 _FIGURE_REF = re.compile(
     r"[图表]\s*[0-9０-９一二三四五六七八九十百]+"
-    r"(?:[-－—–.．][0-9０-９一二三四五六七八九十百]+)+"
+    r"(?:[-－—–.．][0-9０-９一二三四五六七八九十百]+){0,3}"
 )
 _DEFAULT_OUTPUT_FIELDS = [
     "data_id", "chunk_index", "kb_id", "file_name", "title", "kind",
-    "image_path", "parent_data_id", "parent_chunk_index", "header_path",
-    "chunk_role", "body",
+    "image_path", "source_data_id", "source_chunk_index", "header_path", "body",
 ]
+
+
+class _AssetCatalog:
+    """In-memory lookup indexes for one knowledge-base asset manifest."""
+
+    def __init__(self, assets: list[dict], local_ref_key: Callable[[str], str]) -> None:
+        self.assets = list(assets or [])
+        self.by_data_id: dict[str, dict] = {}
+        self.by_source_data_id: dict[str, list[dict]] = defaultdict(list)
+        self.by_image_id: dict[str, list[dict]] = defaultdict(list)
+        self.by_ref_key: dict[str, list[dict]] = defaultdict(list)
+        self.by_file_name: dict[str, list[dict]] = defaultdict(list)
+        self.by_image_path: dict[str, list[dict]] = defaultdict(list)
+        for asset in self.assets:
+            if not isinstance(asset, dict):
+                continue
+            data_id = str(asset.get("data_id") or "")
+            image_id = str(asset.get("image_id") or "")
+            file_name = str(asset.get("file_name") or "").replace("\\", "/")
+            if data_id:
+                self.by_data_id[data_id] = asset
+            source_data_id = str(asset.get("source_data_id") or "")
+            if source_data_id:
+                self.by_source_data_id[source_data_id].append(asset)
+            if image_id:
+                self.by_image_id[image_id].append(asset)
+            if file_name:
+                self.by_file_name[file_name].append(asset)
+            image_path = str(asset.get("image_path") or "").replace("\\", "/")
+            if image_path:
+                self.by_image_path[image_path].append(asset)
+            keys = set()
+            for value in (
+                asset.get("ref_key") or "",
+                asset.get("caption") or "",
+                asset.get("display_label") or "",
+                asset.get("title") or "",
+                asset.get("alt_text") or "",
+                asset.get("near_text") or "",
+                asset.get("related_text") or "",
+            ):
+                key = local_ref_key(str(value))
+                if key:
+                    keys.add(key)
+                for match in _FIGURE_REF.finditer(str(value)):
+                    key = local_ref_key(match.group(0))
+                    if key:
+                        keys.add(key)
+            for key in keys:
+                self.by_ref_key[key].append(asset)
 
 
 class KnowledgeBaseRetriever:
@@ -50,7 +103,6 @@ class KnowledgeBaseRetriever:
         load_image_assets: Callable[[str], list],
         local_ref_key: Callable[[str], str],
         asset_body: Callable[[dict], str],
-        parent_chunk_body: Callable[[str, str, int], str],
         record_search_error: Callable[[dict, str, Any], None],
         imported_document_titles: Callable[[str], dict],
         imported_document_entries: Callable[[str], list[dict]] | None = None,
@@ -73,7 +125,6 @@ class KnowledgeBaseRetriever:
         self._load_image_assets = load_image_assets
         self._local_ref_key = local_ref_key
         self._asset_body = asset_body
-        self._parent_chunk_body = parent_chunk_body
         self._record_search_error = record_search_error
         self._imported_document_titles = imported_document_titles
         self._imported_document_entries = imported_document_entries or (lambda _path: [])
@@ -81,6 +132,8 @@ class KnowledgeBaseRetriever:
         self._vector_weight = float(vector_weight)
         self._snippet_width = max(1, int(snippet_width))
         self._output_fields = list(output_fields or _DEFAULT_OUTPUT_FIELDS)
+        self._asset_catalogs: dict[str, tuple[tuple[int, int], _AssetCatalog]] = {}
+        self._asset_catalog_lock = threading.RLock()
 
     @staticmethod
     def _path_is_within(root: str, path: str) -> bool:
@@ -122,19 +175,34 @@ class KnowledgeBaseRetriever:
         end = min(len(flat), start + width)
         return ("… " if start > 0 else "") + flat[start:end] + (" …" if end < len(flat) else "")
 
-    def _assets_for_kb(self, kb: dict, cache: dict[str, list] | None = None) -> list:
+    def _asset_catalog(self, kb: dict) -> _AssetCatalog:
         path = str(kb.get("path") or "")
-        if cache is None:
-            return self._load_image_assets(path)
-        if path not in cache:
-            cache[path] = self._load_image_assets(path)
-        return cache[path]
+        manifest = os.path.join(path, ".kb_index", "image_assets.json")
+        try:
+            stat = os.stat(manifest)
+            signature = (int(getattr(stat, "st_mtime_ns", stat.st_mtime_ns)), int(stat.st_size))
+        except OSError:
+            signature = (0, 0)
+        with self._asset_catalog_lock:
+            cached = self._asset_catalogs.get(path)
+            if cached and cached[0] == signature:
+                return cached[1]
+            catalog = _AssetCatalog(self._load_image_assets(path), self._local_ref_key)
+            self._asset_catalogs[path] = (signature, catalog)
+            return catalog
+
+    def clear_asset_cache(self, path: str | None = None) -> None:
+        with self._asset_catalog_lock:
+            if path is None:
+                self._asset_catalogs.clear()
+            else:
+                self._asset_catalogs.pop(str(path), None)
+
+    def _assets_for_kb(self, kb: dict, cache: dict[str, list] | None = None) -> list:
+        return self._asset_catalog(kb).assets
 
     def _asset_by_data_id(self, kb: dict, data_id: str, cache: dict[str, list] | None = None) -> dict:
-        for asset in self._assets_for_kb(kb, cache):
-            if asset.get("data_id") == data_id:
-                return asset
-        return {}
+        return self._asset_catalog(kb).by_data_id.get(data_id, {})
 
     def _asset_image_abspath(self, kb: dict, asset: dict) -> str:
         """Resolve an image only under the configured knowledge-base root."""
@@ -155,14 +223,27 @@ class KnowledgeBaseRetriever:
         hit.update({
             "kind": "image",
             "image_id": asset.get("image_id", ""),
+            "occurrence_id": asset.get("occurrence_id", -1),
             "image_path": asset.get("image_path", ""),
             "image_abspath": self._asset_image_abspath(kb, asset),
-            "parent_data_id": asset.get("parent_data_id", ""),
-            "parent_chunk_index": asset.get("parent_chunk_index", -1),
+            "source_data_id": asset.get("source_data_id", ""),
+            "source_chunk_index": asset.get("source_chunk_index", -1),
             "description": asset.get("description", ""),
             "table_markdown": asset.get("table_markdown", ""),
+            "caption": asset.get("caption", ""),
+            "display_label": asset.get("display_label", ""),
+            "ref_key": asset.get("ref_key", ""),
+            "source_file_name": asset.get("source_file_name", ""),
+            "source_ref": asset.get("source_ref", ""),
         })
-        return hit
+        if asset.get("display_label"):
+            hit["title"] = asset.get("display_label")
+        if asset.get("source_ref"):
+            hit["ref"] = asset.get("source_ref")
+        for key in ("related_text", "related_text_refs", "near_text", "uncertain"):
+            if key in asset:
+                hit[key] = asset.get(key)
+        return with_reference(hit, kind="image")
 
     @staticmethod
     def _doc_name_candidates(file_name: str | None = None, title: str | None = None) -> list[str]:
@@ -293,8 +374,8 @@ class KnowledgeBaseRetriever:
             score = float(getattr(row, "score", 0.0) or 0.0)
             data_id = fields.get("data_id") or ""
             chunk_index = int(fields.get("chunk_index") or 0)
-            body = fields.get("body") or ""
-            hit = {
+            body = clean_public_text(fields.get("body") or "")
+            hit = with_reference({
                 "kb_id": kb["id"],
                 "score": round(score, 6),
                 "score_type": score_type,
@@ -310,16 +391,15 @@ class KnowledgeBaseRetriever:
                 "n_chunks": 0,
                 "kind": fields.get("kind") or "text",
                 "image_path": fields.get("image_path") or "",
-                "parent_data_id": fields.get("parent_data_id") or "",
-                "parent_chunk_index": int(
-                    fields.get("parent_chunk_index")
-                    if fields.get("parent_chunk_index") is not None else -1
+                "source_data_id": fields.get("source_data_id") or "",
+                "source_chunk_index": int(
+                    fields.get("source_chunk_index")
+                    if fields.get("source_chunk_index") is not None else -1
                 ),
                 "header_path": fields.get("header_path") or "",
-                "chunk_role": fields.get("chunk_role") or "leaf",
                 "snippet": self._snippet(body, query, snippet_chars),
                 "body": body,
-            }
+            }, kind="image" if fields.get("kind") == "image" else "document")
             out.append(self._enrich_hit_with_asset(kb, hit, asset_cache))
             if len(out) >= top_k:
                 break
@@ -365,56 +445,75 @@ class KnowledgeBaseRetriever:
             return []
         doc_candidates = set(self._doc_name_candidates(file_name=file_name, title=title))
         out, seen = [], set()
-        for asset in self._assets_for_kb(kb, asset_cache):
+        catalog = self._asset_catalog(kb)
+        candidates = []
+        candidate_ids = set()
+        for ref in refs:
+            ref_assets = catalog.by_ref_key.get(ref, [])
+            ref_assets = sorted(
+                ref_assets,
+                key=lambda asset: 0 if self._local_ref_key(asset.get("ref_key") or "") == ref else 1,
+            )
+            for asset in ref_assets:
+                marker = id(asset)
+                if marker not in candidate_ids:
+                    candidate_ids.add(marker)
+                    candidates.append(asset)
+        for asset in candidates:
             rel = asset.get("file_name") or ""
             ttl = asset.get("title") or ""
             if doc_candidates and not self._doc_matches_candidates(rel, ttl, doc_candidates):
-                continue
-            asset_keys = []
-            for text in (ttl, asset.get("alt_text") or ""):
-                key = self._local_ref_key(text)
-                if key and key not in asset_keys:
-                    asset_keys.append(key)
-            if not any(key in refs for key in asset_keys):
                 continue
             data_id = asset.get("data_id") or ""
             if not data_id or data_id in seen:
                 continue
             seen.add(data_id)
             body = self._asset_body(asset)
-            out.append({
-                "kb_id": kb["id"],
-                "score": 1.0,
-                "score_type": "ref_exact",
-                "rank": len(out) + 1,
-                "data_id": data_id,
-                "chunk_index": 0,
-                "title": ttl[:160],
-                "file_name": rel,
-                "ref": f"{kb['id']}/{rel}",
-                "abspath": os.path.join(kb["path"], rel),
-                "folder": self._folder_from_file_name(rel),
-                "format": "image",
-                "n_chunks": 0,
-                "kind": "image",
-                "image_id": asset.get("image_id", ""),
-                "image_path": asset.get("image_path", ""),
-                "image_abspath": self._asset_image_abspath(kb, asset),
-                "parent_data_id": asset.get("parent_data_id", ""),
-                "parent_chunk_index": int(
-                    asset.get("parent_chunk_index")
-                    if asset.get("parent_chunk_index") is not None else -1
-                ),
-                "header_path": "",
-                "chunk_role": "leaf",
-                "description": asset.get("description", ""),
-                "table_markdown": asset.get("table_markdown", ""),
-                "snippet": self._snippet(body, query, snippet_chars),
-                "body": body,
-            })
+            hit = self._asset_hit(kb, asset, body=body, query=query, snippet_chars=snippet_chars)
+            hit["rank"] = len(out) + 1
+            out.append(hit)
             if len(out) >= top_k:
                 break
         return out
+
+    def _asset_hit(self, kb: dict, asset: dict, *, body: str, query: str, snippet_chars: int) -> dict:
+        """Convert an indexed image asset into the stable search-result contract."""
+        rel = asset.get("file_name") or ""
+        return with_reference({
+            "kb_id": kb["id"],
+            "score": 1.0,
+            "score_type": "ref_exact",
+            "rank": 0,
+            "data_id": asset.get("data_id") or "",
+            "chunk_index": 0,
+            "title": (asset.get("display_label") or asset.get("title") or "图片")[:160],
+            "file_name": rel,
+            "ref": asset.get("source_ref") or f"{kb['id']}/{rel}",
+            "abspath": os.path.join(kb["path"], rel),
+            "folder": self._folder_from_file_name(rel),
+            "format": "image",
+            "n_chunks": 0,
+            "kind": "image",
+            "image_id": asset.get("image_id", ""),
+            "occurrence_id": asset.get("occurrence_id", -1),
+            "image_path": asset.get("image_path", ""),
+            "image_abspath": self._asset_image_abspath(kb, asset),
+            "source_data_id": asset.get("source_data_id", ""),
+            "source_chunk_index": int(
+                asset.get("source_chunk_index")
+                if asset.get("source_chunk_index") is not None else -1
+            ),
+            "header_path": "",
+            "description": asset.get("description", ""),
+            "table_markdown": asset.get("table_markdown", ""),
+            "caption": asset.get("caption", ""),
+            "display_label": asset.get("display_label", ""),
+            "ref_key": asset.get("ref_key", ""),
+            "source_file_name": asset.get("source_file_name", ""),
+            "source_ref": asset.get("source_ref", ""),
+            "snippet": self._snippet(body, query, snippet_chars),
+            "body": body,
+        }, kind="image")
 
     def search(
         self,
@@ -490,6 +589,9 @@ class KnowledgeBaseRetriever:
                     sources.append(source)
             result["score_type"] = "+".join(sources) if sources else result.get("score_type")
             result["score"] = round(result.pop("_rrf", 0.0), 6)
+            result.update(with_reference(result, kind=result.get("kind")))
+            result.pop("abspath", None)
+            result.pop("image_abspath", None)
         results.sort(key=lambda result: result["score"], reverse=True)
         return results[:top_k]
 
@@ -563,31 +665,59 @@ class KnowledgeBaseRetriever:
             return f"[未找到] data_id={data_id} chunk_index={chunk_index}"
         fields = getattr(doc, "fields", None) or doc or {}
         body = fields.get("body") or ""
-        parent_body = ""
-        if (fields.get("kind") or "text") == "text":
-            parent_body = self._parent_chunk_body(
-                target["path"], data_id, fields.get("parent_chunk_index", -1)
-            )
-        parts = []
-        if parent_body and parent_body.strip() and parent_body.strip() != body.strip():
-            parts.extend(["## 父级上下文\n" + parent_body.strip(), "## 命中 leaf chunk\n" + body.strip()])
-        else:
-            parts.append(body.strip())
-        content = "\n\n".join(part for part in parts if part)
+        content = clean_public_text(body)
         if len(content) > max_chars:
             content = content[:max_chars] + f"\n…[已截断，本次读取共 {len(content)} 字]"
-        parent_index = int(
-            fields.get("parent_chunk_index")
-            if fields.get("parent_chunk_index") is not None else -1
-        )
-        head = (
-            f"# {fields.get('title', '')}\n"
-            f"file={fields.get('file_name', '')} chunk={int(fields.get('chunk_index') or chunk_index)} "
-            f"role={fields.get('chunk_role') or 'leaf'} parent={parent_index}\n"
-            f"header_path={fields.get('header_path') or ''}\n"
-            f"{'-' * 40}\n"
-        )
+        head = f"# {fields.get('title', '')}\n"
+        section = section_label(fields.get("header_path"))
+        if section:
+            head += f"章节：{section}\n"
+        head += f"分段：{int(fields.get('chunk_index') or chunk_index)}\n{'-' * 40}\n"
         return head + content
+
+    def reference_for_chunk(
+        self,
+        data_id: str | None = None,
+        chunk_index: int = 0,
+        kb_id: str | None = None,
+        ref: str | None = None,
+    ) -> dict:
+        """Return a stable citation for a retrieved text chunk."""
+        target, resolved_data_id = self._resolve_zvec_target(
+            data_id=data_id, kb_id=kb_id, ref=ref
+        )
+        fallback = {
+            "kind": "document",
+            "kb_id": kb_id or "",
+            "data_id": resolved_data_id or data_id or "",
+            "chunk_index": chunk_index,
+            "ref": ref or "",
+        }
+        if target is None or not resolved_data_id:
+            return public_reference(fallback, kind="document")
+        try:
+            doc = self._zvec_fetch_doc(
+                target,
+                resolved_data_id,
+                chunk_index,
+                output_fields=["data_id", "chunk_index", "file_name", "title", "header_path"],
+            )
+        except Exception:
+            doc = None
+        fields = getattr(doc, "fields", None) or doc or {}
+        file_name = str(fields.get("file_name") or "")
+        source_title = self._imported_document_titles(target["path"]).get(file_name, "")
+        return public_reference({
+            **fallback,
+            "kb_id": target["id"],
+            "data_id": fields.get("data_id") or resolved_data_id,
+            "chunk_index": fields.get("chunk_index") if fields else chunk_index,
+            "title": source_title or fields.get("title") or os.path.basename(file_name),
+            "file_name": file_name,
+            "source_file_name": source_title or fields.get("title") or file_name,
+            "header_path": fields.get("header_path") or "",
+            "ref": f"{target['id']}/{file_name}" if file_name else (ref or ""),
+        }, kind="document")
 
     def list_chunks(
         self,
@@ -633,6 +763,61 @@ class KnowledgeBaseRetriever:
             return {"error": f"[未找到] data_id={data_id} 无 chunk"}
         return {"title": title, "file_name": file_name, "n_chunks": len(chunks), "chunks": chunks}
 
+    def _image_asset_matches(
+        self,
+        kb: dict,
+        asset: dict,
+        *,
+        image_id: str,
+        image_path: str,
+        data_id: str,
+        ref: str,
+        ref_keys: set[str],
+    ) -> bool:
+        asset_data_id = str(asset.get("data_id") or "")
+        document_data_id = str(asset.get("source_data_id") or "")
+        if not document_data_id and "::image::" in asset_data_id:
+            document_data_id = asset_data_id.split("::image::", 1)[0]
+        if image_id and asset.get("image_id") != image_id:
+            return False
+        if data_id:
+            if "::image::" in data_id:
+                if asset_data_id != data_id:
+                    return False
+            elif document_data_id != data_id:
+                return False
+        if image_path:
+            current = str(asset.get("image_path") or "").replace("\\", "/")
+            if current != image_path and not current.endswith(image_path):
+                return False
+        if ref:
+            document_ref = str(asset.get("source_ref") or f"{kb['id']}/{asset.get('file_name', '')}")
+            file_name = str(asset.get("file_name") or "").replace("\\", "/")
+            current_image_path = str(asset.get("image_path") or "").replace("\\", "/")
+            if ref not in (document_ref, f"{kb['id']}/{file_name}", file_name, current_image_path):
+                return False
+        if ref_keys:
+            asset_keys = set()
+            for value in (
+                asset.get("ref_key") or "",
+                asset.get("caption") or "",
+                asset.get("display_label") or "",
+                asset.get("title") or "",
+                asset.get("alt_text") or "",
+                asset.get("near_text") or "",
+                asset.get("related_text") or "",
+            ):
+                key = self._local_ref_key(value)
+                if key:
+                    asset_keys.add(key)
+                for match in _FIGURE_REF.finditer(str(value)):
+                    key = self._local_ref_key(match.group(0))
+                    if key:
+                        asset_keys.add(key)
+            if not ref_keys.intersection(asset_keys):
+                return False
+        return True
+
     def read_image(
         self,
         image_id: str | None = None,
@@ -640,33 +825,113 @@ class KnowledgeBaseRetriever:
         data_id: str | None = None,
         ref: str | None = None,
         kb_id: str | None = None,
+        ref_key: str | None = None,
+        query: str | None = None,
     ) -> dict:
         image_id = str(image_id or "").strip()
         image_path = str(image_path or "").strip().replace("\\", "/")
         data_id = str(data_id or "").strip()
         ref = str(ref or "").strip().replace("\\", "/")
+        ref_keys = set()
+        for value in (ref_key, *(self._reference_terms(str(query or "")))):
+            key = self._local_ref_key(value or "")
+            if key:
+                ref_keys.add(key)
+        if not any((image_id, image_path, data_id, ref, ref_keys)):
+            return {
+                "error_code": "image_target_missing",
+                "error": "[图片目标缺失] 请提供知识库返回的 image_id、data_id 或图表编号。",
+            }
+        if query and not ref_keys and not (image_id or image_path or data_id):
+            return {
+                "error_code": "image_query_unresolved",
+                "error": "[图片查询无法解析] query 必须包含图1或图1-1、表8-1等图表编号。",
+            }
+
+        matches = []
         for kb in self._load_config():
             if kb_id and kb["id"] != kb_id:
                 continue
             if not kb.get("exists"):
                 continue
-            for asset in self._assets_for_kb(kb):
-                if image_id and asset.get("image_id") != image_id:
-                    continue
-                if data_id and asset.get("data_id") != data_id:
-                    continue
-                if image_path and asset.get("image_path") != image_path and not str(asset.get("image_path", "")).endswith(image_path):
-                    continue
-                if ref:
-                    full_ref = f"{kb['id']}/{asset.get('file_name', '')}"
-                    if ref not in (full_ref, asset.get("file_name"), asset.get("image_path")):
-                        continue
-                out = dict(asset)
-                out["kb_id"] = kb["id"]
-                out["ref"] = f"{kb['id']}/{asset.get('file_name', '')}"
-                out["image_abspath"] = self._asset_image_abspath(kb, asset)
-                return out
-        return {"error": f"[未找到图片资产] image_id={image_id} image_path={image_path} data_id={data_id} ref={ref}"}
+            catalog = self._asset_catalog(kb)
+            candidates = []
+            candidate_ids = set()
+
+            def add_candidates(values):
+                for asset in values:
+                    marker = id(asset)
+                    if marker not in candidate_ids:
+                        candidate_ids.add(marker)
+                        candidates.append(asset)
+
+            if data_id:
+                if "::image::" in data_id:
+                    add_candidates([catalog.by_data_id.get(data_id)] if catalog.by_data_id.get(data_id) else [])
+                else:
+                    add_candidates(catalog.by_source_data_id.get(data_id, []))
+            if image_id:
+                add_candidates(catalog.by_image_id.get(image_id, []))
+            if image_path:
+                normalized_path = image_path.lstrip("/")
+                add_candidates(catalog.by_image_path.get(normalized_path, []))
+            if ref_keys:
+                for key in ref_keys:
+                    add_candidates(catalog.by_ref_key.get(key, []))
+            if ref:
+                ref_value = ref.removeprefix(f"{kb['id']}/")
+                add_candidates(catalog.by_file_name.get(ref_value, []))
+            if not candidates:
+                continue
+            for asset in candidates:
+                if self._image_asset_matches(
+                    kb, asset, image_id=image_id, image_path=image_path,
+                    data_id=data_id, ref=ref, ref_keys=ref_keys,
+                ):
+                    matches.append((kb, asset))
+        if not matches:
+            return {
+                "error_code": "image_not_found",
+                "error": (
+                    f"[未找到图片资产] image_id={image_id} image_path={image_path} "
+                    f"data_id={data_id} ref={ref} ref_key={ref_key or ''}"
+                )
+            }
+        if len(matches) > 1:
+            candidates = []
+            for kb, asset in matches[:8]:
+                candidates.append(public_reference({
+                    "kb_id": kb["id"],
+                    "data_id": asset.get("data_id", ""),
+                    "image_id": asset.get("image_id", ""),
+                    "ref_key": asset.get("ref_key", ""),
+                    "display_label": asset.get("display_label") or asset.get("title") or "图片",
+                    "source_file_name": asset.get("source_file_name") or asset.get("file_name") or "",
+                }, kind="image"))
+            return {
+                "error_code": "image_ambiguous",
+                "error": "[图片目标不明确] 请使用 kb_search 返回的完整 image_id 或 data_id。",
+                "candidates": candidates,
+            }
+        kb, asset = matches[0]
+        out = dict(asset)
+        out["kb_id"] = kb["id"]
+        out["ref"] = asset.get("source_ref") or f"{kb['id']}/{asset.get('file_name', '')}"
+        out["source_ref"] = out["ref"]
+        if not out.get("source_file_name"):
+            source_titles = self._imported_document_titles(kb["path"])
+            out["source_file_name"] = source_titles.get(asset.get("file_name", ""), "")
+        if not out.get("ref_key"):
+            for value in (out.get("title"), out.get("alt_text"), out.get("near_text")):
+                out["ref_key"] = self._local_ref_key(value or "")
+                if out["ref_key"]:
+                    break
+        if not out.get("caption") and out.get("title") and str(out.get("title")).lower() != "image":
+            out["caption"] = out.get("title")
+        if not out.get("display_label"):
+            out["display_label"] = out.get("caption") or out.get("ref_key") or out.get("title") or "图片"
+        out["image_abspath"] = self._asset_image_abspath(kb, asset)
+        return with_reference(out, kind="image")
 
     def resolve_file(self, cited: str | None) -> str | None:
         """Resolve a citation to a file under one configured KB root."""
@@ -705,6 +970,10 @@ class KnowledgeBaseRetriever:
                     rel = str(processed_rel or "").replace("\\", "/")
                     if rel:
                         manifest_by_processed[rel] = source_rel
+                        if rel.startswith("processed/"):
+                            manifest_by_processed[rel[len("processed/"):]] = source_rel
+                        else:
+                            manifest_by_processed[f"processed/{rel}"] = source_rel
             source_root_value = str(kb.get("source_path") or "").strip()
             source_root = os.path.realpath(source_root_value) if source_root_value else ""
             for rel, absolute_path, _mtime, size in self._scan_documents(kb["path"]):
@@ -715,7 +984,7 @@ class KnowledgeBaseRetriever:
                 source_exists = bool(source_is_safe and os.path.isfile(source_path))
                 source_size = os.path.getsize(source_path) if source_exists else 0
                 display_name = os.path.basename(source_rel) if source_rel else imported_titles.get(rel, os.path.basename(rel))
-                docs.append({
+                docs.append(with_reference({
                     "kb_id": kb["id"],
                     "data_id": f"{kb['id']}::{rel}",
                     "title": display_name,
@@ -727,7 +996,7 @@ class KnowledgeBaseRetriever:
                     "source_exists": source_exists,
                     "abspath": absolute_path,
                     "ref": f"{kb['id']}/{rel}",
-                })
+                }, kind="document"))
         return docs
 
     def read_document(
@@ -743,7 +1012,7 @@ class KnowledgeBaseRetriever:
         if kb is None and ref:
             kb = self._kb_by_id(str(ref).split("/", 1)[0])
         if kb is None:
-            return {"error": "[未找到知识库]"}
+            return {"error_code": "knowledge_base_not_found", "error": "[未找到知识库]"}
         if data_id and "::" in data_id:
             rel = data_id.split("::", 1)[1].split("::image::", 1)[0]
         elif ref:
@@ -753,15 +1022,15 @@ class KnowledgeBaseRetriever:
         elif file_name:
             rel = str(file_name).replace("\\", "/")
         else:
-            return {"error": "[未指定文档]"}
+            return {"error_code": "document_target_missing", "error": "[未指定文档]"}
         target = os.path.realpath(os.path.join(kb["path"], rel))
         if not self._path_is_within(kb["path"], target) or not os.path.isfile(target):
-            return {"error": "[未找到文档]"}
+            return {"error_code": "document_not_found", "error": "[未找到文档]"}
         body = self._read_textfile(target)
         truncated = len(body) > int(max_chars)
         if truncated:
             body = body[:int(max_chars)]
-        return {
+        return with_reference({
             "kb_id": kb["id"],
             "data_id": f"{kb['id']}::{rel}",
             "title": self._imported_document_titles(kb["path"]).get(rel, os.path.basename(rel)),
@@ -770,7 +1039,7 @@ class KnowledgeBaseRetriever:
             "truncated": truncated,
             "path": target,
             "ref": f"{kb['id']}/{rel}",
-        }
+        }, kind="document")
 
     def resolve_source_document(
         self,
@@ -817,7 +1086,7 @@ class KnowledgeBaseRetriever:
             source_path = processed_path
         if not os.path.isfile(source_path):
             return {"error": "[未找到原始文档]"}
-        return {
+        return with_reference({
             "kb_id": document["kb_id"],
             "data_id": document["data_id"],
             "file_name": document["file_name"],
@@ -826,4 +1095,4 @@ class KnowledgeBaseRetriever:
             "path": source_path,
             "is_original": bool(source_rel and source_path in {external_path, legacy_original_path}),
             "ref": document["ref"],
-        }
+        }, kind="document")
