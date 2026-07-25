@@ -11,6 +11,8 @@ import os
 
 from agent_loop import StepOutcome
 
+from .references import clean_public_text, public_reference
+
 
 KB_TOOL_SCHEMAS = [
     {
@@ -69,13 +71,15 @@ KB_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "kb_image_read",
-            "description": "读取知识库图片的图题、VLM 描述、表格 Markdown、关联正文和引用信息，不发送原图。",
+            "description": "读取知识库定位图片的图题、VLM 描述、表格 Markdown、关联正文和引用信息，不发送原图。只能使用 kb_search 返回的完整 image_id/data_id，或在当前文档范围内提供图1-1等图表编号。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "image_id": {"type": "string"},
                     "data_id": {"type": "string"},
                     "ref": {"type": "string"},
+                    "ref_key": {"type": "string", "description": "图1-1、表8-1等知识库返回的图表编号"},
+                    "query": {"type": "string", "description": "包含图表编号的定位查询"},
                 },
             },
         },
@@ -84,13 +88,15 @@ KB_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "kb_image_view",
-            "description": "查看已由知识库定位的原图，并将其加入下一轮多模态模型输入；不能读取任意本地路径。",
+            "description": "查看已由知识库定位的原图，并将其加入下一轮多模态模型输入；不能读取任意本地路径。只能使用 kb_search 返回的完整 image_id/data_id，或在当前文档范围内提供图1-1等图表编号。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "image_id": {"type": "string"},
                     "data_id": {"type": "string"},
                     "ref": {"type": "string"},
+                    "ref_key": {"type": "string", "description": "图1-1、表8-1等知识库返回的图表编号"},
+                    "query": {"type": "string", "description": "包含图表编号的定位查询"},
                 },
             },
         },
@@ -186,13 +192,17 @@ class KnowledgeBaseToolsMixin:
     @staticmethod
     def _clean_hit(hit):
         keep = (
-            "kb_id", "score", "score_type", "rank", "data_id", "chunk_index",
-            "title", "file_name", "folder", "ref", "kind", "format", "image_id",
-            "parent_data_id", "parent_chunk_index", "header_path",
-            "chunk_role", "snippet", "body", "description", "table_markdown",
-            "related_text", "related_text_refs", "near_text", "uncertain",
+            "score", "score_type", "rank", "folder", "format", "occurrence_id",
+            "header_path", "snippet", "body", "description", "table_markdown",
+            "related_text", "related_text_refs", "near_text", "uncertain", "caption",
+            "display_label",
         )
-        return {key: hit[key] for key in keep if key in hit and hit[key] is not None}
+        result = public_reference(hit, kind=hit.get("kind"))
+        result.update({key: hit[key] for key in keep if key in hit and hit[key] is not None})
+        for key in ("body", "snippet", "related_text"):
+            if key in result:
+                result[key] = clean_public_text(result[key])
+        return result
 
     def _record_knowledge_citations(self, *items):
         """Keep stable knowledge references for the Desktop message metadata.
@@ -205,8 +215,10 @@ class KnowledgeBaseToolsMixin:
         if citations is None:
             self._knowledge_citations = citations = []
         seen = {
-            (item.get("kb_id", ""), item.get("data_id", ""),
-             item.get("ref", ""), item.get("image_id", ""))
+            (
+                item.get("kb_id", ""), item.get("data_id", ""),
+                item.get("image_id", ""), item.get("chunk_index", -1),
+            )
             for item in citations
         }
         for value in items:
@@ -219,14 +231,15 @@ class KnowledgeBaseToolsMixin:
             for raw in values:
                 if not isinstance(raw, dict):
                     continue
-                citation = {
-                    key: str(raw.get(key) or "").strip()
-                    for key in ("kb_id", "data_id", "ref", "image_id", "title", "file_name", "kind")
-                    if raw.get(key)
-                }
+                citation = public_reference(raw, kind=raw.get("kind"))
+                if raw.get("display_label"):
+                    citation["display_label"] = str(raw.get("display_label")).strip()
                 if not any(citation.get(key) for key in ("data_id", "ref", "image_id")):
                     continue
-                key = tuple(citation.get(name, "") for name in ("kb_id", "data_id", "ref", "image_id"))
+                key = (
+                    citation.get("kb_id", ""), citation.get("data_id", ""),
+                    citation.get("image_id", ""), citation.get("chunk_index", -1),
+                )
                 if key not in seen:
                     citations.append(citation)
                     seen.add(key)
@@ -266,7 +279,12 @@ class KnowledgeBaseToolsMixin:
             "scope": self._knowledge_scope(),
             "hits": [self._clean_hit(hit) for hit in hits],
         }
-        self._record_knowledge_citations(result["hits"])
+        # Search results are candidates.  An image becomes a citation only
+        # after kb_image_read/view successfully resolves it, so unrelated
+        # vector hits cannot leak into the final answer's citation list.
+        self._record_knowledge_citations(
+            [hit for hit in hits if hit.get("kind") != "image"]
+        )
         yield "[Info] kb_search done.\n"
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -297,10 +315,14 @@ class KnowledgeBaseToolsMixin:
                 break
             parts.append(str(content))
         if parts:
-            self._record_knowledge_citations({
-                "kb_id": self._scope_kb_id(), "data_id": data_id, "ref": ref,
-                "kind": "document",
-            })
+            self._record_knowledge_citations(
+                backend.reference_for_chunk(
+                    data_id=data_id,
+                    ref=ref,
+                    kb_id=self._scope_kb_id(),
+                    chunk_index=start,
+                )
+            )
         yield "[Info] kb_read done.\n"
         return self._anchor_outcome(args, "\n\n".join(parts) or "[kb_read] 未读到内容。")
 
@@ -344,10 +366,10 @@ class KnowledgeBaseToolsMixin:
     def _read_image_asset(self, args):
         lookup = {
             key: str(args.get(key) or "").strip() or None
-            for key in ("image_id", "data_id", "ref")
+            for key in ("image_id", "data_id", "ref", "ref_key", "query")
         }
         if not any(lookup.values()):
-            return None, "[Error] 需要 image_id、data_id 或 ref。"
+            return None, "[Error] 需要 kb_search 返回的 image_id/data_id，或图1-1等图表编号。"
         # image_id alone does not carry the owning document.  In a
         # restricted scope the backend query is first constrained by kb_id;
         # the returned asset is then checked against the document scope below.
@@ -372,9 +394,13 @@ class KnowledgeBaseToolsMixin:
 
     @staticmethod
     def _public_image(info):
-        result = dict(info)
-        result.pop("image_abspath", None)
-        result.pop("image_path", None)
+        result = public_reference(info, kind="image")
+        for key in (
+            "description", "table_markdown", "related_text", "related_text_refs",
+            "near_text", "uncertain", "analysis_error", "caption", "display_label",
+        ):
+            if key in info:
+                result[key] = info.get(key)
         return result
 
     def do_kb_image_read(self, args, response):
@@ -414,8 +440,9 @@ class KnowledgeBaseToolsMixin:
                     "type": "text",
                     "text": (
                         "[知识库图片原图]\n"
-                        f"图题: {info.get('title') or info.get('alt_text') or ''}\n"
-                        f"引用: [[kb:{info.get('ref') or ''}]]\n"
+                        f"图题: {info.get('display_label') or info.get('title') or info.get('alt_text') or ''}\n"
+                        f"来源: {info.get('source_file_name') or ''}\n"
+                        f"引用: {info.get('citation_label') or info.get('title') or '图片'}\n"
                         "请直接查看紧随其后的原图，并结合工具结果回答用户问题。"
                     ),
                 },
@@ -428,22 +455,17 @@ class KnowledgeBaseToolsMixin:
         info, error = self._read_image_asset(args)
         if error:
             return self._anchor_outcome(args, error)
-        self._record_knowledge_citations(info)
         error = self._queue_image_view(info)
         if error:
             return self._anchor_outcome(args, error)
-        result = {
+        self._record_knowledge_citations(info)
+        result = public_reference(info, kind="image")
+        result.update({
             "status": "attached",
             "message": "原图已加入下一轮模型输入。",
-            "kb_id": info.get("kb_id", ""),
-            "data_id": info.get("data_id", ""),
-            "image_id": info.get("image_id", ""),
-            "ref": info.get("ref", ""),
-            "title": info.get("title", ""),
             "description": info.get("description", ""),
             "table_markdown": info.get("table_markdown", ""),
             "related_text": info.get("related_text", ""),
-            "citation": f"[[kb:{info.get('ref', '')}]]" if info.get("ref") else "",
-        }
+        })
         yield "[Info] kb_image_view done.\n"
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
