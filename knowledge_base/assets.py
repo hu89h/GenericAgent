@@ -488,7 +488,19 @@ class ImageAssetProcessor:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         os.replace(temp, path)
 
-    def write_assets(self, kb_path: str, assets, validation=None) -> None:
+    def _pending_assets_path(self, kb_path: str) -> str:
+        return self._image_assets_path_fn(kb_path) + ".pending"
+
+    def write_assets(self, kb_path: str, assets, validation=None, pending: bool = False) -> None:
+        """Serialise image assets.
+
+        When ``pending`` is true the payload is written to a
+        ``image_assets.json.pending`` sidecar instead of the final path.
+        The build coordinator promotes it with :meth:`commit_pending_assets`
+        only after the Zvec index has published successfully, so a failed /
+        rolled-back index build never leaves the final asset file
+        overwritten out of sync with the index (bug S3).
+        """
         os.makedirs(self._index_dir_fn(kb_path), exist_ok=True)
         content_fields = ("description", "table_markdown", "uncertain", "analysis_error")
         contents = []
@@ -516,7 +528,7 @@ class ImageAssetProcessor:
             "contents": contents,
             "assets": occurrences,
         }
-        path = self._image_assets_path_fn(kb_path)
+        path = self._pending_assets_path(kb_path) if pending else self._image_assets_path_fn(kb_path)
         temp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
         try:
             with open(temp, "w", encoding="utf-8") as handle:
@@ -528,8 +540,32 @@ class ImageAssetProcessor:
             except OSError:
                 pass
 
-    def load_assets(self, kb_path: str):
+    def commit_pending_assets(self, kb_path: str) -> bool:
+        """Atomically promote a pending asset file to the final path.
+
+        Returns True if a pending file existed and was promoted, False if
+        there was nothing to commit (e.g. an up-to-date build that never
+        regenerated assets)."""
+        pending = self._pending_assets_path(kb_path)
+        if not os.path.exists(pending):
+            return False
+        os.replace(pending, self._image_assets_path_fn(kb_path))
+        return True
+
+    def discard_pending_assets(self, kb_path: str) -> None:
+        """Drop a pending asset file left by a failed index build."""
+        pending = self._pending_assets_path(kb_path)
+        try:
+            os.remove(pending)
+        except OSError:
+            pass
+
+    def load_assets(self, kb_path: str, prefer_pending: bool = False):
         path = self._image_assets_path_fn(kb_path)
+        if prefer_pending:
+            pending = self._pending_assets_path(kb_path)
+            if os.path.exists(pending):
+                path = pending
         try:
             with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
@@ -788,6 +824,14 @@ class ImageAssetProcessor:
             output_chars = self.analysis_output_chars(analysis)
             delta["output_chars"] += output_chars
             delta["models"] = self._model_usage_delta_fn(str(analysis.get("model") or ""), usage, output_chars)
+            # S1: a failed parse/analysis (error-marked) must NOT be cached —
+            # otherwise garbage freezes into the permanent VLM cache and is
+            # never retried.  The API call still happened, so usage above is
+            # kept; here we just flag it failed and skip persisting.
+            if analysis.get("error"):
+                delta["calls"] -= 1
+                delta["failed"] += 1
+                return analysis, delta
             self.save_cached_analysis(kb_path, image_sha, analysis_meta, {
                 "image_sha256": image_sha,
                 "image_path": job.image_path or "",
@@ -808,7 +852,15 @@ class ImageAssetProcessor:
         asset["table_markdown"] = analysis.get("table_markdown", "")
         asset["uncertain"] = analysis.get("uncertain", [])
         asset["analysis_error"] = analysis.get("error", "")
-        asset["ref_key"] = self.local_ref_key(analysis.get("ref_key") or "") or asset.get("ref_key", "")
+        # S2: the occurrence's own caption-derived ref_key (set per
+        # occurrence at ingestion, from the caption next to THIS
+        # placement) is authoritative for the exact-image-ref channel.
+        # The VLM sees only the shared image content (one analysis per
+        # image_sha) and must not overwrite a captioned occurrence's
+        # figure/table number — otherwise a figure reused under two
+        # numbers gets both occurrences pinned to whatever the VLM
+        # guessed.  VLM ref_key is therefore a fallback only.
+        asset["ref_key"] = asset.get("ref_key", "") or self.local_ref_key(analysis.get("ref_key") or "")
         asset["display_label"] = self._display_label(
             asset.get("ref_key", ""), asset.get("caption", ""), asset.get("title", "")
         )

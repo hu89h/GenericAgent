@@ -32,6 +32,8 @@ class ImageServices:
     apply_image_analysis: Callable[..., None]
     write_image_assets: Callable[..., None]
     load_image_assets: Callable[..., list]
+    commit_pending_image_assets: Callable[..., bool]
+    discard_pending_image_assets: Callable[..., None]
 
 
 @dataclass(frozen=True)
@@ -200,6 +202,9 @@ class BuildCoordinator:
             for record in image_records
             if record.get("kind") == "image"
         ]
+        # S3: write to the pending sidecar; build_kb promotes it only after
+        # the Zvec index publishes successfully, keeping asset file and index
+        # consistent even if indexing fails/rolls back.
         images.write_image_assets(
             kb["path"],
             stored_assets,
@@ -208,6 +213,7 @@ class BuildCoordinator:
                 "indexed": len(stored_assets),
                 "missing": image_missing,
             },
+            pending=True,
         )
         log(
             f"  抽取完成：{n_files} 文件，有效 {n_ok}，无正文 {n_empty}，"
@@ -370,14 +376,26 @@ class BuildCoordinator:
             processed=0,
             total=len(scanned),
         )
-        if mode == "images":
-            z_status, z_stats = index.append_zvec_image_index(
-                kb, records, sources, force=force, logfn=log
-            )
+        try:
+            if mode == "images":
+                z_status, z_stats = index.append_zvec_image_index(
+                    kb, records, sources, force=force, logfn=log
+                )
+            else:
+                z_status, z_stats = index.build_zvec_index(
+                    kb, records, sources, force=force, logfn=log
+                )
+        except Exception:
+            # S3: index build blew up — drop the pending asset file so the
+            # committed asset/index pair stays consistent.
+            services.images.discard_pending_image_assets(kb["path"])
+            raise
+        # S3: promote pending assets only when the index actually published;
+        # on any non-built status the old asset file is kept intact.
+        if z_status == "built":
+            services.images.commit_pending_image_assets(kb["path"])
         else:
-            z_status, z_stats = index.build_zvec_index(
-                kb, records, sources, force=force, logfn=log
-            )
+            services.images.discard_pending_image_assets(kb["path"])
         return self._finalize_build_result(kb, scanned, z_status, z_stats, log)
 
     @staticmethod

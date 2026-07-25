@@ -428,14 +428,34 @@ def _asset_body(asset):
     return _image_assets().asset_body(asset)
 
 
-def _write_image_assets(kb_path, assets, validation=None):
-    _image_assets().write_assets(kb_path, assets, validation=validation)
-    if _retrieval_instance is not None:
+def _write_image_assets(kb_path, assets, validation=None, pending=False):
+    _image_assets().write_assets(kb_path, assets, validation=validation, pending=pending)
+    # A pending write does not change the final file the retriever reads,
+    # so only invalidate the retrieval asset cache on a direct/final write.
+    if not pending and _retrieval_instance is not None:
         _retrieval_instance.clear_asset_cache(kb_path)
+
+
+def _commit_pending_image_assets(kb_path):
+    committed = _image_assets().commit_pending_assets(kb_path)
+    if committed and _retrieval_instance is not None:
+        _retrieval_instance.clear_asset_cache(kb_path)
+    return committed
+
+
+def _discard_pending_image_assets(kb_path):
+    _image_assets().discard_pending_assets(kb_path)
 
 
 def _load_image_assets(kb_path):
     return _image_assets().load_assets(kb_path)
+
+
+def _load_image_assets_build(kb_path):
+    # Build/index-time count reads the not-yet-committed pending assets so
+    # meta stats reflect the assets that will be published together with
+    # this index generation.  Retrieval keeps using the final-only loader.
+    return _image_assets().load_assets(kb_path, prefer_pending=True)
 
 
 def _image_source_fingerprint(kb_path, scanned, image_indexes=None):
@@ -478,6 +498,8 @@ def _build_coordinator():
                     apply_image_analysis=_apply_image_analysis,
                     write_image_assets=_write_image_assets,
                     load_image_assets=_load_image_assets,
+                    commit_pending_image_assets=_commit_pending_image_assets,
+                    discard_pending_image_assets=_discard_pending_image_assets,
                 ),
                 index=_IndexServices(
                     zvec_path=_zvec_path,
@@ -580,7 +602,7 @@ def _zvec_store():
                 chunking_meta_fn=_chunking_meta,
                 image_analysis_meta_fn=_image_analysis_meta,
                 usage_fn=_usage,
-                load_assets_fn=_load_image_assets,
+                load_assets_fn=_load_image_assets_build,
                 document_fingerprint_fn=_fingerprint,
             )
     return _zvec_store_instance

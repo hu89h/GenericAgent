@@ -110,23 +110,36 @@ def _prompt(focus: str, title: str, near_text: str, ref_candidates: list[str]) -
 
 
 def _extract_json(text: str) -> Dict[str, object]:
-    text = (text or "").strip()
+    """Parse the model reply into a dict.
+
+    On any parse failure this returns an *error-marked* dict
+    (``{"error": ..., "raw": ...}``) rather than a fabricated
+    "success" payload.  The build path (:meth:`analyze_image_job`)
+    treats a truthy ``error`` as a failed analysis: it is neither
+    cached nor written into the index, and it is retried on the next
+    build.  This prevents non-JSON garbage from being frozen into the
+    permanent VLM cache (bug S1).
+    """
+    raw = (text or "").strip()
+    text = raw
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
     try:
         obj = json.loads(text)
-        return obj if isinstance(obj, dict) else {}
+        if isinstance(obj, dict):
+            return obj
     except Exception:
         pass
     m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        return {"description": text[:1000], "uncertain": ["model did not return JSON"]}
-    try:
-        obj = json.loads(m.group(0))
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
-        return {"description": text[:1000], "uncertain": ["invalid JSON from model"]}
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+    return {"error": "model did not return valid JSON", "raw": raw[:1000]}
 
 
 def _qa_prompt(question: str, title: str, context: Dict[str, object]) -> str:
