@@ -467,22 +467,53 @@ class ImageAssetProcessor:
                 parts.append(f"{label}: {value}")
         return "\n".join(parts).strip()
 
-    def analysis_cache_path(self, kb_path: str, image_sha: str, analysis_meta, focus: str = "general") -> str:
+    @staticmethod
+    def analysis_context_key(title: str = "", near_text: str = "", ref_candidates=None) -> str:
+        """Digest the prompt-shaping context of one VLM analysis (M1).
+
+        The cached analysis is a function of the image bytes *and* the
+        contextual text we feed the model (title / near_text /
+        ref_candidates).  Keying the cache on ``image_sha`` alone means
+        editing the surrounding Markdown returns a stale analysis that was
+        produced from the old context.  Folding a digest of the context
+        into the filename makes such an edit miss the cache and re-analyse,
+        while an unchanged context still hits.
+        """
+        refs = ref_candidates or []
+        if isinstance(refs, str):
+            refs = [refs]
+        payload = "\x1f".join(
+            (
+                str(title or ""),
+                str(near_text or ""),
+                "\x1e".join(str(item) for item in refs),
+            )
+        )
+        return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:12]
+
+    def analysis_cache_path(
+        self, kb_path: str, image_sha: str, analysis_meta, focus: str = "general", context_key: str = ""
+    ) -> str:
         version = analysis_meta.get("prompt_version", 1)
         model = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(analysis_meta.get("model") or "image"))
         focus_part = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(focus or "general"))
-        return os.path.join(self._image_cache_dir_fn(kb_path), f"{image_sha}.v{version}.{model}.{focus_part}.json")
+        ctx = re.sub(r"[^A-Za-z0-9]+", "", str(context_key or ""))[:12]
+        ctx_part = f".c{ctx}" if ctx else ""
+        return os.path.join(
+            self._image_cache_dir_fn(kb_path),
+            f"{image_sha}.v{version}.{model}.{focus_part}{ctx_part}.json",
+        )
 
-    def load_cached_analysis(self, kb_path: str, image_sha: str, analysis_meta, focus: str = "general"):
+    def load_cached_analysis(self, kb_path: str, image_sha: str, analysis_meta, focus: str = "general", context_key: str = ""):
         try:
-            with open(self.analysis_cache_path(kb_path, image_sha, analysis_meta, focus), encoding="utf-8") as handle:
+            with open(self.analysis_cache_path(kb_path, image_sha, analysis_meta, focus, context_key), encoding="utf-8") as handle:
                 return json.load(handle)
         except Exception:
             return None
 
-    def save_cached_analysis(self, kb_path: str, image_sha: str, analysis_meta, payload, focus: str = "general") -> None:
+    def save_cached_analysis(self, kb_path: str, image_sha: str, analysis_meta, payload, focus: str = "general", context_key: str = "") -> None:
         os.makedirs(self._image_cache_dir_fn(kb_path), exist_ok=True)
-        path = self.analysis_cache_path(kb_path, image_sha, analysis_meta, focus)
+        path = self.analysis_cache_path(kb_path, image_sha, analysis_meta, focus, context_key)
         temp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
         with open(temp, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -794,7 +825,15 @@ class ImageAssetProcessor:
         image_sha = job.image_sha
         analysis_meta = job.analysis_meta
         focus = str(job.focus or "general")
-        cached = self.load_cached_analysis(kb_path, image_sha, analysis_meta, focus)
+        # M1: the cache key must include the prompt-shaping context so that
+        # editing the surrounding Markdown re-analyses instead of returning
+        # an analysis produced from the stale context.
+        context_key = self.analysis_context_key(
+            title=job.title or "",
+            near_text=job.near_text or "",
+            ref_candidates=job.ref_candidates or [],
+        )
+        cached = self.load_cached_analysis(kb_path, image_sha, analysis_meta, focus, context_key)
         if cached:
             delta["cached"] += 1
             result = cached.get("result", cached)
@@ -840,7 +879,7 @@ class ImageAssetProcessor:
                 "usage": usage,
                 "request_id": request_id,
                 "result": analysis,
-            }, focus)
+            }, focus, context_key)
             return analysis, delta
         except Exception as exc:
             delta["failed"] += 1

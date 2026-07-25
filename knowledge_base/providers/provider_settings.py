@@ -82,6 +82,52 @@ def llm_config() -> Dict[str, Any]:
     return _preferred_llm_cfg(_load_mykey_vars())
 
 
+def vision_config() -> Dict[str, Any]:
+    """Return the vision model config for image analysis / image QA.
+
+    Read fresh from mykey.py on every call (like :func:`embedding_config`),
+    so editing mykey.py or the environment takes effect without restarting
+    the process.  A dedicated ``kb_vision_config`` block — or the
+    ``GA_KB_VISION_BASE_URL`` / ``GA_KB_VISION_API_KEY`` / ``GA_KB_VISION_MODEL``
+    environment overrides — lets image understanding use a vision-capable
+    model independent of the default chat model.  When none is present it
+    falls back to the regular ``native_oai_*`` config (:func:`llm_config`),
+    preserving the historical "reuse the first native_oai model" behaviour.
+    """
+    vars_ = _load_mykey_vars()
+    raw = vars_.get("kb_vision_config")
+    cfg = dict(raw) if isinstance(raw, dict) else {}
+    fallback = _preferred_llm_cfg(vars_)
+
+    def pick(*keys, env: str = "", default: Any = "") -> Any:
+        for key in keys:
+            val = cfg.get(key)
+            if val:
+                return val
+        if env:
+            val = os.environ.get(env, "").strip()
+            if val:
+                return val
+        for key in keys:
+            val = fallback.get(key)
+            if val:
+                return val
+        return default
+
+    apibase = str(pick("apibase", "base_url", env="GA_KB_VISION_BASE_URL")).strip().rstrip("/")
+    apikey = str(pick("apikey", "api_key", env="GA_KB_VISION_API_KEY")).strip()
+    model = str(pick("model", env="GA_KB_VISION_MODEL")).strip()
+    timeout = int(pick("read_timeout", "timeout", default=120) or 120)
+    retries = int(pick("max_retries", default=2) or 2)
+    return {
+        "apibase": apibase,
+        "apikey": apikey,
+        "model": model,
+        "read_timeout": timeout,
+        "max_retries": retries,
+    }
+
+
 def embedding_config() -> Dict[str, Any]:
     """Return KB embedding config from mykey.py.
 

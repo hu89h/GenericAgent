@@ -288,7 +288,7 @@ def _build_sources(kb_path, scanned, mode="full", image_indexes=None):
             "images": _image_source_fingerprint(
                 kb_path, scanned, image_indexes=image_indexes
             ),
-            "image_analysis": _image_analysis_meta(),
+            "image_analysis": _image_build_fingerprint_meta(),
         })
     return sources
 
@@ -377,8 +377,22 @@ def _load_image_client():
 
 
 def _image_analysis_meta():
+    """Full analysis meta (incl. runtime_image_qa) for asset-file display."""
     try:
         return _load_image_client().analysis_meta()
+    except Exception as e:
+        return {
+            "enabled": _truthy_env("GA_KB_IMAGE_ANALYSIS"),
+            "error": str(e),
+            "prompt_version": int(os.environ.get("GA_KB_IMAGE_PROMPT_VERSION", "6")),
+        }
+
+
+def _image_build_fingerprint_meta():
+    """Build/index fingerprint meta — excludes the query-time runtime_image_qa
+    switch so toggling it no longer forces a full re-index (bug M2)."""
+    try:
+        return _load_image_client().build_analysis_meta()
     except Exception as e:
         return {
             "enabled": _truthy_env("GA_KB_IMAGE_ANALYSIS"),
@@ -600,7 +614,7 @@ def _zvec_store():
                 embedding_meta_fn=_embedding_meta,
                 sparse_embedding_meta_fn=_sparse_embedding_meta,
                 chunking_meta_fn=_chunking_meta,
-                image_analysis_meta_fn=_image_analysis_meta,
+                image_analysis_meta_fn=_image_build_fingerprint_meta,
                 usage_fn=_usage,
                 load_assets_fn=_load_image_assets_build,
                 document_fingerprint_fn=_fingerprint,

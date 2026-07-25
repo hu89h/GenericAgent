@@ -11,15 +11,36 @@ from typing import Dict
 from . import provider_http, provider_settings
 
 
-_MYKEY_LLM = provider_settings.llm_config()
-BASE_URL = str(_MYKEY_LLM.get("apibase") or _MYKEY_LLM.get("base_url") or "").rstrip("/")
-API_KEY = _MYKEY_LLM.get("apikey") or ""
-MODEL = _MYKEY_LLM.get("model") or ""
-PROMPT_VERSION = int(os.environ.get("GA_KB_IMAGE_PROMPT_VERSION", "6"))
-TIMEOUT = int(_MYKEY_LLM.get("read_timeout") or _MYKEY_LLM.get("timeout") or 120)
-RETRIES = int(_MYKEY_LLM.get("max_retries") or 2)
-MAX_IMAGE_BYTES = int(os.environ.get("GA_KB_IMAGE_MAX_BYTES", str(8 * 1024 * 1024)))
-RUNTIME_IMAGE_QA_ON = provider_http.env_bool("GA_KB_RUNTIME_IMAGE_QA", "1")
+def _config() -> Dict[str, object]:
+    """Resolve vision endpoint/model/timeouts fresh on every call.
+
+    Historically these were frozen at import time, so editing mykey.py or the
+    environment required a process restart and could silently drift from the
+    embedding config (which is read at runtime).  Reading here keeps the whole
+    KB provider layer consistently runtime-configured (bug M4/V1).
+    """
+    cfg = provider_settings.vision_config()
+    return {
+        "base_url": str(cfg.get("apibase") or cfg.get("base_url") or "").rstrip("/"),
+        "api_key": cfg.get("apikey") or "",
+        "model": cfg.get("model") or "",
+        "timeout": int(cfg.get("read_timeout") or cfg.get("timeout") or 120),
+        "retries": int(cfg.get("max_retries") or 2),
+    }
+
+
+def prompt_version() -> int:
+    return int(os.environ.get("GA_KB_IMAGE_PROMPT_VERSION", "6"))
+
+
+def max_image_bytes() -> int:
+    return int(os.environ.get("GA_KB_IMAGE_MAX_BYTES", str(8 * 1024 * 1024)))
+
+
+def runtime_image_qa_on() -> bool:
+    return provider_http.env_bool("GA_KB_RUNTIME_IMAGE_QA", "1")
+
+
 _TABLE_FOCUS_RE = re.compile(
     r"(?i)(?:表格|附表|表\s*[0-9０-９一二三四五六七八九十百]+(?:\s*[-－–—.．·]\s*[0-9０-９]+)*|table\s*[0-9０-９]*)"
 )
@@ -34,14 +55,27 @@ def enabled() -> bool:
     return provider_http.env_bool("GA_KB_IMAGE_ANALYSIS")
 
 
-def analysis_meta() -> Dict[str, object]:
+def build_analysis_meta() -> Dict[str, object]:
+    """Only the fields that affect what gets baked into the index.
+
+    Used for the Zvec build/freshness fingerprint.  Deliberately excludes
+    ``runtime_image_qa``: that is a pure query-time switch and must not force
+    a full re-index when toggled (bug M2).
+    """
+    cfg = _config()
     return {
         "enabled": enabled(),
-        "base_url": BASE_URL,
-        "model": MODEL,
-        "runtime_image_qa": RUNTIME_IMAGE_QA_ON,
-        "prompt_version": PROMPT_VERSION,
+        "base_url": cfg["base_url"],
+        "model": cfg["model"],
+        "prompt_version": prompt_version(),
     }
+
+
+def analysis_meta() -> Dict[str, object]:
+    """Full meta for display / asset-file record (superset of the build meta)."""
+    meta = build_analysis_meta()
+    meta["runtime_image_qa"] = runtime_image_qa_on()
+    return meta
 
 
 def understanding_focus(
@@ -66,8 +100,9 @@ def _mime(path: str) -> str:
 
 def _data_url(path: str) -> str:
     size = os.path.getsize(path)
-    if size > MAX_IMAGE_BYTES:
-        raise RuntimeError(f"image too large: {size} bytes > {MAX_IMAGE_BYTES}")
+    limit = max_image_bytes()
+    if size > limit:
+        raise RuntimeError(f"image too large: {size} bytes > {limit}")
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("ascii")
     return f"data:{_mime(path)};base64,{b64}"
@@ -170,12 +205,13 @@ def answer_image_question(
     title: str = "",
     context: Dict[str, object] | None = None,
 ) -> Dict[str, object]:
-    if not RUNTIME_IMAGE_QA_ON:
+    if not runtime_image_qa_on():
         raise RuntimeError("GA_KB_RUNTIME_IMAGE_QA 未开启，无法实时图片问答")
-    if not (API_KEY and BASE_URL and MODEL):
-        raise RuntimeError("mykey.py 需要配置支持视觉输入的 native_oai_* 模型")
+    cfg = _config()
+    if not (cfg["api_key"] and cfg["base_url"] and cfg["model"]):
+        raise RuntimeError("mykey.py 需要配置支持视觉输入的模型（kb_vision_config 或 native_oai_*）")
     body = provider_http.chat_completions(
-        model=MODEL,
+        model=cfg["model"],
         messages=[
             {
                 "role": "user",
@@ -185,16 +221,16 @@ def answer_image_question(
                 ],
             }
         ],
-        base=BASE_URL,
-        key=API_KEY,
-        timeout=TIMEOUT,
-        retries=RETRIES,
+        base=cfg["base_url"],
+        key=cfg["api_key"],
+        timeout=cfg["timeout"],
+        retries=cfg["retries"],
         extra={"temperature": 0},
     )
     content = body["choices"][0]["message"]["content"]
     result = _extract_json(content)
-    result["model"] = MODEL
-    result["prompt_version"] = PROMPT_VERSION
+    result["model"] = cfg["model"]
+    result["prompt_version"] = prompt_version()
     if isinstance(body.get("usage"), dict):
         result["_usage"] = body["usage"]
     if body.get("id"):
@@ -212,10 +248,11 @@ def analyze_image(
 ) -> Dict[str, object]:
     if not enabled():
         return {}
-    if not (API_KEY and BASE_URL and MODEL):
-        raise RuntimeError("mykey.py 需要配置支持视觉输入的 native_oai_* 模型")
+    cfg = _config()
+    if not (cfg["api_key"] and cfg["base_url"] and cfg["model"]):
+        raise RuntimeError("mykey.py 需要配置支持视觉输入的模型（kb_vision_config 或 native_oai_*）")
     body = provider_http.chat_completions(
-        model=MODEL,
+        model=cfg["model"],
         messages=[
             {
                 "role": "user",
@@ -225,16 +262,16 @@ def analyze_image(
                 ],
             }
         ],
-        base=BASE_URL,
-        key=API_KEY,
-        timeout=TIMEOUT,
-        retries=RETRIES,
+        base=cfg["base_url"],
+        key=cfg["api_key"],
+        timeout=cfg["timeout"],
+        retries=cfg["retries"],
         extra={"temperature": 0},
     )
     content = body["choices"][0]["message"]["content"]
     result = _extract_json(content)
-    result["model"] = MODEL
-    result["prompt_version"] = PROMPT_VERSION
+    result["model"] = cfg["model"]
+    result["prompt_version"] = prompt_version()
     if isinstance(body.get("usage"), dict):
         result["_usage"] = body["usage"]
     if body.get("id"):

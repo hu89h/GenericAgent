@@ -482,11 +482,29 @@ class ZvecIndex:
 
         started = time.time()
         try:
-            try:
-                collection.delete_by_filter("kind = 'image'")
-            except Exception as exc:
-                if logfn:
-                    logfn(f"  [warn] zvec 删除旧图片资产失败，改用 upsert 覆盖：{exc}")
+            # M3: the old image chunks MUST be deleted before re-inserting.
+            # upsert only overwrites rows whose data_id is unchanged; any
+            # image removed from the source, or whose data_id shifted, would
+            # otherwise survive as an orphan chunk and silently pollute
+            # retrieval.  A delete failure is therefore fatal — retry a few
+            # times, then abort the append so the prior index and the pending
+            # assets are both rolled back (build.py discards pending on a
+            # non-"built" status) instead of publishing a corrupt index.
+            delete_attempts = 3
+            for attempt in range(1, delete_attempts + 1):
+                try:
+                    collection.delete_by_filter("kind = 'image'")
+                    break
+                except Exception as exc:
+                    if attempt >= delete_attempts:
+                        if logfn:
+                            logfn(f"  [error] zvec 删除旧图片资产失败（已重试 {delete_attempts} 次），放弃追加：{exc}")
+                        return "unavailable", {
+                            "error": f"failed to delete stale image chunks after {delete_attempts} attempts: {exc}"
+                        }
+                    if logfn:
+                        logfn(f"  [warn] zvec 删除旧图片资产失败（第 {attempt}/{delete_attempts} 次），重试：{exc}")
+                    time.sleep(0.5 * attempt)
             stats, embedding_used, sparse_embedding_used = self.insert_records(
                 kb, collection, records, logfn=logfn, operation="upsert"
             )
