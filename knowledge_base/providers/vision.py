@@ -17,7 +17,7 @@ def _config() -> Dict[str, object]:
     Historically these were frozen at import time, so editing mykey.py or the
     environment required a process restart and could silently drift from the
     embedding config (which is read at runtime).  Reading here keeps the whole
-    KB provider layer consistently runtime-configured (bug M4/V1).
+    KB provider layer consistently runtime-configured.
     """
     cfg = provider_settings.vision_config()
     return {
@@ -26,6 +26,7 @@ def _config() -> Dict[str, object]:
         "model": cfg.get("model") or "",
         "timeout": int(cfg.get("read_timeout") or cfg.get("timeout") or 120),
         "retries": int(cfg.get("max_retries") or 2),
+        "max_tokens": int(cfg.get("max_tokens") or 8192),
     }
 
 
@@ -74,7 +75,7 @@ def build_analysis_meta() -> Dict[str, object]:
 
     Used for the Zvec build/freshness fingerprint.  Deliberately excludes
     ``runtime_image_qa``: that is a pure query-time switch and must not force
-    a full re-index when toggled (bug M2).
+    a full re-index when toggled.
     """
     cfg = _config()
     return {
@@ -167,27 +168,41 @@ def _extract_json(text: str) -> Dict[str, object]:
     treats a truthy ``error`` as a failed analysis: it is neither
     cached nor written into the index, and it is retried on the next
     build.  This prevents non-JSON garbage from being frozen into the
-    permanent VLM cache (bug S1).
+    permanent VLM cache.
     """
     raw = (text or "").strip()
     text = raw
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    try:
-        obj = json.loads(text)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
+
+    def parse_object(candidate: str) -> Dict[str, object] | None:
+        variants = [candidate]
+        # Vision models commonly put LaTeX commands such as ``\checkmark``
+        # inside an otherwise valid JSON string.  A single backslash before
+        # an unsupported JSON escape makes the whole response invalid.  Only
+        # escape those unsupported backslashes; do not repair arbitrary
+        # truncated or structurally invalid output.
+        escaped = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", candidate)
+        if escaped != candidate:
+            variants.append(escaped)
+        for value in variants:
+            try:
+                obj = json.loads(value)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                continue
+        return None
+
+    parsed = parse_object(text)
+    if parsed is not None:
+        return parsed
     m = re.search(r"\{.*\}", text, re.S)
     if m:
-        try:
-            obj = json.loads(m.group(0))
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            pass
+        parsed = parse_object(m.group(0))
+        if parsed is not None:
+            return parsed
     return {"error": "model did not return valid JSON", "raw": raw[:1000]}
 
 
@@ -235,10 +250,13 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
         key=cfg["api_key"],
         timeout=cfg["timeout"],
         retries=cfg["retries"],
-        extra={"temperature": 0},
+        extra={"temperature": 0, "max_tokens": cfg["max_tokens"]},
     )
-    content = body["choices"][0]["message"]["content"]
+    choice = body["choices"][0]
+    content = choice["message"]["content"]
     result = _extract_json(content)
+    if result.get("error") and choice.get("finish_reason"):
+        result["finish_reason"] = str(choice.get("finish_reason"))
     result["model"] = cfg["model"]
     result["prompt_version"] = prompt_version()
     if isinstance(body.get("usage"), dict):

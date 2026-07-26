@@ -1,43 +1,26 @@
-"""Build usage accounting for the knowledge-base indexer.
-
-This module deliberately does not import ``backend``.  Storage paths are
-supplied by :class:`UsageTracker` callbacks so accounting can evolve
-independently from document extraction and Zvec operations.
-
-Only compact per-build counters are tracked here.  The fine-grained cost
-estimation and per-model token breakdown that used to live in this module
-were removed: their sole consumer was ``kb --status`` printing the raw JSON,
-while the Desktop bridge and frontend never read the cost/model fields.
-
-Token counts are the *real* values reported by the provider APIs — image
-prompt/completion tokens come from the VLM ``usage`` block, and embedding
-``api_tokens`` come from the embedding endpoint ``usage``.  They therefore
-only cover text that actually hit the API this build; cache hits contribute
-no tokens (because no call was made).  Cost in currency is intentionally not
-computed here: the APIs never return an amount, and any local estimate would
-depend on hand-maintained unit prices that drift when the provider repriced.
-"""
+"""Compact provider-reported usage counters for one complete index build."""
 from __future__ import annotations
 
 import json
 import os
 import threading
-from typing import Any, Callable, Dict
+from typing import Any, Dict
 
 
 class UsageTracker:
-    """Track per-thread build usage counters and persist a compact report."""
+    """Track one mutation-locked build and persist its compact usage report."""
 
-    def __init__(
-        self,
-        *,
-        index_dir_fn: Callable[[str], str],
-        usage_path_fn: Callable[[str], str],
-    ) -> None:
-        self._index_dir_fn = index_dir_fn
-        self._usage_path_fn = usage_path_fn
-        self._local = threading.local()
-        self._lock = threading.Lock()
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._current = self.empty()
+
+    @staticmethod
+    def index_dir(kb_path: str) -> str:
+        return os.path.join(kb_path, ".kb_index")
+
+    @classmethod
+    def usage_path(cls, kb_path: str) -> str:
+        return os.path.join(cls.index_dir(kb_path), "build_usage.json")
 
     def empty(self) -> Dict[str, Any]:
         return {
@@ -50,14 +33,11 @@ class UsageTracker:
         }
 
     def current(self) -> Dict[str, Any]:
-        value = getattr(self._local, "current", None)
-        if value is None:
-            value = self.empty()
-            self._local.current = value
-        return value
+        return self._current
 
     def set_current(self, value: Dict[str, Any]) -> None:
-        self._local.current = value
+        with self._lock:
+            self._current = value
 
     def merge_image_analysis(self, usage_delta: Dict[str, Any] | None) -> None:
         if not usage_delta:
@@ -68,14 +48,14 @@ class UsageTracker:
                 destination[key] += int(usage_delta.get(key) or 0)
 
     def write(self, kb_path: str, usage: Dict[str, Any] | None) -> None:
-        os.makedirs(self._index_dir_fn(kb_path), exist_ok=True)
+        os.makedirs(self.index_dir(kb_path), exist_ok=True)
         value = dict(usage or {})
-        with open(self._usage_path_fn(kb_path), "w", encoding="utf-8") as handle:
+        with open(self.usage_path(kb_path), "w", encoding="utf-8") as handle:
             json.dump(value, handle, ensure_ascii=False, indent=2)
 
     def load(self, kb_path: str) -> Dict[str, Any]:
         try:
-            with open(self._usage_path_fn(kb_path), encoding="utf-8") as handle:
+            with open(self.usage_path(kb_path), encoding="utf-8") as handle:
                 value = json.load(handle)
             return value if isinstance(value, dict) else {}
         except Exception:

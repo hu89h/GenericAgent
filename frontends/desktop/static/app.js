@@ -218,22 +218,25 @@ let bridgeUiOffline = false;
         if (!sid) throw new Error('session/cancel missing sessionId');
         return http(`/session/${encodeURIComponent(sid)}/cancel`, { method: 'POST', body: params || {} });
       }
-      case 'kb/status': return http('/kb/status');
-      case 'kb/config/get': return http('/kb/config');
-      case 'kb/config/save': return http('/kb/config', { method: 'POST', body: params || {} });
+      case 'kb/status': return http('/kb');
       case 'kb/docs': {
         const id = params.kbId || params.id || '';
-        return http(`/kb/docs${id ? `?kbId=${encodeURIComponent(id)}` : ''}`);
+        if (!id) throw new Error('kb/docs missing kbId');
+        const status = await http(`/kb/${encodeURIComponent(id)}/status`);
+        return { documents: status.documents || [] };
       }
-      case 'kb/search': return http('/kb/search', { method: 'POST', body: params || {} });
-      case 'kb/read': return http('/kb/read', { method: 'POST', body: params || {} });
-      case 'kb/image': return http('/kb/image', { method: 'POST', body: params || {} });
-      case 'kb/source': return http('/kb/source', { method: 'POST', body: params || {} });
-      case 'kb/open': return http('/kb/open', { method: 'POST', body: params || {} });
+      case 'kb/open': {
+        const id = params.kbId || params.kb_id || '';
+        if (!id) throw new Error('kb/open missing kbId');
+        return http(`/kb/${encodeURIComponent(id)}/open`, { method: 'POST', body: params || {} });
+      }
       case 'kb/import': return http('/kb/import', { method: 'POST', body: params || {} });
-      case 'kb/import/status': return http(`/kb/import/${encodeURIComponent(params.jobId || params.id || '')}`);
-      case 'kb/build': return http('/kb/build', { method: 'POST', body: params || {} });
-      case 'kb/build/status': return http(`/kb/build/${encodeURIComponent(params.jobId || params.id || '')}`);
+      case 'kb/job': return http(`/kb/jobs/${encodeURIComponent(params.jobId || params.id || '')}`);
+      case 'kb/reindex': {
+        const id = params.kbId || params.id || '';
+        if (!id) throw new Error('kb/reindex missing kbId');
+        return http(`/kb/${encodeURIComponent(id)}/reindex`, { method: 'POST' });
+      }
       case 'kb/delete': {
         const id = params.kbId || params.id;
         if (!id) throw new Error('kb/delete missing kbId');
@@ -334,22 +337,11 @@ let bridgeUiOffline = false;
       ? (title = '') => tauriInvoke('pick_directory', { title })
       : null,
     kbStatus: () => rpc('kb/status', {}),
-    kbConfig: () => rpc('kb/config/get', {}),
-    saveKbConfig: (params = {}) => rpc('kb/config/save', params),
     kbDocs: (params = {}) => rpc('kb/docs', params),
-    kbSearch: (params = {}) => rpc('kb/search', params),
-    kbRead: (params = {}) => rpc('kb/read', params),
-    kbImage: (params = {}) => rpc('kb/image', params),
-    kbSource: (params = {}) => rpc('kb/source', params),
-    kbSourceUrl: (params = {}) => {
-      const query = new URLSearchParams(params || {}).toString();
-      return `${bridgeHost()}/kb/source${query ? `?${query}` : ''}`;
-    },
     kbOpen: (params = {}) => rpc('kb/open', params),
     kbImport: (params = {}) => rpc('kb/import', params),
-    kbImportStatus: (jobId) => rpc('kb/import/status', { jobId }),
-    kbBuild: (params = {}) => rpc('kb/build', params),
-    kbBuildStatus: (jobId) => rpc('kb/build/status', { jobId }),
+    kbJob: (jobId) => rpc('kb/job', { jobId }),
+    kbReindex: (kbId) => rpc('kb/reindex', { kbId }),
     kbDelete: (kbId, params = {}) => rpc('kb/delete', Object.assign({}, params, { kbId })),
     getGaSource: () => tauriInvoke('get_ga_source'),
     setGaSource: (dir) => tauriInvoke('set_ga_source', { dir }),
@@ -676,7 +668,7 @@ const kbState = {
   qaTimer: null, jobTimer: null, jobKind: '', jobId: '', qaBusy: false,
   statusUpdatedAt: 0, documentsLoading: false,
   statusRequest: null, documentRequests: new Map(),
-  documentLists: new Map(), documentHtml: new Map(),
+  documentLists: new Map(),
 };
 const kbEl = id => document.getElementById(id);
 const kbPageEls = {
@@ -760,60 +752,6 @@ function kbDocumentMeta(doc) {
   return kbFormat(t('kb.documentMeta'), { type, size: kbFormatBytes(size) });
 }
 
-function kbDocumentImageUrl(doc, source) {
-  const value = kbText(source).trim();
-  if (!value || /^(?:https?:|data:|blob:)/i.test(value)) return value;
-  if (value.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(value)) return '';
-  const query = new URLSearchParams({
-    kbId: doc.kb_id || '',
-    dataId: doc.data_id || '',
-    path: value,
-  });
-  return `${bridgeHost()}/kb/asset?${query.toString()}`;
-}
-
-function kbDocumentSourceUrl(doc, imagePath = '') {
-  const params = {
-    kbId: doc.kb_id || '',
-    dataId: doc.data_id || '',
-    fileName: doc.file_name || '',
-    ref: doc.ref || '',
-  };
-  if (!imagePath && window.ga.kbSourceUrl) return window.ga.kbSourceUrl(params);
-  const query = new URLSearchParams(params);
-  if (imagePath) query.set('path', imagePath);
-  return `${bridgeHost()}/kb/source/asset?${query.toString()}`;
-}
-
-function kbDocumentSourceType(doc, source) {
-  const name = kbText(source?.source_file_name || doc.source_file_name || doc.title || doc.file_name);
-  const dot = name.lastIndexOf('.');
-  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
-}
-
-function kbOriginalImageUrl(doc, source) {
-  const value = kbText(source).trim();
-  if (!value || /^(?:https?:|data:|blob:)/i.test(value)) return value;
-  if (value.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(value)) return '';
-  return kbDocumentSourceUrl(doc, value);
-}
-
-function kbCachedDocumentHtml(key) {
-  const html = kbState.documentHtml.get(key);
-  if (html == null) return null;
-  kbState.documentHtml.delete(key);
-  kbState.documentHtml.set(key, html);
-  return html;
-}
-
-function kbCacheDocumentHtml(key, html) {
-  kbState.documentHtml.delete(key);
-  kbState.documentHtml.set(key, html);
-  while (kbState.documentHtml.size > 8) {
-    kbState.documentHtml.delete(kbState.documentHtml.keys().next().value);
-  }
-}
-
 function kbPhaseText(job) {
   const phase = kbText(job.phase || job.state).toLowerCase();
   const normalized = {
@@ -849,16 +787,17 @@ function kbRenderLibraries() {
     const card = document.createElement('article');
     card.className = `kb-library-card${kbState.activeKb?.id === kb.id ? ' active' : ''}`;
     card.dataset.kbId = kb.id || '';
-    const stateText = kb.ready ? t('kb.ready') : t('kb.notReady');
+    const isReady = ['ready', 'ready_with_warnings'].includes(kb.state);
+    const stateText = isReady ? t('kb.ready') : t('kb.notReady');
     card.innerHTML = `
-      <div class="kb-card-top"><span class="kb-status ${kb.ready ? 'ready' : 'pending'}">${escapeHtml(stateText)}</span></div>
+      <div class="kb-card-top"><span class="kb-status ${isReady ? 'ready' : 'pending'}">${escapeHtml(stateText)}</span></div>
       <h3 class="kb-card-title"></h3>
       <div class="kb-card-meta"></div>
       <div class="kb-card-actions"><button type="button" class="kb-link-btn kb-open-library">${escapeHtml(t('kb.open'))}</button><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
     card.querySelector('.kb-card-title').textContent = kb.name || kb.id || '';
     card.querySelector('.kb-card-meta').textContent = kbFormat(t('kb.libraryMeta'), {
-      documents: kb.n_docs || 0,
-      images: kb.image_assets || 0,
+      documents: kb.counts?.documents || 0,
+      images: kb.counts?.images || 0,
     });
     card.addEventListener('click', event => {
       if (event.target.closest('.kb-delete-library')) return;
@@ -998,66 +937,19 @@ async function kbOpenDocuments(kb, { force = false } = {}) {
 
 async function kbOpenDocument(doc, { session = null } = {}) {
   if (!doc) return;
-  try {
-    kbState.activeDoc = doc;
-    const scope = kbScopeForDoc(doc);
-    if (session && activeSess()?.id !== session.id) setActiveSession(session.id);
-    if (kbPageEls.title) kbPageEls.title.textContent = kbDocumentName(doc);
-    if (kbPageEls.source) {
-      kbPageEls.source.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.loading'))}</div>`;
-      kbPageEls.source.classList.remove('kb-original-source');
-    }
-    if (kbPageEls.open) kbPageEls.open.disabled = false;
-    kbRenderView();
-    const current = activeSess();
-    if (kbSessionMatchesScope(current, scope)) kbRenderQa(current);
-    else kbRenderQa(null);
-    const source = await window.ga.kbSource({ kbId: doc.kb_id, dataId: doc.data_id, ref: doc.ref });
-    if (source.error) throw new Error(source.error);
-    if (!source.is_original) throw new Error(t('kb.originalUnavailable'));
-    const sourceType = kbDocumentSourceType(doc, source);
-    const sourceUrl = kbDocumentSourceUrl(doc);
-    const cacheKey = `original:${doc.data_id}:${doc.source_size || doc.size || 0}`;
-    const cachedHtml = kbCachedDocumentHtml(cacheKey);
-    const mountHtml = html => {
-      if (!kbPageEls.source) return;
-      kbPageEls.source.innerHTML = html;
-      kbPageEls.source.classList.toggle('kb-original-source', true);
-      postRenderEnhance(kbPageEls.source);
-    };
-    if (cachedHtml) {
-      mountHtml(cachedHtml);
-      if (kbSessionMatchesScope(activeSess(), scope)) kbRenderQa(activeSess());
-      return;
-    }
-    const imageTypes = new Set(['png', 'jpg', 'jpeg', 'jp2', 'webp', 'gif', 'bmp', 'tif', 'tiff']);
-    const textTypes = new Set(['md', 'markdown', 'txt', 'text', 'csv', 'tsv', 'json', 'yaml', 'yml', 'xml', 'html', 'htm']);
-    let html;
-    if (sourceType === 'pdf') {
-      html = `<iframe class="kb-original-frame" src="${escapeHtml(sourceUrl)}" title="${escapeHtml(kbDocumentName(doc))}"></iframe>`;
-    } else if (imageTypes.has(sourceType)) {
-      html = `<div class="kb-original-image-wrap"><img class="kb-original-image" src="${escapeHtml(sourceUrl)}" alt="${escapeHtml(kbDocumentName(doc))}"></div>`;
-    } else if (textTypes.has(sourceType)) {
-      const response = await fetch(sourceUrl, { cache: 'no-store' });
-      if (!response.ok) throw new Error(`${t('kb.originalUnavailable')} (${response.status})`);
-      const content = await response.text();
-      html = content
-        ? `<div class="bubble md kb-document-markdown">${renderTurnBody(content, { resolveImage: image => kbOriginalImageUrl(doc, image) })}</div>`
-        : `<div class="kb-empty">${escapeHtml(t('kb.noData'))}</div>`;
-    } else {
-      html = `<div class="kb-original-file"><div class="kb-original-file-name">${escapeHtml(kbDocumentName(doc))}</div><div class="kb-empty">${escapeHtml(t('kb.previewUnavailable'))}</div></div>`;
-    }
-    kbCacheDocumentHtml(cacheKey, html);
-    if (kbState.activeDoc?.data_id === doc.data_id) {
-      mountHtml(html);
-    }
-    if (kbSessionMatchesScope(activeSess(), scope)) kbRenderQa(activeSess());
-  } catch (error) {
-    if (kbState.activeDoc?.data_id === doc.data_id && kbPageEls.source) {
-      kbPageEls.source.innerHTML = `<div class="kb-empty kb-error">${escapeHtml(error.message || error)}</div>`;
-    }
-    showError(`${t('err.kbLoad')}: ${error.message || error}`);
+  kbState.activeDoc = doc;
+  const scope = kbScopeForDoc(doc);
+  if (session && activeSess()?.id !== session.id) setActiveSession(session.id);
+  if (kbPageEls.title) kbPageEls.title.textContent = kbDocumentName(doc);
+  if (kbPageEls.source) {
+    kbPageEls.source.innerHTML = `<div class="kb-original-file"><div class="kb-original-file-name">${escapeHtml(kbDocumentName(doc))}</div><div class="kb-empty">${escapeHtml(t('kb.openExternalHint'))}</div></div>`;
+    kbPageEls.source.classList.remove('kb-original-source');
   }
+  if (kbPageEls.open) kbPageEls.open.disabled = false;
+  kbRenderView();
+  const current = activeSess();
+  if (kbSessionMatchesScope(current, scope)) kbRenderQa(current);
+  else kbRenderQa(null);
 }
 
 async function kbOpenSessionScope(sess) {
@@ -1183,7 +1075,6 @@ async function kbOpenCitation(citation) {
     const result = await window.ga.kbOpen({
       kbId: citation.kb_id,
       dataId: citation.data_id,
-      imageId: citation.image_id,
       refKey: citation.ref_key,
       ref: citation.ref,
     });
@@ -1324,14 +1215,13 @@ async function kbTrackJob(kind, jobId) {
   openModal('kb-task-modal');
   const poll = async () => {
     try {
-      const job = kind === 'import' ? await window.ga.kbImportStatus(jobId) : await window.ga.kbBuildStatus(jobId);
+      const job = await window.ga.kbJob(jobId);
       kbSetTask(job, kind);
       const done = ['completed', 'completed_with_failures', 'failed'].includes(job.state) || String(job.phase).includes('completed');
       if (done) {
         clearInterval(kbState.jobTimer); kbState.jobTimer = null;
         if (kbPageEls.taskClose) kbPageEls.taskClose.hidden = false;
         kbState.documentLists.clear();
-        kbState.documentHtml.clear();
         await kbRefresh({ force: true });
         return true;
       }
@@ -1375,7 +1265,6 @@ async function kbDeleteLibrary(kb) {
   try {
     await window.ga.kbDelete(kb.id, { deleteData: true });
     kbState.documentLists.delete(kb.id);
-    kbState.documentHtml.clear();
     await kbRefresh({ force: true });
   }
   catch (error) { showError(`${t('err.kbDelete')}: ${error.message || error}`); }
@@ -1384,7 +1273,7 @@ async function kbDeleteLibrary(kb) {
 async function kbOpenBuildModal() {
   if (!kbPageEls.buildScope) return;
   await kbRefresh();
-  kbPageEls.buildScope.innerHTML = `<option value="">${escapeHtml(t('kb.buildAll'))}</option>`;
+  kbPageEls.buildScope.innerHTML = '';
   for (const kb of kbStatusKbs()) {
     const option = document.createElement('option'); option.value = kb.id; option.textContent = kb.name || kb.id;
     kbPageEls.buildScope.appendChild(option);
@@ -1409,12 +1298,12 @@ function initKbPage() {
   kbPageEls.buildForm?.addEventListener('submit', async event => {
     event.preventDefault();
     const scope = kbPageEls.buildScope?.value || '';
-    const mode = kbPageEls.buildForm.querySelector('input[name="mode"]:checked')?.value || 'incremental';
     closeModals();
     try {
-      const result = await window.ga.kbBuild({ kbId: scope || null, mode });
+      if (!scope) throw new Error(t('kb.noReady'));
+      const result = await window.ga.kbReindex(scope);
       if (!result.jobId) throw new Error(result.error || t('err.kbBuild'));
-      await kbTrackJob('build', result.jobId);
+      await kbTrackJob('reindex', result.jobId);
     } catch (error) { showError(`${t('err.kbBuild')}: ${error.message || error}`); }
   });
   kbRefresh();
@@ -1518,7 +1407,7 @@ async function openKnowledgeScopePicker() {
   try {
     const data = await window.ga.kbStatus();
     const allKbs = Array.isArray(data?.knowledge_bases) ? data.knowledge_bases : kbStatusKbs();
-    scopeKbs = allKbs.filter(kb => kb.ready);
+    scopeKbs = allKbs.filter(kb => ['ready', 'ready_with_warnings'].includes(kb.state));
     renderKbChoices();
   } catch (error) {
     picker.innerHTML = `<div class="knowledge-scope-empty">${escapeHtml(error.message || t('err.kbLoad'))}</div>`;
@@ -5055,90 +4944,6 @@ function renderSettingsModels() {
   applyI18n();
 }
 
-let kbConfigLoading = null;
-
-function setKbConfigBusy(form, busy) {
-  if (!form) return;
-  form.classList.toggle('is-loading', !!busy);
-  form.querySelectorAll('input, button').forEach(el => { el.disabled = !!busy; });
-}
-
-function setKbConfigStatus(form, configured, { error = false, message = '' } = {}) {
-  const status = form?.querySelector('.kb-config-status');
-  if (!status) return;
-  status.classList.toggle('is-ok', !!configured && !error);
-  status.classList.toggle('is-error', !!error);
-  status.textContent = error
-    ? (message || t('set.kbConfigLoadFailed'))
-    : (configured ? t('set.kbKeyConfigured') : t('set.kbKeyMissing'));
-}
-
-function setKbConfigForm(kind, values) {
-  const form = document.getElementById(kind === 'embedding'
-    ? 'kb-embedding-config-form'
-    : 'mineru-config-form');
-  if (!form || !values) return;
-  const baseUrl = form.elements.namedItem('baseUrl');
-  const model = form.elements.namedItem(kind === 'embedding' ? 'model' : 'modelVersion');
-  const dimension = form.elements.namedItem('dimension');
-  if (baseUrl) baseUrl.value = values.baseUrl || '';
-  if (model) model.value = kind === 'embedding' ? (values.model || '') : (values.modelVersion || '');
-  if (dimension) dimension.value = values.dimension || '';
-  const secret = form.elements.namedItem('apiKey');
-  if (secret) secret.value = '';
-  setKbConfigStatus(form, !!values.apiKeyConfigured);
-}
-
-async function loadKbServiceConfigs() {
-  if (kbConfigLoading) return kbConfigLoading;
-  const forms = [
-    document.getElementById('kb-embedding-config-form'),
-    document.getElementById('mineru-config-form'),
-  ].filter(Boolean);
-  if (!forms.length) return;
-  kbConfigLoading = (async () => {
-    forms.forEach(form => setKbConfigBusy(form, true));
-    try {
-      const result = await window.ga.kbConfig();
-      setKbConfigForm('embedding', result.embedding);
-      setKbConfigForm('mineru', result.mineru);
-    } catch (error) {
-      forms.forEach(form => setKbConfigStatus(form, false, { error: true }));
-    } finally {
-      forms.forEach(form => setKbConfigBusy(form, false));
-      kbConfigLoading = null;
-    }
-  })();
-  return kbConfigLoading;
-}
-
-async function saveKbServiceConfig(kind, form) {
-  setKbConfigBusy(form, true);
-  try {
-    const payload = Object.fromEntries(new FormData(form).entries());
-    const result = await window.ga.saveKbConfig({ [kind]: payload });
-    setKbConfigForm(kind, result[kind]);
-    if (Array.isArray(result.profiles)) {
-      state.modelProfiles = normalizeProfiles(result.profiles);
-      renderSettingsModels();
-    }
-    showChanToast(t('set.kbConfigSaved'), '', 'ok');
-  } catch (error) {
-    setKbConfigStatus(form, false, { error: true, message: t('set.kbConfigSaveFailed') });
-    showChanToast(t('set.kbConfigSaveFailed'), error.message || String(error), 'err');
-  } finally {
-    setKbConfigBusy(form, false);
-  }
-}
-
-for (const [kind, id] of [['embedding', 'kb-embedding-config-form'], ['mineru', 'mineru-config-form']]) {
-  const form = document.getElementById(id);
-  if (form) form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    void saveKbServiceConfig(kind, form);
-  });
-}
-
 function openSettings() {
   openModal('settings-modal');
   renderSettingsModels();
@@ -5146,7 +4951,6 @@ function openSettings() {
   applyTheme(theme, { persist: false });
   applyAppearance(appearance, plainUi, { persist: false });
   applyChatFontSize(chatFontSize, { persist: false });
-  void loadKbServiceConfigs();
 }
 async function loadModelProfiles() {
   try {

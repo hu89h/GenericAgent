@@ -9,13 +9,11 @@ PDFs.
 from __future__ import annotations
 
 import hashlib
-import gc
 import html
 import json
 import os
 import re
 import shutil
-import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -23,11 +21,9 @@ from typing import Any, Callable
 from urllib.parse import quote, unquote
 
 try:
-    from .config import DATA_ROOT, ROOT, kb_by_id, kb_id_for_source, upsert_kb
     from .documents import read_textfile
     from .providers import mineru
 except ImportError:  # pragma: no cover - supports direct CLI execution
-    from config import DATA_ROOT, ROOT, kb_by_id, kb_id_for_source, upsert_kb
     from documents import read_textfile
     from providers import mineru
 
@@ -236,320 +232,297 @@ def _emit(progress: Callable[[dict], None] | None, phase: str, counts: dict[str,
         progress({"phase": phase, **counts, **extra})
 
 
-def _rename_with_retry(source: Path, destination: Path) -> None:
-    """Rename a completed import, tolerating short Windows scanner locks."""
-    last_error: PermissionError | None = None
-    for delay in (0, 0.2, 0.5, 1, 2, 4):
-        if delay:
-            time.sleep(delay)
+class DocumentProcessor:
+    """Prepare source documents inside a caller-owned staging directory."""
+
+    @staticmethod
+    def _mark_failure(entry: dict, error: Exception | str, stage: str) -> None:
+        entry.update(
+            status="failed",
+            error=str(error),
+            stage=stage,
+            error_type=type(error).__name__ if isinstance(error, Exception) else "ProcessingError",
+        )
+
+    def prepare(
+        self,
+        source_dir: str,
+        *,
+        stage_root: str,
+        kb_id: str,
+        name: str = "",
+        progress: Callable[[dict], None] | None = None,
+    ) -> dict[str, Any]:
+        source_root = Path(os.path.realpath(os.path.expanduser(str(source_dir or ""))))
+        if not source_root.is_dir():
+            raise ValueError(f"sourceDir is not a directory: {source_root}")
+
+        stage = Path(stage_root).resolve()
+        processed_root = stage / "processed"
+        downloads_root = stage / ".mineru_downloads"
+        extract_root = stage / ".mineru_extract"
+        stage.mkdir(parents=True, exist_ok=True)
+
+        files = _scan_source(source_root)
+        entries: list[dict[str, Any]] = []
+        entry_by_source: dict[str, dict[str, Any]] = {}
+        output_rels: set[str] = set()
+        counts = {
+            "scanned": len(files), "total": 0, "completed": 0,
+            "markdown": 0, "converting": 0, "ready": 0,
+            "succeeded": 0, "failed": 0, "ignored": 0, "skipped": 0,
+            "assets": 0,
+        }
+
+        def output_rel_for(source_rel: str) -> str:
+            digest = hashlib.sha256(source_rel.encode("utf-8")).hexdigest()[:12]
+            stem = _safe_component(Path(source_rel).stem, 48)
+            candidate = f"documents/{digest}-{stem}.md"
+            if candidate in output_rels:
+                candidate = (
+                    f"documents/{digest}-"
+                    f"{hashlib.sha256(source_rel.encode('utf-8')).hexdigest()[12:20]}.md"
+                )
+            output_rels.add(candidate)
+            return candidate
+
         try:
-            source.rename(destination)
-            return
-        except PermissionError as error:
-            last_error = error
-    if last_error is not None:
-        raise last_error
-
-
-def import_knowledge_base(
-    source_dir: str,
-    *,
-    kb_id: str = "",
-    name: str = "",
-    overwrite: bool = False,
-    progress: Callable[[dict], None] | None = None,
-) -> dict[str, Any]:
-    """Import one directory and persist only generated Markdown/assets."""
-    source_root = Path(os.path.realpath(os.path.expanduser(str(source_dir or ""))))
-    if not source_root.is_dir():
-        raise ValueError(f"sourceDir is not a directory: {source_root}")
-    kid = kb_id_for_source(str(source_root))
-    destination = (Path(DATA_ROOT) / kid).resolve()
-    if destination.exists() and not overwrite:
-        raise ValueError(f"knowledge base already exists: {kid}")
-
-    # Keep the temporary root shallow.  Windows installations may not have
-    # long-path support enabled, and source-relative paper titles can already
-    # be long before the generated asset directory is appended.
-    stage_parent = Path(DATA_ROOT)
-    stage_parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".import-", dir=str(stage_parent))).resolve()
-    processed_root = stage / "processed"
-    downloads_root = stage / ".mineru_downloads"
-    extract_root = stage / ".mineru_extract"
-
-    files = _scan_source(source_root)
-    entries: list[dict[str, Any]] = []
-    entry_by_source: dict[str, dict[str, Any]] = {}
-    output_rels: set[str] = set()
-    counts = {
-        "scanned": len(files), "total": 0, "completed": 0,
-        "markdown": 0, "converting": 0, "ready": 0,
-        "succeeded": 0, "failed": 0, "ignored": 0, "skipped": 0,
-        "assets": 0,
-    }
-
-    def output_rel_for(source_rel: str) -> str:
-        digest = hashlib.sha256(source_rel.encode("utf-8")).hexdigest()[:12]
-        stem = _safe_component(Path(source_rel).stem, 48)
-        candidate = f"documents/{digest}-{stem}.md"
-        if candidate in output_rels:
-            candidate = f"documents/{digest}-{hashlib.sha256(source_rel.encode('utf-8')).hexdigest()[12:20]}.md"
-        output_rels.add(candidate)
-        return candidate
-
-    try:
-        _emit(progress, "scanning", counts)
-        source_by_rel = {os.path.normcase(rel): rel for _path, rel in files}
-        has_markdown = any(path.suffix.lower() in MARKDOWN_EXTS for path, _rel in files)
-        referenced_images: set[str] = set()
-        for path, rel in files:
-            if path.suffix.lower() not in MARKDOWN_EXTS:
-                continue
-            for _match, raw in _image_refs(read_textfile(str(path))):
-                local = _local_image_path(path, raw)
-                if local is None:
+            _emit(progress, "scanning", counts)
+            source_by_rel = {os.path.normcase(rel): rel for _path, rel in files}
+            has_markdown = any(path.suffix.lower() in MARKDOWN_EXTS for path, _rel in files)
+            referenced_images: set[str] = set()
+            for path, rel in files:
+                if path.suffix.lower() not in MARKDOWN_EXTS:
                     continue
-                _path_part, image = local
-                if _path_is_within(source_root, image) and image.is_file():
-                    image_rel = image.relative_to(source_root).as_posix()
-                    matched_rel = source_by_rel.get(os.path.normcase(image_rel))
-                    if matched_rel:
-                        referenced_images.add(matched_rel)
-
-        conversion_specs: list[dict[str, Any]] = []
-        for path, rel in files:
-            ext = path.suffix.lower()
-            entry = {
-                "source": rel,
-                "name": path.name,
-                "kind": "ignored",
-                "status": "ignored",
-                "processed": [],
-                "error": "",
-            }
-            entries.append(entry)
-            entry_by_source[rel] = entry
-            if ext in MARKDOWN_EXTS:
-                target_rel = output_rel_for(rel)
-                target = processed_root / target_rel
-                namespace = Path(f"{target.stem}.assets-{hashlib.sha256(rel.encode('utf-8')).hexdigest()[:8]}")
-                _write_markdown(path, source_root, target, processed_root, asset_namespace=namespace)
-                entry.update(kind="document", status="ready", processed=[target_rel])
-                counts["markdown"] += 1
-                continue
-            if ext in IMAGE_EXTS and rel in referenced_images:
-                entry.update(kind="asset", status="asset")
-                counts["assets"] += 1
-                continue
-            # A document folder commonly contains stale extraction images that
-            # are no longer referenced by its Markdown.  Treating those files
-            # as standalone MinerU documents creates dozens of bogus entries.
-            # Image-only folders remain supported as intentional image imports.
-            if ext in IMAGE_EXTS and has_markdown:
-                counts["ignored"] += 1
-                counts["skipped"] += 1
-                continue
-            if ext not in SUPPORTED_EXTS:
-                counts["ignored"] += 1
-                counts["skipped"] += 1
-                continue
-            entry.update(kind="document", status="queued")
-            conversion_specs.append({"source": rel, "path": path, "entry": entry})
-            counts["converting"] += 1
-        counts["total"] = counts["markdown"] + counts["converting"]
-        counts["ready"] = counts["markdown"]
-        counts["completed"] = counts["markdown"]
-        counts["succeeded"] = counts["markdown"]
-        _emit(progress, "scanned", counts)
-
-        upload_specs: list[dict[str, Any]] = []
-        for spec in conversion_specs:
-            source = spec["source"]
-            path = spec["path"]
-            entry = spec["entry"]
-            if path.suffix.lower() == ".pdf":
                 try:
-                    _pdf_page_count(path)
-                except Exception as error:
-                    entry.update(status="failed", error=str(error))
-                    _emit(
-                        progress,
-                        "processing",
-                        counts,
-                        source=source,
-                        name=path.name,
-                        current=source,
-                        file_status="failed",
-                        error=str(error),
-                    )
+                    body = read_textfile(str(path))
+                except Exception:
                     continue
-            upload_specs.append({"source": source, "path": path, "relative_path": source})
-        _emit(progress, "processing", counts, current="开始提交 MinerU")
+                for _match, raw in _image_refs(body):
+                    local = _local_image_path(path, raw)
+                    if local is None:
+                        continue
+                    _path_part, image = local
+                    if _path_is_within(source_root, image) and image.is_file():
+                        matched = source_by_rel.get(
+                            os.path.normcase(image.relative_to(source_root).as_posix())
+                        )
+                        if matched:
+                            referenced_images.add(matched)
 
-        jobs_by_relative: dict[str, dict[str, Any]] = {}
-        if upload_specs:
-            def on_mineru_update(job: mineru.MinerUFile) -> None:
-                spec = jobs_by_relative.get(job.relative_path)
-                if spec is None:
-                    return
-                entry = entry_by_source[spec["source"]]
-                entry.update(status=job.state, error=job.error)
-                _emit(
-                    progress,
-                    "processing",
-                    counts,
-                    source=spec["source"],
-                    name=Path(spec["source"]).name,
-                    current=spec["source"],
-                    file_status=entry["status"],
-                    error=job.error,
-                )
+            conversion_specs: list[dict[str, Any]] = []
+            for path, rel in files:
+                ext = path.suffix.lower()
+                entry = {
+                    "source": rel,
+                    "name": path.name,
+                    "kind": "ignored",
+                    "status": "ignored",
+                    "processed": [],
+                    "error": "",
+                    "stage": "",
+                    "error_type": "",
+                }
+                entries.append(entry)
+                entry_by_source[rel] = entry
+                if ext in MARKDOWN_EXTS:
+                    entry["kind"] = "document"
+                    try:
+                        target_rel = output_rel_for(rel)
+                        target = processed_root / target_rel
+                        namespace = Path(
+                            f"{target.stem}.assets-"
+                            f"{hashlib.sha256(rel.encode('utf-8')).hexdigest()[:8]}"
+                        )
+                        _write_markdown(
+                            path, source_root, target, processed_root,
+                            asset_namespace=namespace,
+                        )
+                        entry.update(status="ready", processed=[target_rel])
+                    except Exception as error:
+                        self._mark_failure(entry, error, "markdown")
+                    counts["markdown"] += 1
+                    continue
+                if ext in IMAGE_EXTS and rel in referenced_images:
+                    entry.update(kind="asset", status="asset")
+                    continue
+                if ext in IMAGE_EXTS and has_markdown:
+                    continue
+                if ext not in SUPPORTED_EXTS:
+                    continue
+                entry.update(kind="document", status="queued")
+                conversion_specs.append({"source": rel, "path": path, "entry": entry})
+                counts["converting"] += 1
 
-            for spec in upload_specs:
-                jobs_by_relative[spec["relative_path"]] = spec
-            try:
-                jobs = mineru.process_batches(
-                    [(spec["path"], spec["relative_path"]) for spec in upload_specs],
-                    downloads_root,
-                    on_update=on_mineru_update,
-                )
-            except Exception as error:
-                jobs = []
-                for spec in upload_specs:
-                    entry = entry_by_source[spec["source"]]
-                    entry.update(status="failed", error=str(error))
-                _emit(progress, "processing", counts, current="MinerU 提交失败", error=str(error))
-            jobs_by_relative.update({job.relative_path: {**jobs_by_relative[job.relative_path], "job": job} for job in jobs})
+            counts["total"] = counts["markdown"] + counts["converting"]
+            _emit(progress, "scanned", counts)
 
-            for spec in upload_specs:
+            upload_specs: list[dict[str, Any]] = []
+            for spec in conversion_specs:
                 source = spec["source"]
-                entry = entry_by_source[source]
-                job = jobs_by_relative.get(spec["relative_path"], {}).get("job")
-                if not job or job.state != "downloaded":
-                    error = getattr(job, "error", "") or entry.get("error") or "MinerU 处理失败"
-                    entry.update(status="failed", error=error)
-                    counts["failed"] += 1
-                    counts["completed"] += 1
-                    _emit(
-                        progress,
-                        "processing",
-                        counts,
-                        source=source,
-                        name=Path(source).name,
-                        current=source,
-                        file_status="failed",
-                        error=error,
-                    )
-                    continue
+                path = spec["path"]
+                entry = spec["entry"]
+                if path.suffix.lower() == ".pdf":
+                    try:
+                        _pdf_page_count(path)
+                    except Exception as error:
+                        self._mark_failure(entry, error, "pdf_validation")
+                        _emit(
+                            progress, "processing", counts,
+                            source=source, name=path.name, current=source,
+                            file_status="failed", error=str(error),
+                        )
+                        continue
+                upload_specs.append({"source": source, "path": path, "relative_path": source})
+            if upload_specs:
+                _emit(progress, "processing", counts, current="开始提交 MinerU")
 
-                target_rel = output_rel_for(source)
-                target = processed_root / target_rel
-                output_key = hashlib.sha256(source.encode("utf-8")).hexdigest()[:8]
-                asset_root = Path(f"{target.stem}.assets-{output_key}")
-                try:
-                    extract_dir = extract_root / output_key
-                    _safe_extract_zip(downloads_root / f"{job.data_id}.zip", extract_dir)
-                    markdown = _find_markdown(extract_dir)
-                    if markdown is None:
-                        raise ValueError("MinerU 结果中未找到 Markdown 文档")
-                    extra_images = [Path(spec["path"])] if Path(source).suffix.lower() in IMAGE_EXTS else []
-                    body, _ = _prepare_markdown(
-                        markdown,
-                        extract_dir,
-                        target,
-                        processed_root,
-                        asset_namespace=asset_root,
-                        extra_images=extra_images,
-                    )
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(body.strip() + "\n", encoding="utf-8")
-                    entry.update(status="ready", error="", processed=[target_rel])
-                    counts["ready"] += 1
-                    counts["succeeded"] += 1
-                    counts["completed"] += 1
+            jobs_by_relative: dict[str, dict[str, Any]] = {}
+            if upload_specs:
+                def on_mineru_update(job: mineru.MinerUFile) -> None:
+                    spec = jobs_by_relative.get(job.relative_path)
+                    if spec is None:
+                        return
+                    entry = entry_by_source[spec["source"]]
+                    entry.update(status=job.state, error=job.error)
                     _emit(
                         progress, "processing", counts,
-                        source=source, name=Path(source).name, current=source,
-                        file_status="ready",
+                        source=spec["source"], name=Path(spec["source"]).name,
+                        current=spec["source"], file_status=entry["status"],
+                        error=job.error,
+                    )
+
+                jobs_by_relative.update({
+                    spec["relative_path"]: spec for spec in upload_specs
+                })
+                try:
+                    jobs = mineru.process_batches(
+                        [(spec["path"], spec["relative_path"]) for spec in upload_specs],
+                        downloads_root,
+                        on_update=on_mineru_update,
                     )
                 except Exception as error:
-                    entry.update(status="failed", error=str(error))
-                    shutil.rmtree(target.parent / asset_root, ignore_errors=True)
-                    counts["failed"] += 1
-                    counts["completed"] += 1
-                    _emit(
-                        progress, "processing", counts,
-                        source=source, name=Path(source).name, current=source,
-                        file_status="failed", error=str(error),
-                    )
+                    jobs = []
+                    for spec in upload_specs:
+                        self._mark_failure(
+                            entry_by_source[spec["source"]], error, "mineru"
+                        )
+                for job in jobs:
+                    if job.relative_path in jobs_by_relative:
+                        jobs_by_relative[job.relative_path]["job"] = job
 
-        # Recalculate terminal counts after provider failures and conversion.
-        document_entries = [item for item in entries if item["kind"] == "document"]
-        counts["ready"] = sum(item["status"] == "ready" for item in document_entries)
-        counts["assets"] = sum(item["kind"] == "asset" for item in entries)
-        counts["ignored"] = sum(item["kind"] == "ignored" for item in entries)
-        counts["skipped"] = counts["ignored"]
-        counts["failed"] = sum(item["status"] == "failed" for item in document_entries)
-        counts["total"] = len(document_entries)
-        counts["succeeded"] = counts["ready"]
-        counts["completed"] = counts["ready"] + counts["failed"]
-        manifest = {
-            "schema_version": 5,
-            "imported_at": int(time.time()),
-            "source_dir_name": source_root.name,
-            "files": entries,
-        }
-        processed_root.mkdir(parents=True, exist_ok=True)
-        (stage / "import_manifest.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+                for spec in upload_specs:
+                    source = spec["source"]
+                    entry = entry_by_source[source]
+                    job = jobs_by_relative.get(spec["relative_path"], {}).get("job")
+                    if not job or job.state != "downloaded":
+                        error = getattr(job, "error", "") or entry.get("error") or "MinerU 处理失败"
+                        self._mark_failure(entry, error, "mineru")
+                        _emit(
+                            progress, "processing", counts,
+                            source=source, name=Path(source).name, current=source,
+                            file_status="failed", error=error,
+                        )
+                        continue
 
-        # Release response/ZIP/PDF objects before moving the staging tree.
-        # Windows also allows antivirus/indexer handles to outlive the close;
-        # _rename_with_retry gives those short-lived readers a bounded window.
-        gc.collect()
-        if destination.exists():
-            backup = destination.with_name(f".{destination.name}.replaced-{os.getpid()}-{int(time.time())}")
-            _rename_with_retry(destination, backup)
-        else:
-            backup = None
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            _rename_with_retry(stage, destination)
-        except Exception:
-            if backup is not None and not destination.exists():
-                backup.rename(destination)
-            raise
-        if backup is not None:
-            shutil.rmtree(backup, ignore_errors=True)
+                    target_rel = output_rel_for(source)
+                    target = processed_root / target_rel
+                    output_key = hashlib.sha256(source.encode("utf-8")).hexdigest()[:8]
+                    asset_root = Path(f"{target.stem}.assets-{output_key}")
+                    try:
+                        extract_dir = extract_root / output_key
+                        _safe_extract_zip(downloads_root / f"{job.data_id}.zip", extract_dir)
+                        markdown = _find_markdown(extract_dir)
+                        if markdown is None:
+                            raise ValueError("MinerU 结果中未找到 Markdown 文档")
+                        extra_images = (
+                            [Path(spec["path"])]
+                            if Path(source).suffix.lower() in IMAGE_EXTS else []
+                        )
+                        body, _ = _prepare_markdown(
+                            markdown, extract_dir, target, processed_root,
+                            asset_namespace=asset_root, extra_images=extra_images,
+                        )
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(body.strip() + "\n", encoding="utf-8")
+                        entry.update(
+                            status="ready", error="", processed=[target_rel],
+                            stage="", error_type="",
+                        )
+                        _emit(
+                            progress, "processing", counts,
+                            source=source, name=Path(source).name, current=source,
+                            file_status="ready",
+                        )
+                    except Exception as error:
+                        self._mark_failure(entry, error, "mineru_result")
+                        shutil.rmtree(target.parent / asset_root, ignore_errors=True)
+                        _emit(
+                            progress, "processing", counts,
+                            source=source, name=Path(source).name, current=source,
+                            file_status="failed", error=str(error),
+                        )
 
-        processed = destination / "processed"
-        upsert_kb(
-            kid,
-            path=os.path.relpath(processed, ROOT).replace(os.sep, "/"),
-            name=(name or source_root.name),
-            source_path=str(source_root),
-        )
-        result = {
-            "ok": True,
-            "kb": kb_by_id(kid),
-            "copiedTo": str(destination),
-            "manifest": str(destination / "import_manifest.json"),
-            "summary": dict(counts),
-            "succeeded": [
-                item["source"] for item in document_entries if item["status"] == "ready"
-            ],
-            "failed": [
-                item for item in document_entries if item["status"] == "failed"
-            ],
-            "files": document_entries,
-        }
-        _emit(progress, "completed", counts, current="导入完成", files=entries, result=result)
-        return result
-    finally:
-        for path in (downloads_root, extract_root):
-            shutil.rmtree(path, ignore_errors=True)
-        if stage.exists():
-            shutil.rmtree(stage, ignore_errors=True)
+            document_entries = [item for item in entries if item["kind"] == "document"]
+            counts.update({
+                "ready": sum(item["status"] == "ready" for item in document_entries),
+                "assets": sum(item["kind"] == "asset" for item in entries),
+                "ignored": sum(item["kind"] == "ignored" for item in entries),
+                "failed": sum(item["status"] == "failed" for item in document_entries),
+                "total": len(document_entries),
+            })
+            counts["skipped"] = counts["ignored"]
+            counts["succeeded"] = counts["ready"]
+            counts["completed"] = counts["ready"] + counts["failed"]
+            if not counts["ready"]:
+                raise RuntimeError("没有成功处理的知识库文档")
+
+            source_fingerprint = [
+                {
+                    "path": rel,
+                    "size": path.stat().st_size,
+                    "mtime_ns": path.stat().st_mtime_ns,
+                }
+                for path, rel in files
+            ]
+            manifest = {
+                "schema_version": 1,
+                "kb_id": kb_id,
+                "name": str(name or source_root.name),
+                "source_path": str(source_root),
+                "imported_at": int(time.time()),
+                "source_fingerprint": source_fingerprint,
+                "files": entries,
+                "summary": dict(counts),
+                "failures": [
+                    {
+                        "source": item["source"],
+                        "stage": item.get("stage") or "document",
+                        "error_type": item.get("error_type") or "ProcessingError",
+                        "error": item.get("error") or "",
+                    }
+                    for item in document_entries if item["status"] == "failed"
+                ],
+            }
+            processed_root.mkdir(parents=True, exist_ok=True)
+            (stage / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            _emit(progress, "prepared", counts, current="文档处理完成", files=entries)
+            return {
+                "source_path": str(source_root),
+                "name": manifest["name"],
+                "stage_path": str(stage),
+                "processed_path": str(processed_root),
+                "manifest": manifest,
+                "summary": dict(counts),
+                "files": document_entries,
+                "failures": list(manifest["failures"]),
+            }
+        finally:
+            for path in (downloads_root, extract_root):
+                shutil.rmtree(path, ignore_errors=True)
+
+
+__all__ = ["DocumentProcessor", "MAX_PDF_PAGES"]

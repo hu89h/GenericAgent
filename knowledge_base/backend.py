@@ -1,1087 +1,465 @@
 #!/usr/bin/env python3
-"""GenericAgent unified Markdown/image KB engine with a Zvec hybrid index.
-
-设计要点：
-- 读取知识库文件夹下的 Markdown 图书；
-- 抽取正文 → 分块 → 构建 Zvec dense 语义向量索引与 sparse 关键词向量索引；
-- GA 运行时检索和读取依赖 Zvec，不依赖外部项目的 domain_sop/分词链；
-- 每个知识库的 zvec 集合与 zvec_meta.json 放在该知识库路径下的 `.kb_index/`；
-- 增量构建：源文件 mtime+size 指纹未变则跳过；
-- search() 返回「命中定位 + 命中内容」，read_chunk() 精确取单个 chunk 原文用于补充核对。
-
-CLI：
-    python -m knowledge_base.backend --build           # 增量构建所有配置库
-    python -m knowledge_base.backend --rebuild         # 强制全量重建
-    python -m knowledge_base.backend --status          # 查看各库状态
-    python -m knowledge_base.backend --search "关键词"  # 检索测试
-"""
+"""Public facade for the GenericAgent knowledge-base runtime."""
 from __future__ import annotations
-import os
-import re
-import sys
+
+import argparse
 import json
+import os
 import shutil
+import sys
 import threading
-from urllib.parse import unquote
+from dataclasses import dataclass
 
-try:
-    from .documents import (
-        chunk_document_records,
-        chunking_meta as _chunking_meta,
-        extract_text,
-        fingerprint as _fingerprint,
-        read_textfile as _read_textfile,
-        scan_documents as _scan,
-    )
-except ImportError:  # pragma: no cover - supports direct CLI execution
-    from documents import (
-        chunk_document_records,
-        chunking_meta as _chunking_meta,
-        extract_text,
-        fingerprint as _fingerprint,
-        read_textfile as _read_textfile,
-        scan_documents as _scan,
-    )
+from . import config
+from .assets import ImageAssetProcessor
+from .build import IndexBuilder, RecordBuilder
+from .importer import DocumentProcessor
+from .locking import KnowledgeBaseLockedError
+from .pipeline import IngestPipeline, Publisher
+from .providers import provider_settings
+from .retrieval import KnowledgeBaseRetriever
+from .usage import UsageTracker
+from .zvec import ZvecIndex
 
-try:
-    from .config import (
-        CONFIG_PATH,
-        DATA_ROOT,
-        ROOT,
-        canonical_source_path as _configured_canonical_source_path,
-        kb_id_for_source as _configured_kb_id_for_source,
-        kb_by_id as _kb_by_id,
-        load_config,
-        remove_kb,
-        upsert_kb,
-    )
-
-    from .usage import UsageTracker as _UsageTracker
-    from .assets import ImageAssetProcessor as _ImageAssetProcessor
-    from .build import (
-        BuildCoordinator as _BuildCoordinator,
-        BuildServices as _BuildServices,
-        DocumentServices as _DocumentServices,
-        ImageServices as _ImageServices,
-        IndexServices as _IndexServices,
-        UsageServices as _UsageServices,
-    )
-    from .retrieval import KnowledgeBaseRetriever as _KnowledgeBaseRetriever
-    from .zvec import ZvecIndex as _ZvecIndex
-except ImportError:  # pragma: no cover - supports direct CLI execution
-    from config import (
-        CONFIG_PATH,
-        DATA_ROOT,
-        ROOT,
-        canonical_source_path as _configured_canonical_source_path,
-        kb_id_for_source as _configured_kb_id_for_source,
-        kb_by_id as _kb_by_id,
-        load_config,
-        remove_kb,
-        upsert_kb,
-    )
-
-    from usage import UsageTracker as _UsageTracker
-    from assets import ImageAssetProcessor as _ImageAssetProcessor
-    from build import (
-        BuildCoordinator as _BuildCoordinator,
-        BuildServices as _BuildServices,
-        DocumentServices as _DocumentServices,
-        ImageServices as _ImageServices,
-        IndexServices as _IndexServices,
-        UsageServices as _UsageServices,
-    )
-    from retrieval import KnowledgeBaseRetriever as _KnowledgeBaseRetriever
-    from zvec import ZvecIndex as _ZvecIndex
 
 DEFAULT_KB_ID = "default_kb"
-INDEX_SUBDIR = ".kb_index"          # 放在每个知识库路径下
-ZVEC_SUBDIR = "zvec"                # 向量索引目录：.kb_index/zvec/
-IMAGE_CACHE_SUBDIR = "image_cache"
-DOCUMENT_IMAGE_EXTS = frozenset({
-    ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp", ".tif", ".tiff",
-})
-BUILD_USAGE_FILE = "build_usage.json"
-# v10: widened image-asset columns (image_id/ref_key/display_label/caption/
-# description/table_markdown/source_file_name/uncertain/analysis_error) so
-# read_image resolves images from zvec directly, retiring the catalog join.
-ZVEC_SCHEMA_VERSION = 10
 _SNIPPET = 220
-ZVEC_DIM = int(os.environ.get("GA_KB_ZVEC_DIM", os.environ.get("GA_KB_EMBED_DIM", "1024")))
 ZVEC_BATCH = int(os.environ.get("GA_KB_ZVEC_BATCH", "256"))
 ZVEC_QUERY_FACTOR = max(1, int(os.environ.get("GA_KB_ZVEC_QUERY_FACTOR", "4")))
 ZVEC_VECTOR_WEIGHT = float(os.environ.get("GA_KB_VECTOR_WEIGHT", "1.2"))
 ZVEC_SPARSE_WEIGHT = float(os.environ.get("GA_KB_SPARSE_WEIGHT", "1.0"))
-IMAGE_ANALYSIS_CONCURRENCY = max(1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY", "1")))
-
-_local = threading.local()          # per-thread non-fatal search diagnostics
-_build_lock = threading.Lock()
-_build_state_lock = threading.Lock()
-_LOCK_PORT = 45764                  # 跨进程单飞锁端口（与 indexer 45763 / scheduler 45762 错开）
-# 构建态：供前端/服务端查询进度
-build_state = {
-    "running": False,
-    "result": None,
-    "last_build_summary": None,
-    "started_at": None,
-    "finished_at": None,
-    "kb": None,
-    "phase": "idle",
-    "message": "",
-    "processed": 0,
-    "total": 0,
-}
-
-
-def _update_build_state(**changes):
-    with _build_state_lock:
-        build_state.update(changes)
-
-
-def _build_state_snapshot():
-    with _build_state_lock:
-        return dict(build_state)
-
-
-# Knowledge-base registry functions are implemented in config.py.
-
-def _managed_kb_root(kb):
-    """Return the package-local import root for *kb*, or ``None`` for external paths."""
-    if not isinstance(kb, dict):
-        return None
-    data_root = os.path.realpath(DATA_ROOT)
-    candidate = os.path.realpath(os.path.join(DATA_ROOT, str(kb.get("id") or "")))
-    kb_path = os.path.realpath(str(kb.get("path") or ""))
-    if not candidate or candidate == data_root:
-        return None
-    try:
-        if os.path.commonpath((data_root, candidate)) != data_root:
-            return None
-        if os.path.commonpath((candidate, kb_path)) != candidate:
-            return None
-    except ValueError:
-        return None
-    return candidate
-
-
-def delete_kb(kb_id, delete_data=False, config_path=CONFIG_PATH):
-    """Remove a KB registration and optionally its package-local imported copy.
-
-    External source directories are never removed.  ``delete_data=True`` only
-    removes ``DATA_ROOT/<kb_id>`` when the configured path is inside that exact
-    package-local import root.
-    """
-    kb_id = str(kb_id or "").strip()
-    if not kb_id:
-        raise ValueError("知识库 ID 不能为空")
-    if not _build_lock.acquire(blocking=False):
-        raise RuntimeError("知识库正在构建索引，请稍后再删除")
-    try:
-        kb = next((item for item in load_config(config_path) if item["id"] == kb_id), None)
-        if kb is None:
-            return {"removed": False, "kb_id": kb_id, "data_deleted": False}
-
-        managed_root = _managed_kb_root(kb)
-        data_deleted = False
-        # Search and Agent tool calls may have opened the same Zvec collection
-        # from worker threads.  Release those native handles before removing
-        # the package-local index, especially on Windows where IPC files cannot
-        # be unlinked while a collection is still alive.
-        _clear_zvec_cache(_zvec_path(kb["path"]))
-        if delete_data and managed_root and os.path.lexists(managed_root):
-            # Do not follow a symlink/junction supplied through a package-local path.
-            if not os.path.islink(managed_root):
-                shutil.rmtree(managed_root)
-                data_deleted = True
-
-        removed = remove_kb(kb_id, config_path=config_path)
-        if _retrieval_instance is not None:
-            _retrieval_instance.clear_asset_cache(kb.get("path"))
-        return {
-            "removed": bool(removed),
-            "kb_id": kb_id,
-            "data_deleted": data_deleted,
-            "managed_data": bool(managed_root),
-        }
-    finally:
-        _build_lock.release()
-
-
-def _canonical_source_path(source_dir):
-    """Return the normalized absolute source path used for KB identity."""
-    return _configured_canonical_source_path(source_dir)
-
-
-def kb_id_for_source(source_dir):
-    """Return a stable, package-safe ID derived from a source directory path."""
-    return _configured_kb_id_for_source(source_dir)
-
-
-def import_kb(source_dir, kb_id="", name="", overwrite=False, progress=None):
-    """Import one source directory through the unified MinerU pipeline.
-
-    ``kb_id`` remains in the function signature for bridge compatibility, but
-    the registry identity is deliberately derived from the canonical source
-    path.  PDFs over the current service limit are rejected before MinerU
-    submission; this importer does not split or merge PDF parts.
-    """
-    if not _build_lock.acquire(blocking=False):
-        raise RuntimeError("知识库正在构建索引，请稍后再导入")
-    try:
-        try:
-            from .importer import import_knowledge_base
-        except ImportError:  # pragma: no cover - supports direct CLI execution
-            from importer import import_knowledge_base
-        return import_knowledge_base(
-            source_dir,
-            kb_id=kb_id,
-            name=name,
-            overwrite=overwrite,
-            progress=progress,
-        )
-    finally:
-        _build_lock.release()
-
-
-def _index_dir(kb_path):
-    return os.path.join(kb_path, INDEX_SUBDIR)
-
-
-def _zvec_path(kb_path):
-    return os.path.join(_index_dir(kb_path), ZVEC_SUBDIR)
-
-
-def _zvec_meta_path(kb_path):
-    return os.path.join(_index_dir(kb_path), "zvec_meta.json")
-
-
-def _image_cache_dir(kb_path):
-    return os.path.join(_index_dir(kb_path), IMAGE_CACHE_SUBDIR)
-
-
-def _build_usage_path(kb_path):
-    return os.path.join(_index_dir(kb_path), BUILD_USAGE_FILE)
-
-
-# ─────────────────────────── 文档扫描与抽取 ───────────────────────────
-
-def _build_sources(kb_path, scanned, mode="full", image_indexes=None):
-    sources = {
-        "documents": _fingerprint(scanned),
-        "chunking": _chunking_meta(),
-    }
-    if mode != "text":
-        if image_indexes is None:
-            raise ValueError("构建图片来源指纹需要预先生成的文档图片索引")
-        sources.update({
-            "images": _image_source_fingerprint(
-                kb_path, scanned, image_indexes=image_indexes
-            ),
-            "image_analysis": _image_build_fingerprint_meta(),
-        })
-    return sources
-
-
-_usage_tracker_instance = None
-
-
-def _usage_tracker():
-    global _usage_tracker_instance
-    if _usage_tracker_instance is None:
-        _usage_tracker_instance = _UsageTracker(
-            index_dir_fn=_index_dir,
-            usage_path_fn=_build_usage_path,
-        )
-    return _usage_tracker_instance
-
-
-def _empty_usage():
-    return _usage_tracker().empty()
-
-
-def _usage():
-    return _usage_tracker().current()
-
-
-def _set_usage(value):
-    _usage_tracker().set_current(value)
-
-
-def _merge_image_analysis_usage(usage_delta):
-    _usage_tracker().merge_image_analysis(usage_delta)
-
-
-def _write_build_usage(kb_path, usage):
-    _usage_tracker().write(kb_path, usage)
-
-
-def _load_build_usage(kb_path):
-    return _usage_tracker().load(kb_path)
-
-
-def _build_usage_summary(usage):
-    ia = usage.get("image_analysis", {})
-    em = usage.get("embedding", {})
-    sem = usage.get("sparse_embedding", {})
-    return {
-        "image_calls": ia.get("calls", 0),
-        "image_cached": ia.get("cached", 0),
-        "image_failed": ia.get("failed", 0),
-        "image_prompt_tokens": ia.get("prompt_tokens", 0),
-        "image_completion_tokens": ia.get("completion_tokens", 0),
-        "embedding_calls": em.get("calls", 0),
-        "embedding_texts": em.get("texts", 0),
-        "embedding_api_tokens": em.get("api_tokens", 0),
-        "sparse_embedding_calls": sem.get("calls", 0),
-        "sparse_embedding_texts": sem.get("texts", 0),
-        "sparse_embedding_api_tokens": sem.get("api_tokens", 0),
-    }
-
-
-# ───────────────────────────── 图片资产 ─────────────────────────────
-
-def _truthy_env(name, default="0"):
-    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
-
-
-def _load_image_client():
-    if ROOT not in sys.path:
-        sys.path.insert(0, ROOT)
-    try:
-        from .providers import vision
-    except ImportError:  # pragma: no cover - supports direct CLI execution
-        from providers import vision
-    return vision
-
-
-def _image_analysis_meta():
-    """Full analysis meta (incl. runtime_image_qa) for asset-file display."""
-    try:
-        return _load_image_client().analysis_meta()
-    except Exception as e:
-        return {
-            "enabled": _truthy_env("GA_KB_IMAGE_ANALYSIS"),
-            "error": str(e),
-            "prompt_version": int(os.environ.get("GA_KB_IMAGE_PROMPT_VERSION", "6")),
-        }
-
-
-def _image_build_fingerprint_meta():
-    """Build/index fingerprint meta — excludes the query-time runtime_image_qa
-    switch so toggling it no longer forces a full re-index (bug M2)."""
-    try:
-        return _load_image_client().build_analysis_meta()
-    except Exception as e:
-        return {
-            "enabled": _truthy_env("GA_KB_IMAGE_ANALYSIS"),
-            "error": str(e),
-            "prompt_version": int(os.environ.get("GA_KB_IMAGE_PROMPT_VERSION", "6")),
-        }
-
-
-
-
-
-
-
-
-
-
-# ───────────────────────────── 图片资产适配 ─────────────────────────────
-
-_image_assets_instance = None
-
-
-def _image_assets():
-    global _image_assets_instance
-    if _image_assets_instance is None:
-        _image_assets_instance = _ImageAssetProcessor(
-            image_client_fn=_load_image_client,
-            image_meta_fn=_image_analysis_meta,
-            image_cache_dir_fn=_image_cache_dir,
-            merge_usage_fn=_merge_image_analysis_usage,
+IMAGE_ANALYSIS_CONCURRENCY = max(
+    1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY", "1"))
+)
+
+CONFIG_PATH = config.CONFIG_PATH
+DATA_ROOT = config.DATA_ROOT
+ROOT = config.ROOT
+load_config = config.load_config
+kb_id_for_source = config.kb_id_for_source
+
+
+@dataclass
+class _Runtime:
+    dimension: int
+    usage: UsageTracker
+    assets: ImageAssetProcessor
+    index: ZvecIndex
+    records: RecordBuilder
+    index_builder: IndexBuilder
+    publisher: Publisher
+    pipeline: IngestPipeline
+    retrieval: KnowledgeBaseRetriever
+
+
+_runtime_lock = threading.RLock()
+_runtime_instance: _Runtime | None = None
+_processing_lock = threading.Lock()
+_processing_kbs: set[str] = set()
+
+
+def _embedding_dimension() -> int:
+    value = provider_settings.embedding_config().get("dimension")
+    return max(1, int(value or 1024))
+
+
+def _runtime() -> _Runtime:
+    global _runtime_instance
+    dimension = _embedding_dimension()
+    with _runtime_lock:
+        if _runtime_instance is not None and _runtime_instance.dimension == dimension:
+            return _runtime_instance
+        usage = UsageTracker()
+        assets = ImageAssetProcessor(
+            usage_tracker=usage,
             concurrency=IMAGE_ANALYSIS_CONCURRENCY,
         )
-    return _image_assets_instance
-
-
-def _local_ref_key(value):
-    return _image_assets().local_ref_key(value)
-
-
-def _build_document_index(text):
-    return _image_assets().build_document_index(text)
-
-
-def _asset_body(asset):
-    return _image_assets().asset_body(asset)
-
-
-def _image_source_fingerprint(kb_path, scanned, image_indexes=None):
-    return _image_assets().image_source_fingerprint(kb_path, scanned, image_indexes=image_indexes)
-
-
-def _image_records_for_document(*args, **kwargs):
-    return _image_assets().image_records_for_document(*args, **kwargs)
-
-
-def _apply_image_analysis(asset, analysis):
-    return _image_assets().apply_image_analysis(asset, analysis)
-
-
-def _analyze_image_jobs(kb, image_jobs, log):
-    return _image_assets().analyze_image_jobs(kb, image_jobs, log)
-
-
-# ───────────────────────────── 构建 ─────────────────────────────
-
-_build_coordinator_instance = None
-
-
-def _build_coordinator():
-    global _build_coordinator_instance
-    if _build_coordinator_instance is None:
-        _build_coordinator_instance = _BuildCoordinator(
-            _BuildServices(
-                documents=_DocumentServices(
-                    scan_documents=_scan,
-                    extract_text=extract_text,
-                    chunk_document_records=chunk_document_records,
-                    build_sources=_build_sources,
-                    display_names=_imported_document_titles,
-                ),
-                images=_ImageServices(
-                    build_document_index=_build_document_index,
-                    image_records_for_document=_image_records_for_document,
-                    analyze_image_jobs=_analyze_image_jobs,
-                    apply_image_analysis=_apply_image_analysis,
-                ),
-                index=_IndexServices(
-                    zvec_path=_zvec_path,
-                    require_zvec=_require_zvec,
-                    zvec_meta=_zvec_meta,
-                    zvec_is_quickly_fresh=_zvec_is_quickly_fresh,
-                    build_zvec_index=_build_zvec_index,
-                    append_zvec_image_index=_append_zvec_image_index,
-                ),
-                usage=_UsageServices(
-                    set_usage=_set_usage,
-                    empty_usage=_empty_usage,
-                    usage=_usage,
-                    write_build_usage=_write_build_usage,
-                    build_usage_summary=_build_usage_summary,
-                ),
-                update_build_state=_update_build_state,
-                load_config=load_config,
-            ),
-            lock_port=_LOCK_PORT,
-            build_lock=_build_lock,
+        index = ZvecIndex(
+            dimension=dimension,
+            batch_size=ZVEC_BATCH,
+            usage_tracker=usage,
         )
-    return _build_coordinator_instance
-
-
-def _records(
-    kb,
-    scanned,
-    log,
-    include_text=True,
-    include_images=True,
-    progressfn=None,
-    image_indexes=None,
-):
-    return _build_coordinator().records(
-        kb,
-        scanned,
-        log,
-        include_text=include_text,
-        include_images=include_images,
-        progressfn=progressfn,
-        image_indexes=image_indexes,
-    )
-
-
-def _build_summary(results):
-    return _BuildCoordinator.build_summary(results)
-
-
-def build_all(force=False, verbose=True, logfn=None, kb_id=None, mode="full"):
-    """Compatibility facade for building configured knowledge bases."""
-    return _build_coordinator().build_all(
-        force=force, verbose=verbose, logfn=logfn, kb_id=kb_id, mode=mode
-    )
-
-
-# ───────────────────────────── 检索 ─────────────────────────────
-
-_zvec_store_instance = None
-_zvec_store_lock = threading.RLock()
-
-
-def _configured_embedding_dimension() -> int:
-    """Return the active embedding dimension used by both provider and Zvec."""
-    try:
-        from .providers import provider_settings
-    except ImportError:  # pragma: no cover - supports direct CLI execution
-        from providers import provider_settings
-    try:
-        value = provider_settings.embedding_config().get("dimension")
-        return max(1, int(value or ZVEC_DIM))
-    except (TypeError, ValueError):
-        return ZVEC_DIM
-
-
-def _zvec_store():
-    global _zvec_store_instance
-    dimension = _configured_embedding_dimension()
-    with _zvec_store_lock:
-        if _zvec_store_instance is None or _zvec_store_instance.dimension != dimension:
-            if _zvec_store_instance is not None:
-                _zvec_store_instance.clear_cache()
-            _zvec_store_instance = _ZvecIndex(
-                dimension=dimension,
-                batch_size=ZVEC_BATCH,
-                schema_version=ZVEC_SCHEMA_VERSION,
-                path_fn=_zvec_path,
-                meta_path_fn=_zvec_meta_path,
-                embedding_fn=_embed_texts,
-                sparse_embedding_fn=_embed_sparse_texts,
-                embedding_meta_fn=_embedding_meta,
-                sparse_embedding_meta_fn=_sparse_embedding_meta,
-                chunking_meta_fn=_chunking_meta,
-                image_analysis_meta_fn=_image_build_fingerprint_meta,
-                usage_fn=_usage,
-                document_fingerprint_fn=_fingerprint,
-                embedding_usage_drain_fn=_drain_embedding_usage,
-            )
-    return _zvec_store_instance
-
-
-def _zvec_conn(path, *, create=False, read_only=True):
-    return _zvec_store().connect(path, create=create, read_only=read_only)
-
-
-def _clear_zvec_cache(path=None):
-    return _zvec_store().clear_cache(path)
-
-
-def _embed_texts(texts):
-    return _embed_texts_with_provider(texts)
-
-
-def _embed_sparse_texts(texts, text_type="document"):
-    client = _load_embeddings_provider()
-    return client.embed_sparse_texts(texts, text_type=text_type)
-
-
-def _embedding_provider():
-    return "dashscope"
-
-
-def _embedding_meta():
-    provider = _embedding_provider()
-    meta = {"provider": provider, "dimension": _configured_embedding_dimension()}
-    try:
-        client = _load_embeddings_provider()
-        return client.embedding_meta()
-    except Exception as e:
-        meta["error"] = str(e)
-    return meta
-
-
-def _sparse_embedding_meta():
-    provider = _embedding_provider()
-    meta = {"provider": provider, "type": "sparse"}
-    try:
-        client = _load_embeddings_provider()
-        return client.sparse_embedding_meta()
-    except Exception as e:
-        meta["error"] = str(e)
-    return meta
-
-
-def _load_embeddings_provider():
-    if ROOT not in sys.path:
-        sys.path.insert(0, ROOT)
-    try:
-        from .providers import embeddings
-    except ImportError:  # pragma: no cover - supports direct CLI execution
-        from providers import embeddings
-    return embeddings
-
-
-def _embed_texts_with_provider(texts):
-    client = _load_embeddings_provider()
-    return client.embed_texts(texts)
-
-
-def _drain_embedding_usage():
-    """Return real embedding token usage since the last drain, per output type.
-
-    Delegates to the provider accumulator ({"dense": n, "sparse": m}); cache
-    hits contribute nothing because they never reach the API.
-    """
-    return _load_embeddings_provider().drain_usage()
-
-
-def _zvec_meta(kb_path):
-    return _zvec_store().meta(kb_path)
-
-
-def _zvec_is_quickly_fresh(kb_path, scanned, meta=None, mode="full"):
-    return _zvec_store().is_quickly_fresh(kb_path, scanned, meta=meta, mode=mode)
-
-
-def _zvec_doc_id(data_id, chunk_index):
-    return _ZvecIndex.doc_id(data_id, chunk_index)
-
-
-def _record_search_error(kb, source, error):
-    errors = getattr(_local, "search_errors", None)
-    if errors is not None:
-        errors.append({
-            "kb_id": kb.get("id", ""),
-            "source": source,
-            "error": str(error),
-        })
-
-
-def search_diagnostics():
-    """Return non-fatal errors from the latest search in this thread."""
-    return list(getattr(_local, "search_errors", []) or [])
-
-
-def _require_zvec():
-    return _zvec_store().require()
-
-
-def _build_zvec_index(kb, records, sources, force=False, logfn=None):
-    return _zvec_store().build(kb, records, sources, force=force, logfn=logfn)
-
-
-def _append_zvec_image_index(kb, records, sources, force=False, logfn=None):
-    return _zvec_store().append_images(kb, records, sources, force=force, logfn=logfn)
-
-
-# Must stay in sync with retrieval._DEFAULT_OUTPUT_FIELDS — includes the
-# widened image-asset columns so fetch()/search() return image metadata
-# straight from the zvec row (no image_assets.json catalog join).
-_ZVEC_OUTPUT_FIELDS = [
-    "data_id", "chunk_index", "kb_id", "file_name", "title", "kind",
-    "image_path", "source_data_id", "source_chunk_index", "header_path", "body",
-    "image_id", "ref_key", "display_label", "caption", "description",
-    "table_markdown", "source_file_name", "uncertain", "analysis_error",
-    "related_text", "near_text",
-]
-
-
-
-
-
-
-
-
-
-
-def _zvec_fetch_doc(kb, data_id, chunk_index, output_fields=None):
-    return _zvec_store().fetch(
-        kb, data_id, chunk_index, output_fields=output_fields or _ZVEC_OUTPUT_FIELDS
-    )
-
-
-# ───────────────────────── 状态 / 预加载上下文 ─────────────────────────
-
-def _imported_file_counts(kb_path):
-    """Read source-level document/asset counts from the import manifest."""
-    manifest = os.path.join(os.path.dirname(kb_path), "import_manifest.json")
-    try:
-        with open(manifest, encoding="utf-8") as handle:
-            entries = (json.load(handle) or {}).get("files") or []
-    except Exception:
-        return None
-    documents = sum(
-        1 for item in entries
-        if isinstance(item, dict)
-        and item.get("kind") == "document"
-        and item.get("status") == "ready"
-    )
-    assets = sum(
-        1 for item in entries
-        if isinstance(item, dict) and item.get("kind") == "asset"
-    )
-    return {"documents": documents, "assets": assets}
-
-
-def kb_status(kb):
-    zpath = _zvec_path(kb["path"])
-    zm = _zvec_meta(kb["path"])
-    zvec_ready = os.path.isdir(zpath)
-    index_meta = zm
-    info = {"id": kb["id"], "name": kb["name"], "path": kb["path"],
-            "raw_path": kb.get("raw_path", kb["path"]),
-            "exists": kb["exists"],
-            "ready": bool(index_meta and zvec_ready), "n_docs": 0, "n_chunks": 0,
-            "image_assets": 0,
-            "built_at": index_meta.get("built_at") if index_meta else None, "up_to_date": None,
-            "zvec_ready": zvec_ready, "zvec_status": None,
-            "index_backend": "zvec" if zvec_ready else None,
-            "embedding": None}
-    if not kb["exists"]:
-        return info
-    imported_counts = _imported_file_counts(kb["path"])
-    scanned = None
-    try:
-        scanned = _scan(kb["path"])
-    except Exception:
-        pass
-    if imported_counts is not None:
-        info["n_docs"] = imported_counts["documents"]
-        info["image_assets"] = imported_counts["assets"]
-    elif scanned is not None:
-        info["n_docs"] = len(scanned)
-    if info["ready"]:
-        st = index_meta.get("stats", {})
-        info["n_docs"] = st.get("n_docs", info["n_docs"])
-        info["n_chunks"] = st.get("n_chunks", 0)
-        info["zvec_status"] = "ready"
-        info["embedding"] = index_meta.get("embedding")
-        info["sparse_embedding"] = index_meta.get("sparse_embedding")
-        info["zvec_chunks"] = st.get("n_chunks", 0)
-        # Route 甲: image_assets comes from the zvec build stats (indexed image
-        # rows); no image_assets.json fallback remains.
-        info["image_assets"] = st.get("image_assets") or 0
-        info["zvec_bytes"] = st.get("zvec_bytes", 0)
-        bu = _load_build_usage(kb["path"])
-        if bu:
-            ia = bu.get("image_analysis", {})
-            em = bu.get("embedding", {})
-            sem = bu.get("sparse_embedding", {})
-            info["usage"] = {
-                "image_calls": ia.get("calls", 0),
-                "image_cached": ia.get("cached", 0),
-                "image_failed": ia.get("failed", 0),
-                "image_prompt_tokens": ia.get("prompt_tokens", 0),
-                "image_completion_tokens": ia.get("completion_tokens", 0),
-                "embedding_calls": em.get("calls", 0),
-                "embedding_texts": em.get("texts", 0),
-                "embedding_api_tokens": em.get("api_tokens", 0),
-                "sparse_embedding_calls": sem.get("calls", 0),
-                "sparse_embedding_texts": sem.get("texts", 0),
-                "sparse_embedding_api_tokens": sem.get("api_tokens", 0),
-            }
+        records = RecordBuilder(assets=assets)
+        index_builder = IndexBuilder(index=index, usage_tracker=usage)
+        publisher = Publisher()
+        pipeline = IngestPipeline(
+            document_processor=DocumentProcessor(),
+            record_builder=records,
+            index_builder=index_builder,
+            publisher=publisher,
+            index=index,
+        )
         try:
-            if scanned is None:
-                scanned = _scan(kb["path"])
-            info["up_to_date"] = _zvec_is_quickly_fresh(kb["path"], scanned, zm)
-        except Exception:
-            info["up_to_date"] = None
-    return info
-
-
-def status():
-    kbs = [kb_status(kb) for kb in load_config()]
-    state = _build_state_snapshot()
-    return {
-        "knowledge_bases": kbs,
-        "building": state["running"],
-        "build_kb": state.get("kb"),
-        "last_build": state.get("result"),
-        "last_build_summary": state.get("last_build_summary"),
-        "build_progress": {
-            "phase": state.get("phase"),
-            "message": state.get("message", ""),
-            "processed": state.get("processed", 0),
-            "total": state.get("total", 0),
-            "started_at": state.get("started_at"),
-            "finished_at": state.get("finished_at"),
-        },
-        "configured": bool(kbs),
-    }
-
-
-def _imported_document_titles(kb_path):
-    """Map generated Markdown paths back to source filenames when present."""
-    titles = {}
-    for entry in _imported_document_entries(kb_path):
-        source = str(entry.get("source") or "")
-        title = os.path.basename(source) or source
-        for rel in entry.get("processed") or []:
-            normalized = str(rel).replace("\\", "/").lstrip("/")
-            if not normalized:
-                continue
-            titles[normalized] = title
-            if normalized.startswith("processed/"):
-                titles[normalized[len("processed/"):]] = title
-            else:
-                titles[f"processed/{normalized}"] = title
-    return titles
-
-
-def _imported_document_entries(kb_path):
-    """Return manifest document entries without exposing source file paths."""
-    manifest = os.path.join(os.path.dirname(kb_path), "import_manifest.json")
-    try:
-        with open(manifest, encoding="utf-8") as handle:
-            entries = (json.load(handle) or {}).get("files") or []
-    except Exception:
-        return []
-    return [
-        entry for entry in entries
-        if isinstance(entry, dict) and entry.get("kind") == "document"
-    ]
-
-
-_retrieval_instance = None
-
-
-def _retrieval():
-    global _retrieval_instance
-    if _retrieval_instance is None:
-        _retrieval_instance = _KnowledgeBaseRetriever(
-            load_config=load_config,
-            kb_by_id=_kb_by_id,
-            scan_documents=_scan,
-            read_textfile=_read_textfile,
-            zvec_path=_zvec_path,
-            zvec_conn=_zvec_conn,
-            zvec_doc_id=_zvec_doc_id,
-            fetch_doc=_zvec_fetch_doc,
-            require_zvec=_require_zvec,
-            embed_texts=_embed_texts,
-            embed_sparse_texts=_embed_sparse_texts,
-            local_ref_key=_local_ref_key,
-            record_search_error=_record_search_error,
-            imported_document_titles=_imported_document_titles,
-            imported_document_entries=_imported_document_entries,
+            pipeline.cleanup_orphans()
+        except KnowledgeBaseLockedError:
+            # Another process is actively mutating a KB.  Its temporary paths
+            # are live, not orphans; the next clean startup can sweep them.
+            pass
+        retrieval = KnowledgeBaseRetriever(
+            registry=config,
+            index=index,
+            assets=assets,
             query_factor=ZVEC_QUERY_FACTOR,
             vector_weight=ZVEC_VECTOR_WEIGHT,
             sparse_weight=ZVEC_SPARSE_WEIGHT,
             snippet_width=_SNIPPET,
-            output_fields=_ZVEC_OUTPUT_FIELDS,
         )
-    return _retrieval_instance
+        _runtime_instance = _Runtime(
+            dimension=dimension,
+            usage=usage,
+            assets=assets,
+            index=index,
+            records=records,
+            index_builder=index_builder,
+            publisher=publisher,
+            pipeline=pipeline,
+            retrieval=retrieval,
+        )
+        return _runtime_instance
 
 
-def search(query, top_k=6, kb_id=None, snippet_chars=_SNIPPET, file_name=None, title=None, mode="rrf"):
-    _local.search_errors = []
-    return _retrieval().search(
-        query, top_k=top_k, kb_id=kb_id, snippet_chars=snippet_chars,
-        file_name=file_name, title=title, mode=mode,
+def _mark_processing(kb_id: str, active: bool) -> None:
+    with _processing_lock:
+        if active:
+            _processing_kbs.add(kb_id)
+        else:
+            _processing_kbs.discard(kb_id)
+
+
+def _is_processing(kb_id: str) -> bool:
+    with _processing_lock:
+        return kb_id in _processing_kbs
+
+
+def import_kb(source_dir: str, *, name: str = "", progress=None) -> dict:
+    source = config.canonical_source_path(source_dir)
+    kb_id = config.kb_id_for_source(source)
+    _mark_processing(kb_id, True)
+    try:
+        return _runtime().pipeline.import_kb(
+            source,
+            name=name,
+            progress=progress,
+        )
+    finally:
+        _mark_processing(kb_id, False)
+
+
+def reindex(kb_id: str, *, progress=None, logfn=None) -> dict:
+    value = str(kb_id or "").strip()
+    _mark_processing(value, True)
+    try:
+        return _runtime().pipeline.reindex(
+            value,
+            progress=progress,
+            logfn=logfn,
+        )
+    finally:
+        _mark_processing(value, False)
+
+
+def delete_kb(kb_id: str) -> dict:
+    return _runtime().pipeline.delete(str(kb_id or "").strip())
+
+
+def _load_manifest(kb: dict) -> dict:
+    try:
+        with open(kb["manifest_path"], encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _source_fingerprint(source_path: str) -> list[dict] | None:
+    root = os.path.realpath(str(source_path or ""))
+    if not os.path.isdir(root):
+        return None
+    rows = []
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [name for name in dirnames if not name.startswith(".")]
+        for filename in filenames:
+            if filename.startswith("."):
+                continue
+            path = os.path.join(directory, filename)
+            if os.path.islink(path) or not os.path.isfile(path):
+                continue
+            stat = os.stat(path)
+            rows.append({
+                "path": os.path.relpath(path, root).replace(os.sep, "/"),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            })
+    rows.sort(key=lambda item: item["path"].casefold())
+    return rows
+
+
+def kb_status(kb: dict) -> dict:
+    manifest = _load_manifest(kb)
+    processing = _is_processing(kb["id"])
+    probe = {
+        "present": False,
+        "openable": False,
+        "schema_valid": False,
+        "embedding_matches": False,
+        "error": "",
+        "meta": {},
+    }
+    if kb.get("exists"):
+        probe = _runtime().index.probe(kb["path"])
+    summary = manifest.get("summary") or {}
+    failures = manifest.get("failures") or []
+    healthy = all(
+        probe.get(key)
+        for key in ("present", "openable", "schema_valid", "embedding_matches")
+    )
+    if processing:
+        state = "processing"
+    elif not kb.get("exists"):
+        state = "missing"
+    elif not healthy:
+        state = "broken"
+    elif failures:
+        state = "ready_with_warnings"
+    else:
+        state = "ready"
+    current_source = _source_fingerprint(kb.get("source_path") or "")
+    expected_source = manifest.get("source_fingerprint")
+    source_changed = (
+        None if current_source is None or not isinstance(expected_source, list)
+        else current_source != expected_source
+    )
+    index_meta = probe.get("meta") or {}
+    documents = []
+    if kb.get("exists"):
+        try:
+            documents = _runtime().retrieval.list_documents(kb_id=kb["id"])
+        except Exception:
+            documents = []
+    success_times = [
+        int(value)
+        for value in (
+            manifest.get("published_at"),
+            manifest.get("reindexed_at"),
+            index_meta.get("built_at"),
+            manifest.get("imported_at"),
+        )
+        if value
+    ]
+    return {
+        "id": kb["id"],
+        "name": kb["name"],
+        "source_path": kb.get("source_path") or "",
+        "state": state,
+        "source_changed": source_changed,
+        "index": {
+            "present": bool(probe.get("present")),
+            "openable": bool(probe.get("openable")),
+            "schema_valid": bool(probe.get("schema_valid")),
+            "embedding_matches": bool(probe.get("embedding_matches")),
+            "error": probe.get("error") or "",
+        },
+        "counts": {
+            "documents": int(summary.get("n_docs") or summary.get("ready") or 0),
+            "text_chunks": int(summary.get("text_chunks") or 0),
+            "images": int(summary.get("image_assets") or 0),
+            "failures": len(failures),
+        },
+        "last_success_at": max(success_times) if success_times else None,
+        "failures": failures,
+        "documents": documents,
+    }
+
+
+def status(kb_id: str | None = None) -> dict:
+    rows = [
+        kb_status(kb)
+        for kb in config.load_config()
+        if not kb_id or kb["id"] == kb_id
+    ]
+    return {
+        "knowledge_bases": rows,
+        "configured": bool(rows),
+    }
+
+
+def search(
+    query: str,
+    top_k: int = 6,
+    kb_id: str | None = None,
+    snippet_chars: int = _SNIPPET,
+    file_name: str | None = None,
+    title: str | None = None,
+    mode: str = "rrf",
+) -> dict:
+    return _runtime().retrieval.search(
+        query,
+        top_k=top_k,
+        kb_id=kb_id,
+        snippet_chars=snippet_chars,
+        file_name=file_name,
+        title=title,
+        mode=mode,
     )
 
 
+def search_diagnostics() -> list[dict]:
+    return _runtime().retrieval.search_diagnostics()
+
+
 def document_exists(file_name=None, title=None, kb_id=None):
-    return _retrieval().document_exists(file_name=file_name, title=title, kb_id=kb_id)
+    return _runtime().retrieval.document_exists(
+        file_name=file_name, title=title, kb_id=kb_id
+    )
 
 
 def read_chunk(data_id=None, chunk_index=0, kb_id=None, ref=None, max_chars=4000):
-    return _retrieval().read_chunk(
-        data_id=data_id, chunk_index=chunk_index, kb_id=kb_id,
-        ref=ref, max_chars=max_chars,
+    return _runtime().retrieval.read_chunk(
+        data_id=data_id,
+        chunk_index=chunk_index,
+        kb_id=kb_id,
+        ref=ref,
+        max_chars=max_chars,
     )
 
 
 def reference_for_chunk(data_id=None, chunk_index=0, kb_id=None, ref=None):
-    return _retrieval().reference_for_chunk(
-        data_id=data_id, chunk_index=chunk_index, kb_id=kb_id, ref=ref,
+    return _runtime().retrieval.reference_for_chunk(
+        data_id=data_id,
+        chunk_index=chunk_index,
+        kb_id=kb_id,
+        ref=ref,
     )
 
 
 def list_chunks(data_id=None, kb_id=None, ref=None, preview_chars=80, limit=400):
-    return _retrieval().list_chunks(
-        data_id=data_id, kb_id=kb_id, ref=ref,
-        preview_chars=preview_chars, limit=limit,
+    return _runtime().retrieval.list_chunks(
+        data_id=data_id,
+        kb_id=kb_id,
+        ref=ref,
+        preview_chars=preview_chars,
+        limit=limit,
     )
 
 
 def read_image(data_id=None, ref_key=None, kb_id=None):
-    return _retrieval().read_image(data_id=data_id, ref_key=ref_key, kb_id=kb_id)
+    return _runtime().retrieval.read_image(
+        data_id=data_id, ref_key=ref_key, kb_id=kb_id
+    )
 
 
 def resolve_file(cited):
-    return _retrieval().resolve_file(cited)
+    return _runtime().retrieval.resolve_file(cited)
 
 
 def list_documents(kb_id=None):
-    return _retrieval().list_documents(kb_id=kb_id)
+    return _runtime().retrieval.list_documents(kb_id=kb_id)
 
 
-def read_document(kb_id=None, data_id=None, file_name=None, ref=None, max_chars=200000):
-    return _retrieval().read_document(
-        kb_id=kb_id, data_id=data_id, file_name=file_name,
-        ref=ref, max_chars=max_chars,
+def read_document(
+    kb_id=None,
+    data_id=None,
+    file_name=None,
+    ref=None,
+    max_chars=200000,
+):
+    return _runtime().retrieval.read_document(
+        kb_id=kb_id,
+        data_id=data_id,
+        file_name=file_name,
+        ref=ref,
+        max_chars=max_chars,
     )
 
 
 def resolve_source_document(kb_id=None, data_id=None, file_name=None, ref=None):
-    return _retrieval().resolve_source_document(
-        kb_id=kb_id, data_id=data_id, file_name=file_name, ref=ref,
+    return _runtime().retrieval.resolve_source_document(
+        kb_id=kb_id,
+        data_id=data_id,
+        file_name=file_name,
+        ref=ref,
     )
 
 
-def _path_is_within(root, path):
-    try:
-        root = os.path.realpath(root)
-        path = os.path.realpath(path)
-        return path == root or os.path.commonpath((root, path)) == root
-    except (OSError, ValueError):
-        return False
-
-
-def resolve_document_asset(kb_id=None, data_id=None, image_path=None):
-    """Resolve a Markdown-relative image under one validated KB document."""
-    data_id = str(data_id or "").strip()
-    kid = str(kb_id or "").strip()
-    if "::" not in data_id:
-        return None
-    data_kb_id, document_rel = data_id.split("::", 1)
-    if kid and data_kb_id != kid:
-        return None
-    kb = _kb_by_id(kid or data_kb_id)
-    if kb is None or not kb.get("exists"):
-        return None
-
-    raw_image = str(image_path or "").strip().strip("<>")
-    raw_image = unquote(raw_image.split("?", 1)[0].split("#", 1)[0]).replace("\\", "/")
-    if (
-        not raw_image
-        or raw_image.startswith("/")
-        or re.match(r"^[a-z][a-z0-9+.-]*:", raw_image, re.I)
-        or os.path.splitext(raw_image)[1].lower() not in DOCUMENT_IMAGE_EXTS
-    ):
-        return None
-
-    root = os.path.realpath(kb["path"])
-    document = os.path.realpath(os.path.join(root, document_rel.replace("/", os.sep)))
-    if not _path_is_within(root, document) or not os.path.isfile(document):
-        return None
-    target = os.path.realpath(
-        os.path.join(os.path.dirname(document), raw_image.replace("/", os.sep))
-    )
-    if not _path_is_within(root, target) or not os.path.isfile(target):
-        return None
-    return target
-
-
-def resolve_source_asset(kb_id=None, data_id=None, ref=None, image_path=None):
-    """Resolve an image linked from an original source document."""
+def resolve_open_target(
+    *,
+    kb_id: str,
+    data_id: str = "",
+    ref: str = "",
+    ref_key: str = "",
+) -> str | None:
+    if "::image::" in str(data_id or "") or ref_key:
+        image = read_image(data_id=data_id, ref_key=ref_key, kb_id=kb_id)
+        path = str(image.get("image_abspath") or "")
+        return path if path and os.path.isfile(path) else None
     source = resolve_source_document(kb_id=kb_id, data_id=data_id, ref=ref)
-    if source.get("error") or not source.get("is_original"):
-        return None
-    kb = _kb_by_id(source.get("kb_id") or kb_id)
-    source_root_value = str((kb or {}).get("source_path") or "").strip()
-    if kb is None or not source_root_value:
-        return None
-    raw_image = str(image_path or "").strip().strip("<>")
-    raw_image = unquote(raw_image.split("?", 1)[0].split("#", 1)[0]).replace("\\", "/")
-    if (
-        not raw_image
-        or raw_image.startswith("/")
-        or re.match(r"^[a-z][a-z0-9+.-]*:", raw_image, re.I)
-        or os.path.splitext(raw_image)[1].lower() not in DOCUMENT_IMAGE_EXTS
-    ):
-        return None
-    source_root = os.path.realpath(source_root_value)
-    target = os.path.realpath(
-        os.path.join(os.path.dirname(source["path"]), raw_image.replace("/", os.sep))
-    )
-    if not _path_is_within(source_root, target) or not os.path.isfile(target):
-        return None
-    return target
+    path = str(source.get("path") or "")
+    return path if path and os.path.isfile(path) else None
 
 
-def build(kb_id=None, force=False, mode="full", logfn=None):
-    """Desktop bridge wrapper around the original same-stack Zvec builder."""
-    results = build_all(force=force, verbose=not callable(logfn), logfn=logfn, kb_id=kb_id, mode=mode)
-    summary = _build_summary(results)
-    return {
-        "ok": True,
-        "summary": summary,
-        "has_failures": bool(summary["failed"]),
-        "results": [
-            {"kb_id": k, "status": v[0], "stats": v[1]}
-            for k, v in results.items()
-        ],
-    }
+def reset_managed_data() -> dict:
+    """Delete all application-managed KB data and registry entries.
 
-
-def resolve_open_target(kb_id="", data_id="", image_id="", image_path="", ref="", ref_key=""):
-    """Resolve Desktop /kb/open to an original document or indexed image.
-
-    ``image_id``/``image_path`` are still accepted from the Desktop bridge for
-    backward compatibility and image-target detection, but路线甲 anchors image
-    identity on occurrence, so the actual lookup uses ``data_id`` (occurrence
-    ``::image::`` id) + ``ref_key`` only.
+    This intentionally has no source-directory cleanup and exists for the
+    pre-production layout reset requested for this refactor.
     """
-    is_image_target = bool(image_id or image_path or "::image::" in str(data_id or ""))
-    if is_image_target:
-        asset = read_image(
-            data_id=data_id,
-            ref_key=ref_key,
-            kb_id=kb_id,
-        )
-        if not asset.get("error"):
-            path = asset.get("image_abspath") or ""
-            if path and os.path.isfile(path):
-                return path
-        return None
+    runtime = _runtime()
+    removed = []
+    for kb in list(config.load_config()):
+        removed.append(runtime.pipeline.delete(kb["id"]))
+    if os.path.isdir(config.DATA_ROOT):
+        for name in os.listdir(config.DATA_ROOT):
+            root = os.path.realpath(config.DATA_ROOT)
+            unresolved = os.path.join(root, name)
+            if os.path.islink(unresolved):
+                continue
+            candidate = os.path.realpath(unresolved)
+            if (
+                candidate != root
+                and os.path.commonpath((root, candidate)) == root
+            ):
+                shutil.rmtree(candidate, ignore_errors=True)
+    config._dump_raw_config({"knowledge_base": {}}, config.CONFIG_PATH)
+    return {"ok": True, "removed": removed}
 
-    source = resolve_source_document(kb_id=kb_id, data_id=data_id, ref=ref)
-    source_path = source.get("path") or ""
-    if source_path and os.path.isfile(source_path):
-        return source_path
-    return None
 
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="GenericAgent knowledge base")
+    parser.add_argument("--import", dest="import_dir", metavar="DIR")
+    parser.add_argument("--name")
+    parser.add_argument("--reindex", metavar="KB_ID")
+    parser.add_argument("--delete", metavar="KB_ID")
+    parser.add_argument("--reset-managed-data", action="store_true")
+    parser.add_argument("--status", action="store_true")
+    parser.add_argument("--search", metavar="QUERY")
+    parser.add_argument("--kb")
+    parser.add_argument("--mode", choices=("rrf", "vector", "sparse"), default="rrf")
+    parser.add_argument("--top-k", type=int, default=6)
+    args = parser.parse_args(argv)
 
-# ───────────────────────────── CLI ─────────────────────────────
-
-def main(argv=None):
-    import argparse
-    p = argparse.ArgumentParser(description="外挂知识库引擎")
-    p.add_argument("--build", action="store_true", help="增量构建所有配置库")
-    p.add_argument("--rebuild", action="store_true", help="强制全量重建")
-    p.add_argument("--kb", help="配合 --build/--rebuild：只构建指定知识库 ID")
-    p.add_argument("--text-only", action="store_true", help="只构建文本 chunk 索引，跳过图片资产")
-    p.add_argument("--images-only", action="store_true", help="只补图片资产到已有 Zvec 文本索引，不重建文本 embedding")
-    p.add_argument("--status", action="store_true", help="查看各库状态")
-    p.add_argument("--search", metavar="Q", help="检索测试")
-    p.add_argument("--top_k", type=int, default=6)
-    p.add_argument("--add", nargs=2, metavar=("ID", "PATH"), help="新增/更新知识库：--add 库ID 文件夹路径")
-    p.add_argument("--rm", metavar="ID", help="移除知识库配置（不删除原始文件）")
-    p.add_argument("--name", help="配合 --add：设置展示名")
-    args = p.parse_args(argv)
-
-    if args.add:
-        kid, path = args.add
-        kbs = upsert_kb(kid, path=path, name=args.name)
-        print(json.dumps({"ok": True, "knowledge_bases": [k["id"] for k in kbs]}, ensure_ascii=False))
-        print("提示：运行 `python -m knowledge_base.backend --build` 构建索引（或重启 Web 服务自动构建）。")
+    if args.reset_managed_data:
+        print(json.dumps(reset_managed_data(), ensure_ascii=False, indent=2))
         return 0
-    if args.rm:
-        ok = remove_kb(args.rm)
-        print(json.dumps({"ok": ok, "removed": args.rm if ok else None}, ensure_ascii=False))
+    if args.import_dir:
+        print(json.dumps(import_kb(args.import_dir, name=args.name or ""), ensure_ascii=False, indent=2))
+        return 0
+    if args.reindex:
+        print(json.dumps(reindex(args.reindex), ensure_ascii=False, indent=2))
+        return 0
+    if args.delete:
+        print(json.dumps(delete_kb(args.delete), ensure_ascii=False, indent=2))
         return 0
     if args.status:
-        print(json.dumps(status(), ensure_ascii=False, indent=2))
+        print(json.dumps(status(args.kb), ensure_ascii=False, indent=2))
         return 0
     if args.search:
-        for r in search(args.search, top_k=args.top_k):
-            print(f"[{r['score']}] {r['ref']} #{r['chunk_index']} :: {r['snippet'][:120]}")
-        diagnostics = search_diagnostics()
-        if diagnostics:
-            print("\n诊断（非致命，本次检索遇到的问题）：")
-            for d in diagnostics:
-                kb_label = d.get("kb_id") or "-"
-                print(f"  [{d.get('source', '?')}] {kb_label}: {d.get('error', '')}")
+        print(json.dumps(
+            search(args.search, top_k=args.top_k, kb_id=args.kb, mode=args.mode),
+            ensure_ascii=False,
+            indent=2,
+        ))
         return 0
-    if args.build or args.rebuild:
-        if args.text_only and args.images_only:
-            print("错误：--text-only 和 --images-only 不能同时使用")
-            return 2
-        mode = "images" if args.images_only else "text" if args.text_only else "full"
-        res = build_all(force=args.rebuild, verbose=True, kb_id=args.kb, mode=mode)
-        print(json.dumps({k: v[0] for k, v in res.items()}, ensure_ascii=False))
-        return 0
-    p.print_help()
+    parser.print_help()
     return 0
 
 

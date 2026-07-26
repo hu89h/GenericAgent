@@ -474,26 +474,6 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; f
 .model-form-actions{ display:flex; gap:8px; margin-top:4px; }
 .model-form-actions .set-btn{ flex:1; justify-content:center; }
 .model-form-err{ font-size:12px; color:var(--danger-text); }
-.kb-config-form{ display:flex; flex-direction:column; gap:10px; padding-top:2px; }
-.kb-config-field{ display:flex; flex-direction:column; gap:5px; font-size:12px; font-weight:500; color:var(--txt-2); }
-.kb-config-field input{
-  border:1px solid var(--line); border-radius:4px; padding:8px 10px;
-  font-size:13px; font-family:inherit; background:var(--field-bg); color:var(--txt);
-}
-.kb-config-field input:focus{ outline:none; border-color:var(--accent); }
-.kb-config-field input::placeholder{ color:var(--placeholder); opacity:1; }
-.kb-config-row{ display:grid; grid-template-columns:minmax(0,1fr) minmax(100px,.45fr); gap:8px; }
-.kb-config-link{ color:var(--accent); font-size:11px; line-height:1.35; text-decoration:none; }
-.kb-config-link:hover{ text-decoration:underline; }
-.kb-config-foot{ display:flex; align-items:center; gap:8px; margin-top:2px; }
-.kb-config-foot .set-btn{ margin-left:auto; min-width:82px; justify-content:center; }
-.kb-config-status{ min-height:18px; color:var(--muted); font-size:11px; line-height:1.35; }
-.kb-config-status.is-ok{ color:var(--confirm-primary-bg); }
-.kb-config-status.is-error{ color:var(--danger-text); }
-.kb-config-form.is-loading{ opacity:.7; }
-.kb-config-form.is-loading input,
-.kb-config-form.is-loading button{ cursor:wait; }
-
 .body{
   --shell-pad:14px;
   --shell-head-h:28px;

@@ -12,8 +12,13 @@ HTTP API:
   GET    /config
   POST   /config
   GET    /model-profiles  (+ POST / PUT / DELETE by id)
-  GET    /kb/config
-  POST   /kb/config
+  GET    /kb
+  POST   /kb/import
+  GET    /kb/jobs/{job_id}
+  GET    /kb/{kb_id}/status
+  POST   /kb/{kb_id}/reindex
+  DELETE /kb/{kb_id}
+  POST   /kb/{kb_id}/open
   GET    /sessions
   POST   /session/new
   GET    /session/{sid}
@@ -44,7 +49,6 @@ import threading, time, traceback, uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
-from urllib.parse import urlparse
 from aiohttp import web, WSMsgType
 
 APP_DIR = Path(__file__).resolve().parent
@@ -170,6 +174,7 @@ DEFAULT_GA_ROOT = find_default_ga_root()
 # variable.  Keep it aligned with the effective GA source tree when Desktop
 # is pointed at an external checkout.
 os.environ.setdefault("GA_KB_CONFIG", str(DEFAULT_GA_ROOT / "data" / "kb.yaml"))
+os.environ.setdefault("GA_KB_DATA_ROOT", str(DEFAULT_GA_ROOT / "data" / "kbs"))
 
 
 def normalize_knowledge_scope(value: Any) -> dict:
@@ -207,10 +212,10 @@ def normalize_knowledge_scope(value: Any) -> dict:
     return scope
 
 
-_kb_import_jobs: Dict[str, dict] = {}
-_kb_import_jobs_lock = threading.Lock()
-_kb_build_jobs: Dict[str, dict] = {}
-_kb_build_jobs_lock = threading.Lock()
+_kb_jobs: Dict[str, dict] = {}
+_kb_jobs_lock = threading.Lock()
+_KB_JOB_RETENTION_SECONDS = 24 * 60 * 60
+_KB_JOB_MAX_COMPLETED = 100
 
 
 def _desktop_parent_pid() -> Optional[int]:
@@ -616,180 +621,6 @@ class AgentManager:
         self._invalidate_mykey_cache()
         self._reload_live_agents()
         return self.list_model_profiles()
-
-    def _kb_provider_settings(self):
-        self.ensure_ga_import_path()
-        try:
-            from knowledge_base.providers import provider_settings
-        except ImportError:  # pragma: no cover - supports direct CLI execution
-            from providers import provider_settings
-        return provider_settings
-
-    @staticmethod
-    def _kb_url(value: Any, field: str) -> str:
-        value = str(value or "").strip().rstrip("/")
-        parsed = urlparse(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError(f"{field} must be an http(s) URL")
-        return value
-
-    @staticmethod
-    def _kb_positive_int(value: Any, field: str) -> int:
-        try:
-            number = int(str(value).strip())
-        except (TypeError, ValueError):
-            raise ValueError(f"{field} must be a positive integer") from None
-        if number <= 0:
-            raise ValueError(f"{field} must be a positive integer")
-        return number
-
-    def get_kb_service_configs(self) -> dict:
-        provider_settings = self._kb_provider_settings()
-        embedding = provider_settings.embedding_config()
-        mineru = provider_settings.mineru_config()
-        return {
-            "embedding": {
-                "apiKeyConfigured": bool(str(embedding.get("apikey") or embedding.get("api_key") or "").strip()),
-                "baseUrl": str(
-                    embedding.get("apibase")
-                    or embedding.get("base_url")
-                    or provider_settings.EMBEDDING_BASE_URL
-                ).strip().rstrip("/"),
-                "model": str(embedding.get("model") or provider_settings.EMBEDDING_MODEL).strip(),
-                "dimension": self._kb_positive_int(
-                    embedding.get("dimension") or provider_settings.EMBEDDING_DIMENSION,
-                    "embedding dimension",
-                ),
-            },
-            "mineru": {
-                "apiKeyConfigured": bool(str(mineru.get("api_key") or "").strip()),
-                "baseUrl": str(
-                    mineru.get("base_url") or provider_settings.MINERU_BASE_URL
-                ).strip().rstrip("/"),
-                "modelVersion": str(
-                    mineru.get("model_version") or provider_settings.MINERU_MODEL_VERSION
-                ).strip(),
-            },
-        }
-
-    def save_kb_service_configs(self, data: dict) -> dict:
-        if not isinstance(data, dict):
-            raise ValueError("knowledge-base configuration must be an object")
-        provider_settings = self._kb_provider_settings()
-        self._mykey_file()
-        self.ensure_ga_import_path()
-        from llmcore import reload_mykeys
-        raw = reload_mykeys()[0]
-        old_embedding = raw.get("kb_embedding_config")
-        old_embedding = dict(old_embedding) if isinstance(old_embedding, dict) else {}
-        old_mineru = raw.get("mineru_config")
-        old_mineru = dict(old_mineru) if isinstance(old_mineru, dict) else {}
-        current_embedding = provider_settings.embedding_config()
-        current_mineru = provider_settings.mineru_config()
-        text = self._mykey_file().read_text(encoding="utf-8")
-        updates = {}
-
-        if "embedding" in data:
-            incoming = data.get("embedding")
-            if not isinstance(incoming, dict):
-                raise ValueError("embedding configuration must be an object")
-            base_value = (
-                incoming["baseUrl"] if "baseUrl" in incoming else
-                old_embedding.get("apibase")
-                or old_embedding.get("base_url")
-                or current_embedding.get("apibase")
-                or provider_settings.EMBEDDING_BASE_URL
-            )
-            base_url = self._kb_url(
-                base_value,
-                "embedding base URL",
-            )
-            model_value = (
-                incoming["model"] if "model" in incoming else
-                old_embedding.get("model")
-                or current_embedding.get("model")
-                or provider_settings.EMBEDDING_MODEL
-            )
-            model = str(
-                model_value
-            ).strip()
-            if not model:
-                raise ValueError("embedding model is required")
-            dimension_value = (
-                incoming["dimension"] if "dimension" in incoming else
-                old_embedding.get("dimension")
-                or current_embedding.get("dimension")
-                or provider_settings.EMBEDDING_DIMENSION
-            )
-            dimension = self._kb_positive_int(
-                dimension_value,
-                "embedding dimension",
-            )
-            cfg = dict(old_embedding)
-            cfg.update({"apibase": base_url, "model": model, "dimension": dimension})
-            cfg.pop("base_url", None)
-            api_key = str(incoming.get("apiKey") or "").strip()
-            if not api_key:
-                api_key = str(old_embedding.get("apikey") or old_embedding.get("api_key") or "").strip()
-            if api_key:
-                cfg["apikey"] = api_key
-            else:
-                cfg.pop("apikey", None)
-                cfg.pop("api_key", None)
-            updates["kb_embedding_config"] = cfg
-
-        if "mineru" in data:
-            incoming = data.get("mineru")
-            if not isinstance(incoming, dict):
-                raise ValueError("MinerU configuration must be an object")
-            base_value = (
-                incoming["baseUrl"] if "baseUrl" in incoming else
-                old_mineru.get("base_url")
-                or current_mineru.get("base_url")
-                or provider_settings.MINERU_BASE_URL
-            )
-            base_url = self._kb_url(
-                base_value,
-                "MinerU base URL",
-            )
-            model_value = (
-                incoming["modelVersion"] if "modelVersion" in incoming else
-                old_mineru.get("model_version")
-                or current_mineru.get("model_version")
-                or provider_settings.MINERU_MODEL_VERSION
-            )
-            model_version = str(
-                model_value
-            ).strip()
-            if not model_version:
-                raise ValueError("MinerU model is required")
-            cfg = dict(old_mineru)
-            cfg.update({"base_url": base_url, "model_version": model_version})
-            api_key = str(incoming.get("apiKey") or "").strip()
-            if not api_key:
-                api_key = str(
-                    old_mineru.get("api_key")
-                    or old_mineru.get("apikey")
-                    or old_mineru.get("token")
-                    or ""
-                ).strip()
-            cfg.pop("apikey", None)
-            cfg.pop("token", None)
-            if api_key:
-                cfg["api_key"] = api_key
-            else:
-                cfg.pop("api_key", None)
-            updates["mineru_config"] = cfg
-
-        if not updates:
-            raise ValueError("no knowledge-base configuration supplied")
-        for var, cfg in updates.items():
-            if self._find_var_block_span(text, var):
-                text = self._patch_var_block(text, var, cfg)
-            else:
-                text = text.rstrip() + f"\n{var} = {self._format_py_dict(cfg)}\n"
-        profiles = self._save_mykey_text(text)
-        return {"profiles": profiles, **self.get_kb_service_configs()}
 
     def _reload_live_agents(self) -> None:
         """mykey.py 改动后，强制所有活着的会话 agent 重建 LLM session，让新 key/模型
@@ -2140,6 +1971,8 @@ def _kb_error_code(error) -> str:
         return "processing_timeout"
     if "already exists" in text or "已存在" in text:
         return "already_exists"
+    if "kb_mutation_locked" in text:
+        return "kb_mutation_locked"
     if "not found" in text or "不存在" in text:
         return "source_missing"
     if "encrypted" in text or "已加密" in text:
@@ -2160,8 +1993,21 @@ def _kb_public_job_item(item: dict) -> dict:
     return public
 
 
+def _kb_public_failure(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return {}
+    return {
+        "source": str(item.get("source") or ""),
+        "stage": str(item.get("stage") or ""),
+        "error_type": str(item.get("error_type") or ""),
+        "error": str(item.get("error") or ""),
+    }
+
+
 def _kb_job_snapshot(job: dict) -> dict:
     """Expose only stable, user-facing task state to the desktop page."""
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    failures = job.get("failures") or result.get("failures") or []
     snapshot = {
         "ok": bool(job.get("ok", True)),
         "jobId": str(job.get("jobId") or ""),
@@ -2184,214 +2030,72 @@ def _kb_job_snapshot(job: dict) -> dict:
             for item in (job.get("targets") or [])
             if isinstance(item, dict) and item.get("name")
         ],
+        "failures": [
+            public
+            for public in (_kb_public_failure(item) for item in failures)
+            if any(public.values())
+        ],
         "startedAt": job.get("startedAt"),
         "updatedAt": job.get("updatedAt"),
     }
     error_code = _kb_error_code(job.get("error"))
     if error_code:
         snapshot["errorCode"] = error_code
+        snapshot["error"] = str(job.get("error") or "")
     return json.loads(json.dumps(snapshot, ensure_ascii=False, default=str))
 
 
-async def kb_status_handler(request):
+def _kb_prune_jobs_locked(now: int | None = None) -> None:
+    now = int(now or time.time())
+    terminal = {"completed", "completed_with_failures", "failed"}
+    for job_id, job in list(_kb_jobs.items()):
+        if (
+            job.get("state") in terminal
+            and now - int(job.get("updatedAt") or job.get("startedAt") or now)
+            > _KB_JOB_RETENTION_SECONDS
+        ):
+            _kb_jobs.pop(job_id, None)
+    completed = sorted(
+        (
+            (int(job.get("updatedAt") or 0), job_id)
+            for job_id, job in _kb_jobs.items()
+            if job.get("state") in terminal
+        ),
+        reverse=True,
+    )
+    for _updated, job_id in completed[_KB_JOB_MAX_COMPLETED:]:
+        _kb_jobs.pop(job_id, None)
+
+
+async def kb_list_handler(request):
     try:
         return json_ok(_kb_backend().status())
     except Exception as error:
         return json_ok({"ok": False, "error": str(error)}, status=500)
 
 
-async def kb_config_handler(request):
+async def kb_detail_status_handler(request):
+    kb_id = str(request.match_info.get("kb_id") or "").strip()
     try:
-        if request.method == "GET":
-            return json_ok({"ok": True, **manager.get_kb_service_configs()})
-        if request.method == "POST":
-            return json_ok({"ok": True, **manager.save_kb_service_configs(await read_json(request))})
-        return json_ok({"ok": False, "error": "method not allowed"}, status=405)
-    except ValueError as error:
-        return json_ok({"ok": False, "error": str(error)}, status=400)
-    except Exception as error:
-        return json_ok({"ok": False, "error": str(error)}, status=500)
-
-
-async def kb_documents_handler(request):
-    try:
-        kb_id = str(request.query.get("kb_id") or request.query.get("kbId") or "").strip() or None
-        return json_ok({"documents": _kb_backend().list_documents(kb_id=kb_id)})
-    except Exception as error:
-        return json_ok({"ok": False, "error": str(error)}, status=500)
-
-
-async def kb_search_handler(request):
-    try:
-        data = await read_json(request)
-        query = str(data.get("query") or "").strip()
-        if not query:
-            return json_ok({"ok": False, "error": "missing_query"}, status=400)
-        result = _kb_backend().search(
-            query,
-            top_k=data.get("topK", data.get("top_k", 6)),
-            kb_id=data.get("kbId", data.get("kb_id")),
-            file_name=data.get("fileName", data.get("file_name")),
-            title=data.get("title"),
-            mode=data.get("mode", "rrf"),
-        )
-        from knowledge_base.references import public_reference
-        public_results = []
-        for hit in result or []:
-            item = {**hit, **public_reference(hit, kind=hit.get("kind"))}
-            for key in ("abspath", "image_abspath", "image_path", "source_ref"):
-                item.pop(key, None)
-            public_results.append(item)
-        result = public_results
-        return json_ok({"ok": True, "query": query, "results": result})
-    except (TypeError, ValueError) as error:
-        return json_ok({"ok": False, "error": str(error)}, status=400)
-    except Exception as error:
-        return json_ok({"ok": False, "error": str(error)}, status=500)
-
-
-async def kb_read_handler(request):
-    try:
-        data = await read_json(request)
-        result = _kb_backend().read_document(
-            kb_id=data.get("kbId", data.get("kb_id")),
-            data_id=data.get("dataId", data.get("data_id")),
-            file_name=data.get("fileName", data.get("file_name")),
-            ref=data.get("ref"),
-            max_chars=data.get("maxChars", data.get("max_chars", 200000)),
-        )
-        if isinstance(result, dict):
-            from knowledge_base.references import public_reference
-            result = {
-                **result,
-                **public_reference(result, kind=result.get("kind") or "document"),
-            }
-            result = dict(result)
-            for key in ("path", "abspath", "source_ref"):
-                result.pop(key, None)
-        return json_ok(result, status=404 if result.get("error") else 200)
-    except (TypeError, ValueError) as error:
-        return json_ok({"ok": False, "error": str(error)}, status=400)
-    except Exception as error:
-        return json_ok({"ok": False, "error": str(error)}, status=500)
-
-
-async def kb_asset_handler(request):
-    """Serve one Markdown-relative image after backend path validation."""
-    path = _kb_backend().resolve_document_asset(
-        kb_id=request.query.get("kbId", request.query.get("kb_id")),
-        data_id=request.query.get("dataId", request.query.get("data_id")),
-        image_path=request.query.get("path", request.query.get("imagePath")),
-    )
-    if not path:
-        raise web.HTTPNotFound()
-    return web.FileResponse(
-        path,
-        headers={
-            "Cache-Control": "private, max-age=3600",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
-
-
-async def kb_source_asset_handler(request):
-    """Serve a validated original document or its local image reference."""
-    backend = _kb_backend()
-    kb_id = request.query.get("kbId", request.query.get("kb_id"))
-    data_id = request.query.get("dataId", request.query.get("data_id"))
-    ref = request.query.get("ref")
-    image_path = request.query.get("path", request.query.get("imagePath"))
-    if image_path:
-        path = backend.resolve_source_asset(
-            kb_id=kb_id, data_id=data_id, ref=ref, image_path=image_path
-        )
-    else:
-        source = backend.resolve_source_document(
-            kb_id=kb_id, data_id=data_id, ref=ref
-        )
-        path = source.get("path") if source.get("is_original") else None
-    if not path or not os.path.isfile(path):
-        raise web.HTTPNotFound()
-    return web.FileResponse(
-        path,
-        headers={
-            "Cache-Control": "private, max-age=60",
-            "X-Content-Type-Options": "nosniff",
-            "Content-Disposition": "inline",
-        },
-    )
-
-
-async def kb_image_handler(request):
-    try:
-        data = await read_json(request)
-        result = _kb_backend().read_image(
-            kb_id=data.get("kbId", data.get("kb_id")),
-            image_id=data.get("imageId", data.get("image_id")),
-            image_path=data.get("imagePath", data.get("image_path")),
-            data_id=data.get("dataId", data.get("data_id")),
-            ref=data.get("ref"),
-            ref_key=data.get("refKey", data.get("ref_key")),
-            query=data.get("query"),
-        )
-        if isinstance(result, dict):
-            from knowledge_base.references import public_reference
-            result = {
-                **result,
-                **public_reference(result, kind="image"),
-            }
-            result = dict(result)
-            for key in ("image_abspath", "image_path", "path", "source_ref"):
-                result.pop(key, None)
-        return json_ok(result, status=404 if result.get("error") else 200)
-    except Exception as error:
-        return json_ok({"ok": False, "error": str(error)}, status=500)
-
-
-async def kb_source_handler(request):
-    try:
-        backend = _kb_backend()
-        if request.method == "GET":
-            source = backend.resolve_source_document(
-                kb_id=request.query.get("kbId", request.query.get("id", request.query.get("kb_id"))),
-                data_id=request.query.get("dataId", request.query.get("data_id")),
-                file_name=request.query.get("fileName", request.query.get("file_name")),
-                ref=request.query.get("ref"),
+        result = _kb_backend().status(kb_id)
+        rows = result.get("knowledge_bases") or []
+        if not rows:
+            return json_ok(
+                {"ok": False, "error": "knowledge_base_not_found"},
+                status=404,
             )
-            target = Path(source.get("path") or "").resolve()
-            if source.get("error") or not source.get("is_original") or not target.is_file():
-                return web.Response(status=404, text=source.get("error") or "source document not found")
-            import mimetypes
-            from urllib.parse import quote
-            content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-            return web.FileResponse(
-                path=target,
-                headers={
-                    "Content-Type": content_type,
-                    "Content-Disposition": f"inline; filename*=UTF-8''{quote(target.name)}",
-                    "Cache-Control": "no-cache",
-                },
-            )
-        data = await read_json(request)
-        result = backend.resolve_source_document(
-            kb_id=data.get("kbId", data.get("kb_id")),
-            data_id=data.get("dataId", data.get("data_id")),
-            file_name=data.get("fileName", data.get("file_name")),
-            ref=data.get("ref"),
-        )
-        return json_ok(result, status=404 if result.get("error") else 200)
+        return json_ok(rows[0])
     except Exception as error:
         return json_ok({"ok": False, "error": str(error)}, status=500)
 
 
 async def kb_open_handler(request):
+    kb_id = str(request.match_info.get("kb_id") or "").strip()
     try:
         data = await read_json(request)
         path = _kb_backend().resolve_open_target(
-            kb_id=data.get("kbId", data.get("kb_id")) or "",
+            kb_id=kb_id,
             data_id=data.get("dataId", data.get("data_id")) or "",
-            image_id=data.get("imageId", data.get("image_id")) or "",
-            image_path=data.get("imagePath", data.get("image_path")) or "",
             ref=data.get("ref") or "",
             ref_key=data.get("refKey", data.get("ref_key")) or "",
         )
@@ -2411,6 +2115,8 @@ async def kb_import_handler(request):
     if not source_dir or not os.path.isdir(source_dir):
         return json_ok({"ok": False, "error": "source_directory_not_found"}, status=400)
     backend = _kb_backend()
+    with _kb_jobs_lock:
+        _kb_prune_jobs_locked()
     job_id = f"kbimp-{uuid.uuid4().hex[:16]}"
     job = {
         "ok": True,
@@ -2431,6 +2137,8 @@ async def kb_import_handler(request):
             "ignored": 0,
             "skipped": 0,
             "assets": 0,
+            "analysis_completed": 0,
+            "analysis_total": 0,
         },
         "files": [],
         "current": "",
@@ -2439,15 +2147,15 @@ async def kb_import_handler(request):
         "startedAt": int(time.time()),
         "updatedAt": int(time.time()),
     }
-    with _kb_import_jobs_lock:
-        _kb_import_jobs[job_id] = job
+    with _kb_jobs_lock:
+        _kb_jobs[job_id] = job
 
     def update_progress(event: dict):
         """Merge importer progress while keeping one row per source file."""
         if not isinstance(event, dict):
             return
-        with _kb_import_jobs_lock:
-            current = _kb_import_jobs.get(job_id)
+        with _kb_jobs_lock:
+            current = _kb_jobs.get(job_id)
             if current is None:
                 return
             current["phase"] = str(event.get("phase") or current.get("phase") or "running")
@@ -2483,25 +2191,24 @@ async def kb_import_handler(request):
             current["updatedAt"] = int(time.time())
 
     def run_import():
-        with _kb_import_jobs_lock:
-            current = _kb_import_jobs[job_id]
+        with _kb_jobs_lock:
+            current = _kb_jobs[job_id]
             current.update(state="running", phase="scanning", updatedAt=int(time.time()))
         try:
             result = backend.import_kb(
                 source_dir,
-                kb_id=data.get("kbId", data.get("kb_id", "")),
                 name=str(data.get("name") or ""),
-                overwrite=bool(data.get("overwrite", False)),
                 progress=update_progress,
             )
             summary = result.get("summary") or {}
-            failed = int(summary.get("failed") or 0)
-            with _kb_import_jobs_lock:
-                current = _kb_import_jobs[job_id]
+            failures = result.get("failures") or []
+            with _kb_jobs_lock:
+                current = _kb_jobs[job_id]
                 current.update(
-                    state="completed_with_failures" if failed else "completed",
+                    state="completed_with_failures" if failures else "completed",
                     phase="completed",
                     result=result,
+                    summary=summary,
                     updatedAt=int(time.time()),
                     current="",
                     files=result.get("files") or [],
@@ -2512,12 +2219,13 @@ async def kb_import_handler(request):
                     if key in current["counts"] and isinstance(value, (int, float))
                 })
         except Exception as error:
-            with _kb_import_jobs_lock:
-                current = _kb_import_jobs[job_id]
+            with _kb_jobs_lock:
+                current = _kb_jobs[job_id]
                 files = current.get("files") or []
                 if not files:
                     files = [{"source": source_dir, "status": "failed", "error": str(error)}]
                 current.update(
+                    ok=False,
                     state="failed",
                     phase="failed",
                     error=str(error),
@@ -2534,12 +2242,13 @@ async def kb_import_handler(request):
     return json_ok({"ok": True, "jobId": job_id, "state": "queued"}, status=202)
 
 
-async def kb_import_status_handler(request):
+async def kb_job_status_handler(request):
     job_id = str(request.match_info.get("job_id") or "")
-    with _kb_import_jobs_lock:
-        job = _kb_import_jobs.get(job_id)
+    with _kb_jobs_lock:
+        _kb_prune_jobs_locked()
+        job = _kb_jobs.get(job_id)
         if job is None:
-            return json_ok({"ok": False, "error": "import_job_not_found"}, status=404)
+            return json_ok({"ok": False, "error": "kb_job_not_found"}, status=404)
         return json_ok(_kb_job_snapshot(job))
 
 
@@ -2548,8 +2257,7 @@ async def kb_delete_handler(request):
     if not kb_id:
         return json_ok({"ok": False, "error": "missing_kb_id"}, status=400)
     try:
-        data = await read_json(request)
-        result = _kb_backend().delete_kb(kb_id, delete_data=bool(data.get("deleteData", False)))
+        result = _kb_backend().delete_kb(kb_id)
         if not result.get("removed"):
             return json_ok({"ok": False, "error": "knowledge_base_not_found", **result}, status=404)
         return json_ok({"ok": True, **result})
@@ -2559,34 +2267,29 @@ async def kb_delete_handler(request):
         return json_ok({"ok": False, "error": str(error)}, status=400)
 
 
-async def kb_build_handler(request):
-    data = await read_json(request)
-    kb_id = str(data.get("kbId") or data.get("kb_id") or data.get("id") or "").strip() or None
-    requested_mode = str(data.get("mode") or "incremental").strip().lower()
-    if requested_mode == "rebuild":
-        force, build_mode = True, "full"
-    elif requested_mode in {"text", "images", "full"}:
-        force, build_mode = bool(data.get("force", False)), requested_mode
-    else:
-        force, build_mode = bool(data.get("force", False)), "full"
+async def kb_reindex_handler(request):
+    kb_id = str(request.match_info.get("kb_id") or "").strip()
+    if not kb_id:
+        return json_ok({"ok": False, "error": "missing_kb_id"}, status=400)
     backend = _kb_backend()
-    with _kb_build_jobs_lock:
-        if any(job.get("state") in {"queued", "running"} for job in _kb_build_jobs.values()):
-            return json_ok({"ok": False, "error": "build_in_progress"}, status=409)
-    targets = [kb for kb in backend.load_config() if not kb_id or kb.get("id") == kb_id]
-    job_id = f"kbbld-{uuid.uuid4().hex[:16]}"
+    detail = backend.status(kb_id).get("knowledge_bases") or []
+    if not detail:
+        return json_ok({"ok": False, "error": "knowledge_base_not_found"}, status=404)
+    with _kb_jobs_lock:
+        _kb_prune_jobs_locked()
+    job_id = f"kbreindex-{uuid.uuid4().hex[:16]}"
     now = int(time.time())
     job = {
         "ok": True,
         "jobId": job_id,
         "state": "queued",
         "phase": "queued",
-        "mode": requested_mode,
-        "kbId": kb_id or "",
-        "scope": "selected" if kb_id else "all",
-        "targets": [{"id": kb.get("id", ""), "name": kb.get("name") or kb.get("id", "")} for kb in targets],
+        "mode": "reindex",
+        "kbId": kb_id,
+        "scope": "selected",
+        "targets": [{"id": kb_id, "name": detail[0].get("name") or kb_id}],
         "done": 0,
-        "total": len(targets),
+        "total": 1,
         "currentKb": "",
         "current": "",
         "files": [],
@@ -2596,15 +2299,15 @@ async def kb_build_handler(request):
         "startedAt": now,
         "updatedAt": now,
     }
-    with _kb_build_jobs_lock:
-        _kb_build_jobs[job_id] = job
+    with _kb_jobs_lock:
+        _kb_jobs[job_id] = job
 
     def log(message):
         text = str(message or "").strip()
         if not text:
             return
-        with _kb_build_jobs_lock:
-            current = _kb_build_jobs[job_id]
+        with _kb_jobs_lock:
+            current = _kb_jobs[job_id]
             current["logs"] = (current["logs"] + [text])[-100:]
             current["updatedAt"] = int(time.time())
             current["phase"] = "indexing"
@@ -2621,58 +2324,52 @@ async def kb_build_handler(request):
                     current_id,
                 )
 
-    def run_build():
-        with _kb_build_jobs_lock:
-            _kb_build_jobs[job_id].update(state="running", phase="starting", updatedAt=int(time.time()))
+    def update_progress(event):
+        if not isinstance(event, dict):
+            return
+        with _kb_jobs_lock:
+            current = _kb_jobs.get(job_id)
+            if current is None:
+                return
+            current["phase"] = str(event.get("phase") or current["phase"])
+            current["done"] = int(event.get("processed") or current.get("done") or 0)
+            current["updatedAt"] = int(time.time())
+
+    def run_reindex():
+        with _kb_jobs_lock:
+            _kb_jobs[job_id].update(
+                state="running", phase="indexing", updatedAt=int(time.time())
+            )
         try:
-            result = backend.build(
-                kb_id=kb_id,
-                force=force,
-                mode=build_mode,
+            result = backend.reindex(
+                kb_id,
+                progress=update_progress,
                 logfn=log,
             )
-            summary = result.get("summary") if isinstance(result, dict) else {}
-            with _kb_build_jobs_lock:
-                current = _kb_build_jobs[job_id]
-                target_names = {
-                    target.get("id"): target.get("name") or target.get("id")
-                    for target in current.get("targets") or []
-                }
-                files = []
-                for item in result.get("results") or []:
-                    stats = item.get("stats") or {}
-                    files.append({
-                        "name": target_names.get(item.get("kb_id"), "知识库"),
-                        "status": item.get("status") or "",
-                        "error": stats.get("error") or "",
-                    })
+            with _kb_jobs_lock:
+                current = _kb_jobs[job_id]
                 current.update(
-                    state="completed" if not result.get("has_failures") else "failed",
-                    phase="completed" if not result.get("has_failures") else "completed_with_failures",
+                    state="completed",
+                    phase="completed",
                     result=result,
                     updatedAt=int(time.time()),
-                    done=len(result.get("results") or []),
+                    done=1,
                     current="",
-                    files=files,
+                    files=[{"name": detail[0].get("name") or kb_id, "status": "built"}],
+                    summary={"total": 1, "succeeded": 1, "failed": 0},
                 )
-                current["summary"] = summary or {}
         except Exception as error:
-            with _kb_build_jobs_lock:
-                _kb_build_jobs[job_id].update(
-                    state="failed", phase="failed", error=str(error), updatedAt=int(time.time())
+            with _kb_jobs_lock:
+                _kb_jobs[job_id].update(
+                    ok=False,
+                    state="failed",
+                    phase="failed",
+                    error=str(error),
+                    updatedAt=int(time.time()),
                 )
 
-    threading.Thread(target=run_build, name=job_id, daemon=True).start()
+    threading.Thread(target=run_reindex, name=job_id, daemon=True).start()
     return json_ok({"ok": True, "jobId": job_id, "state": "queued"}, status=202)
-
-
-async def kb_build_status_handler(request):
-    job_id = str(request.match_info.get("job_id") or "")
-    with _kb_build_jobs_lock:
-        job = _kb_build_jobs.get(job_id)
-        if job is None:
-            return json_ok({"ok": False, "error": "build_job_not_found"}, status=404)
-        return json_ok(_kb_job_snapshot(job))
 
 
 # File attachments live under GA's own temp dir (gitignored), NOT the OS temp
@@ -3231,22 +2928,12 @@ def create_app():
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
     app.router.add_post("/session/{sid}/restore", restore_handler)
     app.router.add_post("/session/{sid}/model", session_model_handler)
-    app.router.add_get("/kb/status", kb_status_handler)
-    app.router.add_get("/kb/config", kb_config_handler)
-    app.router.add_post("/kb/config", kb_config_handler)
-    app.router.add_get("/kb/docs", kb_documents_handler)
-    app.router.add_post("/kb/search", kb_search_handler)
-    app.router.add_post("/kb/read", kb_read_handler)
-    app.router.add_get("/kb/asset", kb_asset_handler)
-    app.router.add_get("/kb/source/asset", kb_source_asset_handler)
-    app.router.add_post("/kb/image", kb_image_handler)
-    app.router.add_post("/kb/source", kb_source_handler)
-    app.router.add_get("/kb/source", kb_source_handler)
-    app.router.add_post("/kb/open", kb_open_handler)
+    app.router.add_get("/kb", kb_list_handler)
     app.router.add_post("/kb/import", kb_import_handler)
-    app.router.add_get("/kb/import/{job_id}", kb_import_status_handler)
-    app.router.add_post("/kb/build", kb_build_handler)
-    app.router.add_get("/kb/build/{job_id}", kb_build_status_handler)
+    app.router.add_get("/kb/jobs/{job_id}", kb_job_status_handler)
+    app.router.add_get("/kb/{kb_id}/status", kb_detail_status_handler)
+    app.router.add_post("/kb/{kb_id}/reindex", kb_reindex_handler)
+    app.router.add_post("/kb/{kb_id}/open", kb_open_handler)
     app.router.add_delete("/kb/{kb_id}", kb_delete_handler)
     app.router.add_post("/path/open", path_open_handler)
     app.router.add_post("/upload", upload_handler)

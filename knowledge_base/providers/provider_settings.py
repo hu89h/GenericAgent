@@ -119,6 +119,9 @@ def vision_config() -> Dict[str, Any]:
     model = str(pick("model", env="GA_KB_VISION_MODEL")).strip()
     timeout = int(pick("read_timeout", "timeout", default=120) or 120)
     retries = int(pick("max_retries", default=2) or 2)
+    max_tokens = int(
+        pick("max_tokens", env="GA_KB_VISION_MAX_TOKENS", default=8192) or 8192
+    )
     # Durable image-analysis switch: mykey.py's kb_vision_config['enabled']
     # persists the "images on" decision across restarts and future builds.
     # ``enabled`` is None here when the config does not mention it, so the
@@ -130,6 +133,7 @@ def vision_config() -> Dict[str, Any]:
         "model": model,
         "read_timeout": timeout,
         "max_retries": retries,
+        "max_tokens": max(512, max_tokens),
         "enabled": enabled,
     }
 

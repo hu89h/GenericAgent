@@ -1,471 +1,295 @@
-"""Knowledge-base build orchestration.
-
-This module owns the build lifecycle and record preparation.  It deliberately
-receives storage/provider operations from ``backend`` so the public backend
-facade can keep its existing API without making this module import it back.
-"""
+"""Record generation and complete-index construction."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
 import os
-import socket
-import threading
-import time
-import traceback
-from typing import Any, Callable, Dict
+import tempfile
+from dataclasses import dataclass
+from typing import Callable
+
+from . import documents
+from .assets import ImageAssetProcessor
+from .providers import vision
+from .schema import normalize_record
 
 
-@dataclass(frozen=True)
-class DocumentServices:
-    scan_documents: Callable[..., list]
-    extract_text: Callable[..., str]
-    chunk_document_records: Callable[..., list]
-    build_sources: Callable[..., Dict[str, Any]]
-    display_names: Callable[..., dict]
+@dataclass
+class RecordBuildResult:
+    records: list[dict]
+    failures: list[dict]
+    sources: dict
+    stats: dict
 
 
-@dataclass(frozen=True)
-class ImageServices:
-    build_document_index: Callable[..., Any]
-    image_records_for_document: Callable[..., dict]
-    analyze_image_jobs: Callable[..., dict]
-    apply_image_analysis: Callable[..., None]
+class RecordBuilder:
+    """Turn processed Markdown into one homogeneous text/image record stream."""
 
-
-@dataclass(frozen=True)
-class IndexServices:
-    zvec_path: Callable[..., str]
-    require_zvec: Callable[..., Any]
-    zvec_meta: Callable[..., Dict[str, Any]]
-    zvec_is_quickly_fresh: Callable[..., bool]
-    build_zvec_index: Callable[..., tuple]
-    append_zvec_image_index: Callable[..., tuple]
-
-
-@dataclass(frozen=True)
-class UsageServices:
-    set_usage: Callable[..., None]
-    empty_usage: Callable[..., Dict[str, Any]]
-    usage: Callable[..., Dict[str, Any]]
-    write_build_usage: Callable[..., None]
-    build_usage_summary: Callable[..., Dict[str, Any]]
-
-
-@dataclass(frozen=True)
-class BuildServices:
-    documents: DocumentServices
-    images: ImageServices
-    index: IndexServices
-    usage: UsageServices
-    update_build_state: Callable[..., None]
-    load_config: Callable[..., list]
-
-
-class BuildCoordinator:
-    """Coordinate one-at-a-time builds and prepare index records."""
-
-    def __init__(self, services: BuildServices, lock_port: int, build_lock=None) -> None:
-        self._services = services
-        self._lock_port = int(lock_port)
-        self._build_lock = build_lock if build_lock is not None else threading.Lock()
-
-    def records(
-        self,
-        kb,
-        scanned,
-        log,
-        include_text=True,
-        include_images=True,
-        progressfn=None,
-        text_cache=None,
-        image_indexes=None,
-    ):
-        """Generate the records consumed by the Zvec index builder."""
-        services = self._services
-        documents = services.documents
-        images = services.images
-        kb_id = kb["id"]
-        n_files = len(scanned)
-        n_ok = n_empty = 0
-        image_records = []
-        image_jobs = {}
-        image_count = 0
-        image_referenced = 0
-        image_missing = []
-        source_titles = documents.display_names(kb["path"])
-
-        for i, (rel, ap, _mt, _sz) in enumerate(scanned, 1):
-            ext = os.path.splitext(rel)[1].lower().lstrip(".")
-            # data_id is a LAYERED key on the shared zvec primary-key column:
-            #   text record  -> document level: "{kb_id}::{rel}"
-            #   image record -> occurrence level: "{that}::image::{sha}::occ{N}"
-            # (see assets.py). The "::image::" marker disambiguates the two
-            # layers everywhere, so source_data_id on an image row is exactly
-            # this document-level id. Same column, two granularities by design.
-            data_id = f"{kb_id}::{rel}"
-            title = os.path.basename(source_titles.get(rel) or os.path.basename(rel))
-            cached = (text_cache or {}).get(rel)
-            if isinstance(cached, dict) and "text" in cached:
-                text = cached["text"]
-            else:
-                try:
-                    text = documents.extract_text(ap)
-                except Exception as exc:
-                    log(f"  [warn] 抽取失败 {rel}: {exc}")
-                    text = ""
-                if text_cache is not None:
-                    text_cache[rel] = {"text": text}
-
-            image_index = (
-                (image_indexes or {}).get(rel)
-                if include_images
-                else None
-            )
-            if include_images and image_index is None and ext in ("md", "markdown"):
-                image_index = images.build_document_index(text)
-            try:
-                chunk_records = documents.chunk_document_records(
-                    text, ext=ext, file_name=rel, image_index=image_index
-                )
-            except Exception as exc:
-                log(f"  [warn] Markdown 分块失败 {rel}: {exc}")
-                chunk_records = []
-
-            text_chunk_records = list(chunk_records)
-            if image_index is not None:
-                image_index.assign_chunks(text_chunk_records)
-
-            if not text_chunk_records:
-                n_empty += 1
-            else:
-                n_ok += 1
-
-            for chunk_index, chunk in enumerate(text_chunk_records):
-                body = chunk.get("body", "")
-                record = {
-                    "data_id": data_id,
-                    "chunk_index": chunk_index,
-                    "title": title,
-                    "file_name": rel,
-                    "kind": "text",
-                    "image_path": "",
-                    "source_data_id": "",
-                    "source_chunk_index": -1,
-                    "header_path": chunk.get("header_path", ""),
-                    "body": body,
-                }
-                if include_text:
-                    # Text records can be embedded while documents are scanned;
-                    # image records remain buffered until VLM analysis finishes.
-                    yield record
-            if include_images:
-                image_result = images.image_records_for_document(
-                    kb,
-                    rel,
-                    data_id,
-                    text,
-                    title,
-                    log,
-                    image_jobs=image_jobs,
-                    image_index=image_index,
-                )
-                document_images = image_result.get("assets", [])
-                image_records.extend(document_images)
-                image_count += len(document_images)
-                image_referenced += int(image_result.get("referenced", 0) or 0)
-                image_missing.extend(
-                    {"file_name": rel, **item}
-                    for item in image_result.get("missing", [])
-                )
-
-            if i % 100 == 0 or i == n_files:
-                if callable(progressfn):
-                    progressfn(i, n_files)
-                log(f"  进度 {i}/{n_files} 文件（有效 {n_ok}，空 {n_empty}）...")
-
-        image_results = (
-            images.analyze_image_jobs(kb, image_jobs, log)
-            if include_images
-            else {}
-        )
-        if image_results:
-            for record in image_records:
-                if record.get("kind") == "image":
-                    images.apply_image_analysis(
-                        record, image_results.get(record.get("image_id"))
-                    )
-
-        # 路线甲：图片记录随文本记录一起进 zvec 索引（下方 yield），
-        # 不再另写 image_assets.json 双轨目录。缺失引用的诊断改为直接落日志。
-        log(
-            f"  抽取完成：{n_files} 文件，有效 {n_ok}，无正文 {n_empty}，"
-            f"图片引用 {image_referenced}，已登记 {image_count}"
-        )
-        if image_missing:
-            log(f"  [warn] {len(image_missing)} 个图片引用未登记（文件缺失或越界）：")
-            for item in image_missing[:20]:
-                log(
-                    f"    - {item.get('file_name', '?')} → {item.get('path', '?')}"
-                    f"（图注：{item.get('caption') or item.get('alt_text') or '无'}）"
-                )
-            if len(image_missing) > 20:
-                log(f"    …… 其余 {len(image_missing) - 20} 条略")
-        yield from image_records
-
-    def _finalize_build_result(self, kb, scanned, z_status, z_stats, log):
-        """Persist the common build report and publish the final build state."""
-        services = self._services
-        usage_service = services.usage
-        z_stats = dict(z_stats or {})
-        # Route 甲: the zvec build reports image_assets as its indexed image-row
-        # count; there is no image_assets.json to fall back on.
-        n_images = int(z_stats.get("image_assets") or 0)
-
-        stats = dict(z_stats)
-        stats["zvec"] = dict(z_stats)
-        stats["index_backend"] = "zvec"
-        stats["zvec_status"] = z_status
-        stats["image_assets"] = n_images
-
-        usage = usage_service.usage()
-        usage["stats"] = {
-            "n_docs": stats.get("n_docs", 0),
-            "n_chunks": stats.get("n_chunks", 0),
-            "image_assets": n_images,
-        }
-        usage_service.write_build_usage(kb["path"], usage)
-        stats["usage"] = usage_service.build_usage_summary(usage)
-
-        done = "已最新" if z_status == "up-to-date" else "完成"
-        log(
-            f"索引{done}：{stats.get('n_docs', 0)} 文档 / "
-            f"{stats.get('n_chunks', 0)} chunk / 图片 {n_images} / zvec={z_status}"
-        )
-        if z_status == "unavailable":
-            log(f"  [error] zvec 不可用：{z_stats.get('error')}")
-
-        succeeded = z_status in ("built", "up-to-date")
-        services.update_build_state(
-            phase="completed" if succeeded else "failed",
-            message=f"索引{done}",
-            processed=len(scanned),
-            total=len(scanned),
-        )
-        return (z_status if succeeded else "unavailable", stats)
-
-    def build_kb(self, kb, force=False, verbose=True, logfn=None, mode="full"):
-        """Build one knowledge base and return ``(status, stats)``."""
-        services = self._services
-        documents = services.documents
-        index = services.index
-        usage = services.usage
-
-        def log(message):
-            if logfn:
-                logfn(message)
-            elif verbose:
-                print(f"[kb:{kb['id']}] {message}", flush=True)
-
-        if not kb.get("exists"):
-            log(f"路径不存在，跳过：{kb['path']}")
-            return ("missing", {"error": f"path not found: {kb['path']}"})
-
-        mode = mode if mode in ("full", "text", "images") else "full"
-        services.update_build_state(
-            kb=kb["id"],
-            phase="scanning",
-            message="扫描知识库文档",
-            processed=0,
-            total=0,
-        )
-        scanned = documents.scan_documents(kb["path"])
-        if not scanned:
-            log("未发现可索引文档")
-            services.update_build_state(
-                phase="completed",
-                message="未发现可索引文档",
-                processed=0,
-                total=0,
-            )
-            return ("empty", {"n_docs": 0, "n_chunks": 0})
-
-        services.update_build_state(
-            phase="checking",
-            message="检查已有索引是否最新",
-            processed=0,
-            total=len(scanned),
-        )
-        usage.set_usage(usage.empty_usage())
-        mode_label = {"full": "完整", "text": "文本", "images": "图片资产"}[mode]
-        try:
-            index.require_zvec()
-        except Exception as exc:
-            log(f"Zvec 不可用，无法建立索引：{exc}")
-            services.update_build_state(phase="failed", message=f"Zvec 不可用：{exc}")
-            return ("unavailable", {"error": str(exc), "index_backend": "zvec"})
-
-        meta = index.zvec_meta(kb["path"])
-        if not force and index.zvec_is_quickly_fresh(
-            kb["path"], scanned, meta=meta, mode=mode
-        ):
-            return self._finalize_build_result(
-                kb, scanned, "up-to-date", meta.get("stats") or {}, log
-            )
-
-        text_cache = {}
-        image_indexes = {}
-        if mode != "text":
-            for rel, ap, _mt, _sz in scanned:
-                ext = os.path.splitext(rel)[1].lower().lstrip(".")
-                if ext not in ("md", "markdown"):
-                    continue
-                cached = text_cache.get(rel)
-                if isinstance(cached, dict) and "text" in cached:
-                    text = cached["text"]
-                else:
-                    try:
-                        text = documents.extract_text(ap)
-                    except Exception as exc:
-                        log(f"  [warn] 抽取失败 {rel}: {exc}")
-                        text = ""
-                    text_cache[rel] = {"text": text}
-                image_indexes[rel] = services.images.build_document_index(text)
-        sources = documents.build_sources(
-            kb["path"],
-            scanned,
-            mode="text" if mode == "text" else "full",
-            image_indexes=image_indexes,
-        )
-        services.update_build_state(
-            phase="extracting",
-            message=f"抽取{mode_label}索引记录",
-            processed=0,
-            total=len(scanned),
-        )
-        log(
-            f"发现 {len(scanned)} 个文档，开始建立 {mode_label} Zvec 索引 → "
-            f"{index.zvec_path(kb['path'])}"
-        )
-        records = self.records(
-            kb,
-            scanned,
-            log,
-            include_text=mode in ("full", "text"),
-            include_images=mode in ("full", "images"),
-            text_cache=text_cache,
-            image_indexes=image_indexes,
-            progressfn=lambda processed, total: services.update_build_state(
-                phase="extracting", processed=processed, total=total
-            ),
-        )
-        services.update_build_state(
-            phase="indexing",
-            message="写入 Zvec 索引",
-            processed=0,
-            total=len(scanned),
-        )
-        # 路线甲：图片资产已并入 zvec 记录，索引即单一事实源。
-        # zvec 自带原子发布/回滚，无需再对旁挂的 image_assets.json 做两阶段提交。
-        if mode == "images":
-            z_status, z_stats = index.append_zvec_image_index(
-                kb, records, sources, force=force, logfn=log
-            )
-        else:
-            z_status, z_stats = index.build_zvec_index(
-                kb, records, sources, force=force, logfn=log
-            )
-        return self._finalize_build_result(kb, scanned, z_status, z_stats, log)
+    def __init__(self, *, assets: ImageAssetProcessor) -> None:
+        self.assets = assets
 
     @staticmethod
-    def build_summary(results):
-        summary = {"total": len(results), "succeeded": 0, "failed": 0, "skipped": 0}
-        for status, _stats in results.values():
-            if status in ("built", "up-to-date"):
-                summary["succeeded"] += 1
-            elif status in ("empty", "locked"):
-                summary["skipped"] += 1
-            else:
-                summary["failed"] += 1
-        return summary
+    def _title_map(manifest: dict) -> dict[str, str]:
+        titles: dict[str, str] = {}
+        for entry in manifest.get("files") or []:
+            if not isinstance(entry, dict) or entry.get("kind") != "document":
+                continue
+            title = os.path.basename(str(entry.get("source") or "")) or str(entry.get("name") or "")
+            for rel in entry.get("processed") or []:
+                titles[str(rel).replace("\\", "/").lstrip("/")] = title
+        return titles
 
-    def build_all(self, force=False, verbose=True, logfn=None, kb_id=None, mode="full"):
-        """Build configured knowledge bases with process-local and TCP locks."""
-        services = self._services
-        if not self._build_lock.acquire(blocking=False):
-            return {"_": ("locked", {})}
+    def build(
+        self,
+        kb: dict,
+        manifest: dict,
+        *,
+        progress: Callable[[dict], None] | None = None,
+        logfn: Callable[[str], None] | None = None,
+    ) -> RecordBuildResult:
+        log = logfn or (lambda _message: None)
+        scanned = documents.scan_documents(kb["path"])
+        titles = self._title_map(manifest)
+        records: list[dict] = []
+        failures: list[dict] = []
+        image_records: list[dict] = []
+        image_jobs = {}
+        image_indexes = {}
+        docs_with_chunks = 0
 
-        proc_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            proc_lock.bind(("127.0.0.1", self._lock_port))
-        except OSError:
-            proc_lock.close()
-            self._build_lock.release()
-            if logfn:
-                logfn("[build] 已有其它进程在构建索引，跳过本次。")
-            return {"_": ("locked", {})}
+        for position, (rel, absolute_path, _mtime, _size) in enumerate(scanned, 1):
+            if callable(progress):
+                progress({
+                    "phase": "chunking",
+                    "current": rel,
+                    "processed": position - 1,
+                    "total": len(scanned),
+                })
+            ext = os.path.splitext(rel)[1].lower().lstrip(".")
+            title = titles.get(rel, os.path.basename(rel))
+            data_id = f"{kb['id']}::{rel}"
+            try:
+                text = documents.extract_text(absolute_path)
+                image_index = (
+                    self.assets.build_document_index(text)
+                    if ext in ("md", "markdown") else None
+                )
+                if image_index is not None:
+                    image_indexes[rel] = image_index
+                chunks = documents.chunk_document_records(
+                    text,
+                    ext=ext,
+                    file_name=rel,
+                    image_index=image_index,
+                )
+                if image_index is not None:
+                    image_index.assign_chunks(chunks)
+                if not chunks:
+                    raise ValueError("文档没有可索引正文")
+                docs_with_chunks += 1
+                for chunk_index, chunk in enumerate(chunks):
+                    records.append({
+                        "data_id": data_id,
+                        "chunk_index": chunk_index,
+                        "title": title,
+                        "file_name": rel,
+                        "kind": "text",
+                        "source_chunk_index": -1,
+                        "header_path": chunk.get("header_path", ""),
+                        "body": chunk.get("body", ""),
+                    })
+                if image_index is not None:
+                    image_result = self.assets.image_records_for_document(
+                        kb,
+                        rel,
+                        data_id,
+                        text,
+                        title,
+                        log,
+                        image_jobs=image_jobs,
+                        image_index=image_index,
+                    )
+                    image_records.extend(image_result.get("assets") or [])
+                    for missing in image_result.get("missing") or []:
+                        failures.append({
+                            "source": f"{rel}:{missing.get('path') or ''}",
+                            "stage": "image_resolve",
+                            "error_type": "ImageNotFound",
+                            "error": "Markdown 图片引用无法解析",
+                        })
+            except Exception as error:
+                failures.append({
+                    "source": rel,
+                    "stage": "chunking",
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                })
+                log(f"  [warn] 跳过文档 {rel}: {error}")
 
-        results = {}
-        services.update_build_state(
-            running=True,
-            result=None,
-            last_build_summary=None,
-            started_at=int(time.time()),
-            finished_at=None,
-            kb=None,
-            phase="preparing",
-            message="准备构建知识库",
-            processed=0,
-            total=0,
+        image_results = self.assets.analyze_image_jobs(
+            kb,
+            image_jobs,
+            log,
+            progress=progress,
+        )
+        for record in image_records:
+            analysis = image_results.get(record.get("image_id"))
+            self.assets.apply_image_analysis(record, analysis)
+            if record.get("analysis_error"):
+                failures.append({
+                    "source": record.get("image_path") or record.get("file_name") or "",
+                    "stage": "image_analysis",
+                    "error_type": "ImageAnalysisError",
+                    "error": record.get("analysis_error") or "图片分析失败",
+                })
+                continue
+            if record.get("body"):
+                records.append(record)
+
+        if not records:
+            raise RuntimeError("没有可索引的图文记录")
+
+        sources = {
+            "documents": documents.fingerprint(scanned),
+            "chunking": documents.chunking_meta(),
+            "images": self.assets.image_source_fingerprint(
+                kb["path"], scanned, image_indexes=image_indexes
+            ),
+            "image_analysis": vision.build_analysis_meta(),
+        }
+        stats = {
+            "n_docs": docs_with_chunks,
+            "n_chunks": len(records),
+            "text_chunks": sum(record.get("kind") != "image" for record in records),
+            "image_chunks": sum(record.get("kind") == "image" for record in records),
+            "image_assets": sum(record.get("kind") == "image" for record in records),
+        }
+        if callable(progress):
+            progress({
+                "phase": "records_ready",
+                "processed": len(scanned),
+                "total": len(scanned),
+                **stats,
+            })
+        return RecordBuildResult(records=records, failures=failures, sources=sources, stats=stats)
+
+    @staticmethod
+    def write_records(path: str, records: list[dict], *, kb_id: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=".records-", suffix=".jsonl", dir=os.path.dirname(path)
         )
         try:
-            configured = services.load_config()
-            selected = [kb for kb in configured if not kb_id or kb["id"] == kb_id]
-            for kb in selected:
-                services.update_build_state(
-                    kb=kb["id"], phase="preparing", message="准备当前知识库"
-                )
-                try:
-                    kb_log = None
-                    if callable(logfn):
-                        kb_log = lambda message, current_kb=kb["id"]: logfn(
-                            f"[kb:{current_kb}] {message}"
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                for record in records:
+                    handle.write(
+                        json.dumps(
+                            normalize_record(record, kb_id=kb_id),
+                            ensure_ascii=False,
                         )
-                    results[kb["id"]] = self.build_kb(
-                        kb,
-                        force=force,
-                        verbose=verbose,
-                        logfn=kb_log,
-                        mode=mode,
+                        + "\n"
                     )
-                except Exception as exc:
-                    results[kb["id"]] = ("error", {"error": str(exc)})
-                    lines = [
-                        f"[kb:{kb['id']}] 构建异常: {type(exc).__name__}: {exc}",
-                        traceback.format_exc(),
-                    ]
-                    if logfn:
-                        for line in lines:
-                            logfn(line)
-                    elif verbose:
-                        for line in lines:
-                            print(line, flush=True)
-
-            if kb_id and not results:
-                results[kb_id] = ("missing", {"error": f"unknown kb_id: {kb_id}"})
-            services.update_build_state(
-                result={key: value[0] for key, value in results.items()},
-                last_build_summary=self.build_summary(results),
-            )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
         finally:
-            services.update_build_state(
-                running=False,
-                kb=None,
-                phase="idle",
-                message="构建结束",
-                finished_at=int(time.time()),
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    @staticmethod
+    def read_records(path: str) -> list[dict]:
+        records = []
+        with open(path, encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                value = line.strip()
+                if not value:
+                    continue
+                try:
+                    record = json.loads(value)
+                except json.JSONDecodeError as error:
+                    raise ValueError(f"records.jsonl 第 {line_number} 行损坏") from error
+                if not isinstance(record, dict):
+                    raise ValueError(f"records.jsonl 第 {line_number} 行不是对象")
+                records.append(record)
+        if not records:
+            raise ValueError("records.jsonl 为空")
+        return records
+
+    @staticmethod
+    def records_sha256(path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+
+class IndexBuilder:
+    """Build and verify one complete index from persisted unified records."""
+
+    def __init__(self, *, index, usage_tracker) -> None:
+        self.index = index
+        self.usage = usage_tracker
+
+    def begin_build(self) -> None:
+        self.usage.set_current(self.usage.empty())
+
+    @staticmethod
+    def usage_summary(usage: dict) -> dict:
+        image = usage.get("image_analysis") or {}
+        dense = usage.get("embedding") or {}
+        sparse = usage.get("sparse_embedding") or {}
+        return {
+            "image_calls": image.get("calls", 0),
+            "image_cached": image.get("cached", 0),
+            "image_failed": image.get("failed", 0),
+            "image_prompt_tokens": image.get("prompt_tokens", 0),
+            "image_completion_tokens": image.get("completion_tokens", 0),
+            "embedding_calls": dense.get("calls", 0),
+            "embedding_texts": dense.get("texts", 0),
+            "embedding_api_tokens": dense.get("api_tokens", 0),
+            "sparse_embedding_calls": sparse.get("calls", 0),
+            "sparse_embedding_texts": sparse.get("texts", 0),
+            "sparse_embedding_api_tokens": sparse.get("api_tokens", 0),
+        }
+
+    def build(
+        self,
+        kb: dict,
+        *,
+        records: list[dict],
+        sources: dict,
+        progress: Callable[[dict], None] | None = None,
+        logfn: Callable[[str], None] | None = None,
+    ) -> dict:
+        if callable(progress):
+            progress({"phase": "indexing", "processed": 0, "total": len(records)})
+        stats = self.index.build(kb, records, sources, logfn=logfn)
+        usage = self.usage.current()
+        usage["stats"] = dict(stats)
+        self.usage.write(kb["path"], usage)
+        probe = self.index.probe(kb["path"])
+        if not (
+            probe["present"]
+            and probe["openable"]
+            and probe["schema_valid"]
+            and probe["embedding_matches"]
+        ):
+            raise RuntimeError(
+                "索引校验失败: "
+                + (probe.get("error") or json.dumps({
+                    key: probe[key]
+                    for key in ("present", "openable", "schema_valid", "embedding_matches")
+                }, ensure_ascii=False))
             )
-            try:
-                proc_lock.close()
-            finally:
-                self._build_lock.release()
-        return results
+        if callable(progress):
+            progress({
+                "phase": "validated",
+                "processed": len(records),
+                "total": len(records),
+                **stats,
+            })
+        return {**stats, "usage": self.usage_summary(usage)}
+
+
+__all__ = ["IndexBuilder", "RecordBuildResult", "RecordBuilder"]

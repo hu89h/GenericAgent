@@ -1,18 +1,19 @@
 """Knowledge-base search and source-reading services.
 
-This module owns the read-only side of the knowledge-base runtime.  It does
-not import :mod:`backend`; storage, embedding, asset, and configuration
-operations are supplied as callbacks so the service stays independent from
-the build orchestrator and remains easy to exercise through the real API.
+This module owns the read-only side of the knowledge-base runtime and depends
+on three concrete collaborators: the registry module, the Zvec repository,
+and the image-record processor.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-from typing import Any, Callable
+import threading
 
+from . import documents
 from .references import clean_public_text, public_reference, section_label, with_reference
+from .schema import OUTPUT_FIELDS
 
 
 _SPLIT = re.compile(r"\s+")
@@ -20,69 +21,101 @@ _FIGURE_REF = re.compile(
     r"[图表]\s*[0-9０-９一二三四五六七八九十百]+"
     r"(?:[-－—–.．][0-9０-９一二三四五六七八九十百]+){0,3}"
 )
-_DEFAULT_OUTPUT_FIELDS = [
-    "data_id", "chunk_index", "kb_id", "file_name", "title", "kind",
-    "image_path", "source_data_id", "source_chunk_index", "header_path", "body",
-    # Image-asset columns (empty for text records) — let search/read_image
-    # resolve images straight from the zvec row, no catalog join.
-    "image_id", "ref_key", "display_label", "caption", "description",
-    "table_markdown", "source_file_name", "uncertain", "analysis_error",
-    "related_text", "near_text",
-]
-
-
 class KnowledgeBaseRetriever:
-    """Read-only retrieval facade for configured Zvec knowledge bases.
-
-    The callbacks are deliberately narrow.  In particular, this class does
-    not hold a backend module reference, which avoids a circular import and
-    makes the retrieval path independent from build-state mutation.
-    """
+    """Read-only retrieval facade for configured Zvec knowledge bases."""
 
     def __init__(
         self,
         *,
-        load_config: Callable[[], list],
-        kb_by_id: Callable[[str], dict | None],
-        scan_documents: Callable[[str], list],
-        read_textfile: Callable[[str], str],
-        zvec_path: Callable[[str], str],
-        zvec_conn: Callable[..., Any],
-        zvec_doc_id: Callable[[str, int], str],
-        fetch_doc: Callable[..., Any],
-        require_zvec: Callable[[], Any],
-        embed_texts: Callable[[list[str]], list],
-        embed_sparse_texts: Callable[..., list],
-        local_ref_key: Callable[[str], str],
-        record_search_error: Callable[[dict, str, Any], None],
-        imported_document_titles: Callable[[str], dict],
-        imported_document_entries: Callable[[str], list[dict]] | None = None,
+        registry,
+        index,
+        assets,
         query_factor: int = 4,
         vector_weight: float = 1.2,
         sparse_weight: float = 1.0,
         snippet_width: int = 220,
-        output_fields: list[str] | None = None,
     ) -> None:
-        self._load_config = load_config
-        self._kb_by_id = kb_by_id
-        self._scan_documents = scan_documents
-        self._read_textfile = read_textfile
-        self._zvec_path = zvec_path
-        self._zvec_conn = zvec_conn
-        self._zvec_doc_id = zvec_doc_id
-        self._fetch_doc = fetch_doc
-        self._require_zvec = require_zvec
-        self._embed_texts = embed_texts
-        self._embed_sparse_texts = embed_sparse_texts
-        self._local_ref_key = local_ref_key
-        self._record_search_error = record_search_error
-        self._imported_document_titles = imported_document_titles
-        self._imported_document_entries = imported_document_entries or (lambda _path: [])
+        self._registry = registry
+        self._index = index
+        self._assets = assets
+        self._local = threading.local()
         self._query_factor = max(1, int(query_factor))
         self._vector_weight = float(vector_weight)
         self._sparse_weight = float(sparse_weight)
         self._snippet_width = max(1, int(snippet_width))
-        self._output_fields = list(output_fields or _DEFAULT_OUTPUT_FIELDS)
+        self._output_fields = list(OUTPUT_FIELDS)
+
+    def _load_config(self) -> list[dict]:
+        return self._registry.load_config()
+
+    def _kb_by_id(self, kb_id: str) -> dict | None:
+        return self._registry.kb_by_id(kb_id)
+
+    def _zvec_path(self, kb_path: str) -> str:
+        return self._index.path(kb_path)
+
+    def _zvec_open(self, path: str):
+        return self._index.open_collection(path)
+
+    def _zvec_doc_id(self, data_id: str, chunk_index: int) -> str:
+        return self._index.doc_id(data_id, chunk_index)
+
+    def _fetch_doc(self, kb: dict, data_id: str, chunk_index: int, output_fields=None):
+        return self._index.fetch(
+            kb, data_id, chunk_index, output_fields=output_fields or self._output_fields
+        )
+
+    def _require_zvec(self):
+        return self._index.require()
+
+    def _embed_texts(self, texts: list[str]):
+        return self._index.embed_dense(texts)
+
+    def _embed_sparse_texts(self, texts: list[str], *, text_type: str):
+        return self._index.embed_sparse(texts, text_type=text_type)
+
+    def _local_ref_key(self, value: str) -> str:
+        return self._assets.local_ref_key(value)
+
+    def _record_search_error(self, kb: dict, source: str, error) -> None:
+        errors = getattr(self._local, "search_errors", None)
+        if errors is not None:
+            errors.append({
+                "kb_id": kb.get("id", ""),
+                "source": source,
+                "error": str(error),
+            })
+
+    def search_diagnostics(self) -> list[dict]:
+        return list(getattr(self._local, "search_errors", []) or [])
+
+    @staticmethod
+    def _manifest(kb_path: str) -> dict:
+        path = os.path.join(os.path.dirname(kb_path), "manifest.json")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = json.load(handle)
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    def _imported_document_entries(self, kb_path: str) -> list[dict]:
+        return [
+            entry
+            for entry in (self._manifest(kb_path).get("files") or [])
+            if isinstance(entry, dict) and entry.get("kind") == "document"
+        ]
+
+    def _imported_document_titles(self, kb_path: str) -> dict:
+        titles = {}
+        for entry in self._imported_document_entries(kb_path):
+            source = str(entry.get("source") or "")
+            title = os.path.basename(source) or source
+            for rel in entry.get("processed") or []:
+                normalized = str(rel).replace("\\", "/").lstrip("/")
+                if normalized:
+                    titles[normalized] = title
+        return titles
 
     @staticmethod
     def _path_is_within(root: str, path: str) -> bool:
@@ -122,15 +155,6 @@ class KnowledgeBaseRetriever:
         end = min(len(flat), start + width)
         return ("… " if start > 0 else "") + flat[start:end] + (" …" if end < len(flat) else "")
 
-    def clear_asset_cache(self, path: str | None = None) -> None:
-        """No-op retained for the build/backend call sites.
-
-        Route 甲 removed the in-memory ``_AssetCatalog`` — image metadata now
-        lives in the widened zvec row, so there is no per-KB asset cache left to
-        invalidate.  The method stays so backend build/delete flows need not
-        special-case its absence.
-        """
-
     def _image_abspath(self, kb: dict, image_path: str) -> str:
         """Resolve an image only under the configured knowledge-base root."""
         rel = str(image_path or "").replace("\\", "/").lstrip("/")
@@ -143,8 +167,8 @@ class KnowledgeBaseRetriever:
     def _image_fields_from_row(self, kb: dict, fields: dict) -> dict:
         """Project an image zvec row onto the public image field set.
 
-        Route 甲: the widened zvec row is self-sufficient, so every image field
-        is read straight from it — no ``image_assets.json`` catalog join.
+        The unified zvec row is self-sufficient, so every image field is read
+        straight from it.
         ``uncertain`` was JSON-encoded on insert (zvec columns are scalar
         STRING), so it is decoded back to its list/dict form here.
         """
@@ -260,8 +284,8 @@ class KnowledgeBaseRetriever:
     ) -> list[dict]:
         """Return image rows (``kind='image'``) from a KB via a pure zvec filter.
 
-        Route 甲: image lookup by figure number or owning document is a scalar
-        filter over the widened zvec columns, so no query vector is needed.
+        Image lookup by figure number or owning document is a scalar filter
+        over the unified zvec columns, so no query vector is needed.
         ``ref_keys`` are OR-joined (``ref_key IN (...)``) and AND-ed with an
         optional ``source_data_id`` constraint.  Returns each row's ``fields``
         dict; failures degrade to an empty list (logged as a search error).
@@ -278,13 +302,13 @@ class KnowledgeBaseRetriever:
             clauses.append(f"source_data_id = {self._zvec_quote(source_data_id)}")
         filter_expr = " AND ".join(clauses)
         try:
-            col = self._zvec_conn(path)
-            rows = col.query(
-                topk=max(1, int(topk)),
-                filter=filter_expr,
-                output_fields=self._output_fields,
-                include_vector=False,
-            )
+            with self._zvec_open(path) as col:
+                rows = col.query(
+                    topk=max(1, int(topk)),
+                    filter=filter_expr,
+                    output_fields=self._output_fields,
+                    include_vector=False,
+                )
         except Exception as error:
             self._record_search_error(kb, "image_filter", error)
             return []
@@ -332,14 +356,14 @@ class KnowledgeBaseRetriever:
         query_topk = max(top_k * self._query_factor, top_k)
         try:
             zvec = self._require_zvec()
-            col = self._zvec_conn(path)
-            rows = col.query(
-                zvec.Query(vector_field, vector=query_vector),
-                topk=query_topk,
-                filter=doc_filter,
-                output_fields=self._output_fields,
-                include_vector=False,
-            )
+            with self._zvec_open(path) as col:
+                rows = col.query(
+                    zvec.Query(vector_field, vector=query_vector),
+                    topk=query_topk,
+                    filter=doc_filter,
+                    output_fields=self._output_fields,
+                    include_vector=False,
+                )
         except Exception as error:
             self._record_search_error(kb, error_source, error)
             return []
@@ -425,9 +449,7 @@ class KnowledgeBaseRetriever:
         if not refs:
             return []
         doc_candidates = set(self._doc_name_candidates(file_name=file_name, title=title))
-        # Route 甲: exact figure-number hits come straight from a zvec filter on
-        # the widened ``ref_key`` column (normalized once at ingest), replacing
-        # the old in-memory ``by_ref_key`` catalog index.
+        # Exact figure-number hits come from the normalized ``ref_key`` column.
         rows = self._query_image_rows(kb, ref_keys=refs, topk=max(top_k * self._query_factor, top_k))
         out, seen = [], set()
         for fields in rows:
@@ -479,15 +501,16 @@ class KnowledgeBaseRetriever:
         file_name: str | None = None,
         title: str | None = None,
         mode: str = "rrf",
-    ) -> list[dict]:
-        """Search configured knowledge bases with dense/sparse RRF retrieval."""
+    ) -> dict:
+        """Search with the exact channel selected by the agent."""
+        self._local.search_errors = []
         top_k = max(1, min(int(top_k), 30))
         mode = str(mode or "rrf").strip().lower()
         if mode not in ("rrf", "vector", "sparse"):
             raise ValueError("mode must be one of: rrf, vector, sparse")
         by_key = {}
 
-        def add_hits(hits: list[dict], source_weight: float) -> None:
+        def add_hits(hits: list[dict], source_weight: float, channel: str) -> None:
             for index, result in enumerate(hits or [], 1):
                 key = (result.get("data_id"), result.get("chunk_index"))
                 if not key[0]:
@@ -497,9 +520,11 @@ class KnowledgeBaseRetriever:
                     item = dict(result)
                     item["_rrf"] = 0.0
                     item["_sources"] = []
+                    item["_channel_ranks"] = {}
                     by_key[key] = item
                 item["_rrf"] += source_weight / (60.0 + index)
                 item["_sources"].append(result.get("score_type") or "unknown")
+                item["_channel_ranks"].setdefault(channel, index)
                 # The fused RRF score always accumulates above; this only picks
                 # which channel's metadata (snippet/body/title) the merged hit
                 # displays.  Prefer a sparse hit, then any zvec hit, over an
@@ -509,22 +534,19 @@ class KnowledgeBaseRetriever:
                 if result.get("score_type") == "zvec_sparse" or item.get("score_type") not in ("zvec", "zvec_sparse"):
                     item.update(result)
 
-        # Embed the query once up front: the vector is identical across every
-        # knowledge base, so computing it inside the per-KB loop only multiplied
-        # cache reads (or network calls when the cache is disabled). A failure
-        # here is KB-independent, so it disables that whole channel rather than
-        # aborting the search.
         dense_vector = sparse_vector = None
         if mode in ("rrf", "vector"):
             try:
                 dense_vector = self._embed_texts([query])[0]
             except Exception as error:
                 self._record_search_error({"id": ""}, "dense", error)
+                raise RuntimeError(f"vector retrieval unavailable: {error}") from error
         if mode in ("rrf", "sparse"):
             try:
                 sparse_vector = self._embed_sparse_texts([query], text_type="query")[0]
             except Exception as error:
                 self._record_search_error({"id": ""}, "sparse", error)
+                raise RuntimeError(f"sparse retrieval unavailable: {error}") from error
 
         for kb in self._load_config():
             if kb_id and kb["id"] != kb_id:
@@ -544,6 +566,7 @@ class KnowledgeBaseRetriever:
                     file_name=file_name, title=title,
                 ),
                 4.0,
+                "ref_exact",
             )
             if not os.path.isdir(self._zvec_path(kb["path"])):
                 self._record_search_error(kb, "zvec", "Zvec index directory is missing")
@@ -555,6 +578,7 @@ class KnowledgeBaseRetriever:
                         file_name=file_name, title=title, query_vector=dense_vector,
                     ),
                     self._vector_weight,
+                    "vector",
                 )
             if mode in ("rrf", "sparse") and sparse_vector is not None:
                 add_hits(
@@ -563,6 +587,7 @@ class KnowledgeBaseRetriever:
                         file_name=file_name, title=title, query_vector=sparse_vector,
                     ),
                     self._sparse_weight,
+                    "sparse",
                 )
         results = list(by_key.values())
         for result in results:
@@ -572,11 +597,21 @@ class KnowledgeBaseRetriever:
                     sources.append(source)
             result["score_type"] = "+".join(sources) if sources else result.get("score_type")
             result["score"] = round(result.pop("_rrf", 0.0), 6)
+            channel_ranks = dict(result.pop("_channel_ranks", {}) or {})
+            result["matched_by"] = list(channel_ranks)
+            result["channel_ranks"] = channel_ranks
             result.update(with_reference(result, kind=result.get("kind")))
             result.pop("abspath", None)
             result.pop("image_abspath", None)
         results.sort(key=lambda result: result["score"], reverse=True)
-        return results[:top_k]
+        results = results[:top_k]
+        for final_rank, result in enumerate(results, 1):
+            result["final_rank"] = final_rank
+        return {
+            "mode": mode,
+            "results": results,
+            "diagnostics": self.search_diagnostics(),
+        }
 
     def _resolve_zvec_target(
         self, data_id: str | None = None, kb_id: str | None = None, ref: str | None = None
@@ -724,35 +759,35 @@ class KnowledgeBaseRetriever:
         window = min(64, limit)
         chunks, title, file_name = [], "", ""
         try:
-            col = self._zvec_conn(path)
-            start = 0
-            while start < limit:
-                end = min(start + window, limit)
-                ids = [self._zvec_doc_id(data_id, index) for index in range(start, end)]
-                got = col.fetch(
-                    ids,
-                    output_fields=["data_id", "chunk_index", "file_name", "title", "body"],
-                    include_vector=False,
-                )
-                found = 0
-                for index in range(start, end):
-                    doc = got.get(self._zvec_doc_id(data_id, index)) if isinstance(got, dict) else None
-                    if not doc:
-                        continue
-                    found += 1
-                    fields = getattr(doc, "fields", None) or {}
-                    body = fields.get("body") or ""
-                    title = title or fields.get("title") or ""
-                    file_name = file_name or fields.get("file_name") or ""
-                    preview = re.sub(r"\s+", " ", body).strip()[:preview_chars]
-                    chunks.append({
-                        "chunk_index": int(fields.get("chunk_index") or index),
-                        "chars": len(body),
-                        "preview": preview,
-                    })
-                if found < len(ids):
-                    break
-                start = end
+            with self._zvec_open(path) as col:
+                start = 0
+                while start < limit:
+                    end = min(start + window, limit)
+                    ids = [self._zvec_doc_id(data_id, index) for index in range(start, end)]
+                    got = col.fetch(
+                        ids,
+                        output_fields=["data_id", "chunk_index", "file_name", "title", "body"],
+                        include_vector=False,
+                    )
+                    found = 0
+                    for index in range(start, end):
+                        doc = got.get(self._zvec_doc_id(data_id, index)) if isinstance(got, dict) else None
+                        if not doc:
+                            continue
+                        found += 1
+                        fields = getattr(doc, "fields", None) or {}
+                        body = fields.get("body") or ""
+                        title = title or fields.get("title") or ""
+                        file_name = file_name or fields.get("file_name") or ""
+                        preview = re.sub(r"\s+", " ", body).strip()[:preview_chars]
+                        chunks.append({
+                            "chunk_index": int(fields.get("chunk_index") or index),
+                            "chars": len(body),
+                            "preview": preview,
+                        })
+                    if found < len(ids):
+                        break
+                    start = end
         except Exception as error:
             return {"error": f"[Zvec 读取失败] {error}"}
         if not chunks:
@@ -767,7 +802,7 @@ class KnowledgeBaseRetriever:
     ) -> dict:
         """Resolve one image from the widened zvec rows.
 
-        Route 甲/Q3: the only locators are ``data_id`` (occurrence-level
+        The only locators are ``data_id`` (occurrence-level
         ``::image::`` id → O(1) primary-key fetch; or document-level id →
         ``source_data_id`` filter) and ``ref_key`` (figure number → ``ref_key``
         filter, normalized once at ingest).  ``kb_id`` narrows the scope.
@@ -895,7 +930,7 @@ class KnowledgeBaseRetriever:
                             manifest_by_processed[f"processed/{rel}"] = source_rel
             source_root_value = str(kb.get("source_path") or "").strip()
             source_root = os.path.realpath(source_root_value) if source_root_value else ""
-            for rel, absolute_path, _mtime, size in self._scan_documents(kb["path"]):
+            for rel, absolute_path, _mtime, size in documents.scan_documents(kb["path"]):
                 rel = rel.replace("\\", "/")
                 source_rel = manifest_by_processed.get(rel, "")
                 source_path = os.path.realpath(os.path.join(source_root, source_rel)) if source_root and source_rel else ""
@@ -945,7 +980,7 @@ class KnowledgeBaseRetriever:
         target = os.path.realpath(os.path.join(kb["path"], rel))
         if not self._path_is_within(kb["path"], target) or not os.path.isfile(target):
             return {"error_code": "document_not_found", "error": "[未找到文档]"}
-        body = self._read_textfile(target)
+        body = documents.read_textfile(target)
         truncated = len(body) > int(max_chars)
         if truncated:
             body = body[:int(max_chars)]
@@ -979,7 +1014,7 @@ class KnowledgeBaseRetriever:
         processed_path = os.path.realpath(os.path.join(kb["path"], processed_rel))
         package_root = os.path.realpath(os.path.dirname(kb["path"]))
         source_rel = ""
-        manifest = os.path.join(package_root, "import_manifest.json")
+        manifest = os.path.join(package_root, "manifest.json")
         try:
             with open(manifest, encoding="utf-8") as handle:
                 entries = (json.load(handle) or {}).get("files") or []

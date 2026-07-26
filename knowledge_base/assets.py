@@ -1,9 +1,4 @@
-"""Markdown image assets, contextual metadata, caching, and VLM analysis.
-
-The processor is dependency-injected so it can be used by the KB builder
-without importing the backend module.  In particular, image analysis usage is
-reported through callbacks rather than reaching into backend globals.
-"""
+"""Markdown image assets, contextual metadata, caching, and VLM analysis."""
 from __future__ import annotations
 
 import hashlib
@@ -311,17 +306,18 @@ class ImageAssetProcessor:
     def __init__(
         self,
         *,
-        image_client_fn: Callable[[], Any],
-        image_meta_fn: Callable[[], Dict[str, Any]],
-        image_cache_dir_fn: Callable[[str], str],
-        merge_usage_fn: Callable[[Dict[str, Any]], None],
+        usage_tracker,
         concurrency: int = 1,
     ) -> None:
-        self._image_client_fn = image_client_fn
-        self._image_meta_fn = image_meta_fn
-        self._image_cache_dir_fn = image_cache_dir_fn
-        self._merge_usage_fn = merge_usage_fn
+        from .providers import vision
+
+        self._image_client = vision
+        self._usage_tracker = usage_tracker
         self._concurrency = max(1, int(concurrency))
+
+    @staticmethod
+    def image_cache_dir(kb_path: str) -> str:
+        return os.path.join(kb_path, ".kb_index", "image_cache")
 
     def build_document_index(self, body: str) -> DocumentImageIndex:
         return DocumentImageIndex.build(self, body)
@@ -531,7 +527,7 @@ class ImageAssetProcessor:
         ctx = re.sub(r"[^A-Za-z0-9]+", "", str(context_key or ""))[:12]
         ctx_part = f".c{ctx}" if ctx else ""
         return os.path.join(
-            self._image_cache_dir_fn(kb_path),
+            self.image_cache_dir(kb_path),
             f"{image_sha}.v{version}.{model}.{focus_part}{ctx_part}.json",
         )
 
@@ -543,7 +539,7 @@ class ImageAssetProcessor:
             return None
 
     def save_cached_analysis(self, kb_path: str, image_sha: str, analysis_meta, payload, focus: str = "general", context_key: str = "") -> None:
-        os.makedirs(self._image_cache_dir_fn(kb_path), exist_ok=True)
+        os.makedirs(self.image_cache_dir(kb_path), exist_ok=True)
         path = self.analysis_cache_path(kb_path, image_sha, analysis_meta, focus, context_key)
         temp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
         with open(temp, "w", encoding="utf-8") as handle:
@@ -614,14 +610,14 @@ class ImageAssetProcessor:
         if not occurrences:
             return {"assets": [], "missing": [], "referenced": 0}
         try:
-            client = self._image_client_fn()
+            client = self._image_client
         except Exception as exc:
             client = None
             log(f"  [warn] 图片模块不可用，仅建立基础图片资产：{exc}")
         assets = []
         missing = []
         kb_root = os.path.realpath(kb["path"])
-        analysis_meta = self._image_meta_fn()
+        analysis_meta = self._image_client.analysis_meta()
         analysis_enabled = client is not None and getattr(client, "enabled", lambda: False)()
         local_jobs = image_jobs if image_jobs is not None else {}
         for occurrence in occurrences:
@@ -700,9 +696,6 @@ class ImageAssetProcessor:
             # the raw "image" alt-text leaks through as the label.
             caption = occurrence.title if occurrence.title.lower() != "image" else ""
             display_label = self._display_label(ref_key, caption, title)
-            # occurrence_id / source_ref 曾用于旧 image_assets.json 目录；
-            # 路线甲下它们既非 zvec 列、也无读者（occ 序号已编入 data_id，
-            # 引用 ref 由 {kb_id}/{file_name} 现算），故不再写入记录。
             asset = {
                 "kind": "image",
                 "image_id": image_sha,
@@ -782,7 +775,7 @@ class ImageAssetProcessor:
         if os.environ.get("GA_KB_IMAGE_ANALYSIS_CACHE_ONLY", "").strip().lower() in ("1", "true", "yes", "on"):
             return {"error": "image analysis cache missing", "uncertain": ["image analysis cache missing"]}, delta
         try:
-            client = self._image_client_fn()
+            client = self._image_client
             image_abs = job.image_abspath
             delta["calls"] += 1
             analysis = client.analyze_image(
@@ -825,6 +818,10 @@ class ImageAssetProcessor:
         asset["table_markdown"] = analysis.get("table_markdown", "")
         asset["uncertain"] = analysis.get("uncertain", [])
         asset["analysis_error"] = analysis.get("error", "")
+        if asset["analysis_error"] and analysis.get("finish_reason"):
+            asset["analysis_error"] += (
+                f" (finish_reason={analysis.get('finish_reason')})"
+            )
         # S2: the occurrence's own caption-derived ref_key (set per
         # occurrence at ingestion, from the caption next to THIS
         # placement) is authoritative for the exact-image-ref channel.
@@ -840,12 +837,18 @@ class ImageAssetProcessor:
         asset["body"] = self.asset_body(asset)
         return asset
 
-    def analyze_image_jobs(self, kb, image_jobs: dict[str, ImageContent], log):
+    def analyze_image_jobs(
+        self,
+        kb,
+        image_jobs: dict[str, ImageContent],
+        log,
+        progress: Callable[[dict], None] | None = None,
+    ):
         if not image_jobs:
             return {}
         jobs = list(image_jobs.values())
         try:
-            client = self._image_client_fn()
+            client = self._image_client
             enabled = getattr(client, "enabled", lambda: False)()
         except Exception:
             enabled = False
@@ -854,14 +857,27 @@ class ImageAssetProcessor:
         workers = max(1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY", str(self._concurrency))))
         workers = min(workers, len(jobs))
         log(f"  图片分析任务 {len(jobs)} 个，并发 {workers}...")
+        if callable(progress):
+            progress({
+                "phase": "image_analysis",
+                "analysis_completed": 0,
+                "analysis_total": len(jobs),
+            })
         results = {}
         done = 0
         if workers <= 1:
             for job in jobs:
                 analysis, delta = self.analyze_image_job(kb["path"], job)
-                self._merge_usage_fn(delta)
+                self._usage_tracker.merge_image_analysis(delta)
                 results[job.image_sha] = analysis
                 done += 1
+                if callable(progress):
+                    progress({
+                        "phase": "image_analysis",
+                        "current": job.image_path,
+                        "analysis_completed": done,
+                        "analysis_total": len(jobs),
+                    })
                 if done % 50 == 0 or done == len(jobs):
                     log(f"  图片分析进度 {done}/{len(jobs)}")
             return results
@@ -873,9 +889,16 @@ class ImageAssetProcessor:
                     analysis, delta = future.result()
                 except Exception as exc:
                     analysis, delta = {"error": str(exc), "uncertain": [str(exc)]}, {"failed": 1}
-                self._merge_usage_fn(delta)
+                self._usage_tracker.merge_image_analysis(delta)
                 results[job.image_sha] = analysis
                 done += 1
+                if callable(progress):
+                    progress({
+                        "phase": "image_analysis",
+                        "current": job.image_path,
+                        "analysis_completed": done,
+                        "analysis_total": len(jobs),
+                    })
                 if analysis.get("error"):
                     log(f"  [warn] 图片分析失败 {job.image_path}: {analysis.get('error')}")
                 if done % 50 == 0 or done == len(jobs):

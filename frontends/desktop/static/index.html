@@ -532,19 +532,7 @@
           <span class="kb-build-label" data-i18n="kb.buildScope"></span>
           <span class="kb-build-select-wrap"><select id="kb-build-scope" class="kb-build-select" name="scope"></select></span>
         </label>
-        <fieldset class="kb-build-group kb-build-mode-group">
-          <legend class="kb-build-label" data-i18n="kb.buildMode"></legend>
-          <div class="kb-build-modes">
-            <label class="kb-build-mode">
-              <input type="radio" name="mode" value="incremental" checked>
-              <span class="kb-build-mode-copy"><strong data-i18n="kb.buildIncremental"></strong><small data-i18n="kb.buildIncrementalDesc"></small></span>
-            </label>
-            <label class="kb-build-mode">
-              <input type="radio" name="mode" value="rebuild">
-              <span class="kb-build-mode-copy"><strong data-i18n="kb.buildRebuild"></strong><small data-i18n="kb.buildRebuildDesc"></small></span>
-            </label>
-          </div>
-        </fieldset>
+        <p class="kb-build-description" data-i18n="kb.reindexDesc"></p>
         <div class="kb-build-actions"><button type="button" class="set-btn ghost" data-close data-i18n="common.cancel"></button><button type="submit" class="set-btn primary" data-i18n="kb.buildStart"></button></div>
       </form>
     </div>
@@ -760,55 +748,6 @@
             <span data-ga-icon="plus"></span>
             <span data-i18n="set.addModel"></span>
           </button>
-        </div>
-        <div class="set-block">
-          <div class="set-sec-t" data-i18n="set.kbEmbedding"></div>
-          <form class="kb-config-form" id="kb-embedding-config-form">
-            <label class="kb-config-field">
-              <span data-i18n="model.apikey"></span>
-              <input name="apiKey" type="password" autocomplete="new-password" data-i18n-placeholder="model.apikeyKeep">
-            </label>
-            <label class="kb-config-field">
-              <span data-i18n="model.apibase"></span>
-              <input name="baseUrl" type="url" autocomplete="off" required>
-            </label>
-            <div class="kb-config-row">
-              <label class="kb-config-field">
-                <span data-i18n="model.model"></span>
-                <input name="model" autocomplete="off" required>
-              </label>
-              <label class="kb-config-field">
-                <span data-i18n="set.kbDimension"></span>
-                <input name="dimension" type="number" min="1" step="1" required>
-              </label>
-            </div>
-            <div class="kb-config-foot">
-              <span class="kb-config-status" id="kb-embedding-config-status"></span>
-              <button class="set-btn primary" type="submit" data-i18n="common.save"></button>
-            </div>
-          </form>
-        </div>
-        <div class="set-block">
-          <div class="set-sec-t" data-i18n="set.kbMineru"></div>
-          <form class="kb-config-form" id="mineru-config-form">
-            <label class="kb-config-field">
-              <span data-i18n="model.apikey"></span>
-              <input name="apiKey" type="password" autocomplete="new-password" data-i18n-placeholder="model.apikeyKeep">
-            </label>
-            <label class="kb-config-field">
-              <span data-i18n="model.apibase"></span>
-              <input name="baseUrl" type="url" autocomplete="off" required>
-            </label>
-            <label class="kb-config-field">
-              <span data-i18n="set.kbParserModel"></span>
-              <input name="modelVersion" autocomplete="off" required>
-            </label>
-            <a class="kb-config-link" href="https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&amp;source=minerU" target="_blank" rel="noopener noreferrer" data-i18n="set.kbMineruRegister"></a>
-            <div class="kb-config-foot">
-              <span class="kb-config-status" id="mineru-config-status"></span>
-              <button class="set-btn primary" type="submit" data-i18n="common.save"></button>
-            </div>
-          </form>
         </div>
         <div class="set-block">
           <div class="set-sec-t" data-i18n="set.features"></div>

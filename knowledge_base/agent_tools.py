@@ -27,12 +27,11 @@ KB_TOOL_SCHEMAS = [
                     "mode": {
                         "type": "string",
                         "enum": ["rrf", "vector", "sparse"],
-                        "default": "rrf",
-                        "description": "检索通道：rrf 融合向量+稀疏（默认，通用问答用它）；vector 仅语义向量（找相近含义）；sparse 仅稀疏向量（偏关键词/术语）。注意：无论选哪种 mode，当 query 里出现明确的图表编号（如 图3-1、表4.1）时，对应图表都会被精确匹配并置顶，不受 mode 影响。",
+                        "description": "必须显式选择检索通道：rrf 融合向量+稀疏（通用问答）；vector 仅语义向量（找相近含义）；sparse 仅稀疏向量（偏关键词/术语）。无论选哪种 mode，当 query 里出现明确的图表编号（如 图3-1、表4.1）时，对应图表都会作为独立确定性信号参与排序。",
                     },
                     "top_k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
                 },
-                "required": ["query"],
+                "required": ["query", "mode"],
             },
         },
     },
@@ -179,6 +178,7 @@ class KnowledgeBaseToolsMixin:
     def _clean_hit(hit):
         keep = (
             "score", "score_type",
+            "matched_by", "channel_ranks", "final_rank",
             "header_path", "snippet", "body", "description", "table_markdown",
             "related_text", "near_text", "uncertain", "caption",
             "display_label",
@@ -247,7 +247,7 @@ class KnowledgeBaseToolsMixin:
         query = str(args.get("query") or "").strip()
         if not query:
             return self._anchor_outcome(args, "[Error] kb_search 需要 query 参数。")
-        mode = str(args.get("mode") or "rrf").strip().lower()
+        mode = str(args.get("mode") or "").strip().lower()
         if mode not in {"rrf", "vector", "sparse"}:
             return self._anchor_outcome(args, "[Error] kb_search mode 只允许 rrf、vector 或 sparse。")
         try:
@@ -255,15 +255,18 @@ class KnowledgeBaseToolsMixin:
         except (TypeError, ValueError):
             top_k = 5
         try:
-            hits = self._kb_backend().search(
+            search_result = self._kb_backend().search(
                 query, top_k=top_k, mode=mode, **self._scope_search_kwargs()
-            ) or []
+            ) or {}
         except Exception as error:
             return self._anchor_outcome(args, f"[Error] kb_search 失败: {error}")
+        hits = search_result.get("results") or []
         result = {
             "query": query,
+            "mode": search_result.get("mode") or mode,
             "scope": self._knowledge_scope(),
             "hits": [self._clean_hit(hit) for hit in hits],
+            "diagnostics": search_result.get("diagnostics") or [],
         }
         # Search results are candidates.  An image becomes a citation only
         # after kb_image_read successfully resolves it, so unrelated vector
@@ -447,4 +450,3 @@ class KnowledgeBaseToolsMixin:
             ]
         )
         return None
-

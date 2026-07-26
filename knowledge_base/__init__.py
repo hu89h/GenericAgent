@@ -1,8 +1,8 @@
 """Unified local knowledge-base package.
 
 The package owns ingestion, document preparation, indexing, retrieval, and
-provider clients.  Desktop and agent integrations should import this package
-instead of reaching into legacy module namespaces.
+provider clients.  Desktop and agent integrations share the public backend
+facade exposed here.
 """
 from importlib import import_module
 
