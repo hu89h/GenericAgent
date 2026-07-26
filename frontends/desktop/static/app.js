@@ -231,7 +231,13 @@ let bridgeUiOffline = false;
         return http(`/kb/${encodeURIComponent(id)}/open`, { method: 'POST', body: params || {} });
       }
       case 'kb/import': return http('/kb/import', { method: 'POST', body: params || {} });
+      case 'kb/jobs': return http('/kb/jobs');
       case 'kb/job': return http(`/kb/jobs/${encodeURIComponent(params.jobId || params.id || '')}`);
+      case 'kb/job/cancel': {
+        const id = params.jobId || params.id || '';
+        if (!id) throw new Error('kb/job/cancel missing jobId');
+        return http(`/kb/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+      }
       case 'kb/reindex': {
         const id = params.kbId || params.id || '';
         if (!id) throw new Error('kb/reindex missing kbId');
@@ -353,7 +359,9 @@ let bridgeUiOffline = false;
     },
     kbOpen: (params = {}) => rpc('kb/open', params),
     kbImport: (params = {}) => rpc('kb/import', params),
+    kbJobs: () => rpc('kb/jobs'),
     kbJob: (jobId) => rpc('kb/job', { jobId }),
+    kbCancelJob: (jobId) => rpc('kb/job/cancel', { jobId }),
     kbReindex: (kbId) => rpc('kb/reindex', { kbId }),
     kbDelete: (kbId, params = {}) => rpc('kb/delete', Object.assign({}, params, { kbId })),
     getGaSource: () => tauriInvoke('get_ga_source'),
@@ -383,7 +391,14 @@ let bridgeUiOffline = false;
 /* ═══════════════ i18n ═══════════════ */
 const I18N = window.GA_I18N?.dict || { zh: {}, en: {} };
 const LANGS = window.GA_I18N?.languages || ['zh', 'en'];
-const STORE = { lang: 'ga_lang', theme: 'ga_theme', appearance: 'ga_appearance', plain: 'ga_plain', fontSize: 'ga_font_size' };
+const STORE = {
+  lang: 'ga_lang',
+  theme: 'ga_theme',
+  appearance: 'ga_appearance',
+  plain: 'ga_plain',
+  fontSize: 'ga_font_size',
+  kbCapsulePosition: 'ga_kb_capsule_position',
+};
 const APPEARANCE_IDS = ['light', 'dark'];
 const CHAT_FONT_MIN = 10;
 const CHAT_FONT_MAX = 20;
@@ -678,7 +693,9 @@ nav.addEventListener('click', (e) => {
    这样知识库对话与历史会话使用同一份后端状态，不会出现两套消息生命周期。 */
 const kbState = {
   status: null, activeKb: null, documents: [], activeDoc: null,
-  qaTimer: null, jobTimer: null, jobKind: '', jobId: '', qaBusy: false,
+  qaTimer: null, jobTimer: null, jobKind: '', jobId: '', job: null,
+  jobPollFailures: 0, jobDismissed: false, qaBusy: false,
+  capsuleSuppressOpenUntil: 0, capsuleDefaultPosition: null,
   statusUpdatedAt: 0, documentsLoading: false,
   statusRequest: null, documentRequests: new Map(),
   documentLists: new Map(),
@@ -696,7 +713,12 @@ const kbPageEls = {
   task: kbEl('kb-task-modal'), taskTitle: kbEl('kb-task-title'), taskPhase: kbEl('kb-task-phase'),
   taskProgress: kbEl('kb-task-progress-bar'), taskProgressValue: kbEl('kb-task-progress-value'),
   taskCurrent: kbEl('kb-task-current'), taskCounts: kbEl('kb-task-counts'), taskSuccess: kbEl('kb-task-successes'),
-  taskFailure: kbEl('kb-task-failures'), taskClose: kbEl('kb-task-close'), build: kbEl('kb-build-modal'),
+  taskImages: kbEl('kb-task-image-documents'), taskWarning: kbEl('kb-task-warnings'),
+  taskFailure: kbEl('kb-task-failures'), taskCancel: kbEl('kb-task-cancel'),
+  taskBackground: kbEl('kb-task-background'), taskClose: kbEl('kb-task-close'),
+  taskCapsule: kbEl('kb-task-capsule'), taskCapsuleTitle: kbEl('kb-task-capsule-title'),
+  taskCapsulePhase: kbEl('kb-task-capsule-phase'), taskCapsuleValue: kbEl('kb-task-capsule-value'),
+  build: kbEl('kb-build-modal'),
   buildForm: kbEl('kb-build-form'), buildScope: kbEl('kb-build-scope'),
 };
 
@@ -812,9 +834,17 @@ function kbPhaseText(job) {
     scanned: 'preparing',
     starting: 'preparing',
     processing: 'processing',
+    prepared: 'prepared',
+    chunking: 'chunking',
+    image_analysis: 'imageAnalysis',
+    records_ready: 'recordsReady',
     indexing: 'indexing',
+    validated: 'validated',
+    publishing: 'publishing',
+    cancelling: 'cancelling',
     completed: 'completed',
     completed_with_failures: 'completedWithFailures',
+    cancelled: 'cancelled',
     failed: 'failed',
   }[phase] || 'processing';
   return t(`kb.phase.${normalized}`);
@@ -1224,43 +1254,248 @@ async function kbAskQuestion() {
   }
 }
 
+function kbJobTerminal(job) {
+  return ['completed', 'completed_with_failures', 'failed', 'cancelled'].includes(kbText(job?.state));
+}
+
+function kbJobKind(job, fallback = '') {
+  return kbText(job?.mode || fallback || 'import') === 'reindex' ? 'reindex' : 'import';
+}
+
+function kbClampCapsulePosition(left, top, width, height) {
+  const margin = 12;
+  return {
+    left: Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - width - margin)),
+    top: Math.min(Math.max(margin, top), Math.max(margin, window.innerHeight - height - margin)),
+  };
+}
+
+function kbSavedCapsulePosition() {
+  try {
+    const value = JSON.parse(localStorage.getItem(STORE.kbCapsulePosition) || 'null');
+    if (value && Number.isFinite(value.left) && Number.isFinite(value.top)) return value;
+  } catch (_) {}
+  return null;
+}
+
+function kbPlaceTaskCapsule() {
+  const capsule = kbPageEls.taskCapsule;
+  if (!capsule || capsule.hidden || capsule.classList.contains('dragging')) return;
+  requestAnimationFrame(() => {
+    if (capsule.hidden || capsule.classList.contains('dragging')) return;
+    const rect = capsule.getBoundingClientRect();
+    const saved = kbSavedCapsulePosition();
+    let left;
+    let top;
+    if (saved) {
+      ({ left, top } = saved);
+    } else {
+      const anchor = kbEl('kb-import-btn')?.getBoundingClientRect();
+      if (anchor && anchor.width > 0 && anchor.height > 0) {
+        left = anchor.right - rect.width;
+        top = anchor.top - rect.height - 10;
+        if (top < 12) top = anchor.bottom + 10;
+        kbState.capsuleDefaultPosition = { left, top };
+      } else if (kbState.capsuleDefaultPosition) {
+        ({ left, top } = kbState.capsuleDefaultPosition);
+      } else {
+        left = window.innerWidth - rect.width - 18;
+        top = 18;
+      }
+    }
+    const clamped = kbClampCapsulePosition(left, top, rect.width, rect.height);
+    capsule.style.left = `${clamped.left}px`;
+    capsule.style.top = `${clamped.top}px`;
+  });
+}
+
+function kbBindTaskCapsule() {
+  const capsule = kbPageEls.taskCapsule;
+  if (!capsule || capsule.dataset.dragBound) return;
+  capsule.dataset.dragBound = '1';
+  let drag = null;
+  capsule.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    const rect = capsule.getBoundingClientRect();
+    drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      moved: false,
+    };
+    capsule.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  });
+  capsule.addEventListener('pointermove', event => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    drag.moved = true;
+    capsule.classList.add('dragging');
+    const rect = capsule.getBoundingClientRect();
+    const next = kbClampCapsulePosition(drag.left + dx, drag.top + dy, rect.width, rect.height);
+    capsule.style.left = `${next.left}px`;
+    capsule.style.top = `${next.top}px`;
+  });
+  const finishDrag = event => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const moved = drag.moved;
+    drag = null;
+    capsule.classList.remove('dragging');
+    if (!moved) return;
+    const rect = capsule.getBoundingClientRect();
+    kbState.capsuleSuppressOpenUntil = Date.now() + 300;
+    try {
+      localStorage.setItem(STORE.kbCapsulePosition, JSON.stringify({
+        left: Math.round(rect.left),
+        top: Math.round(rect.top),
+      }));
+    } catch (_) {}
+  };
+  capsule.addEventListener('pointerup', finishDrag);
+  capsule.addEventListener('pointercancel', finishDrag);
+  capsule.addEventListener('click', event => {
+    if (Date.now() <= kbState.capsuleSuppressOpenUntil) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    kbOpenTrackedTask();
+  });
+  capsule.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    kbOpenTrackedTask();
+  });
+  window.addEventListener('resize', kbPlaceTaskCapsule);
+}
+
+function kbRenderTaskCapsule() {
+  const capsule = kbPageEls.taskCapsule;
+  const job = kbState.job;
+  if (!capsule) return;
+  const modalOpen = kbPageEls.task && !kbPageEls.task.hidden;
+  if (!job || kbState.jobDismissed || modalOpen) {
+    capsule.hidden = true;
+    return;
+  }
+  const kind = kbJobKind(job, kbState.jobKind);
+  const terminal = kbJobTerminal(job);
+  const progress = job.progress || {};
+  const completed = Math.max(0, Number(progress.completed) || 0);
+  const total = Math.max(0, Number(progress.total) || 0);
+  capsule.hidden = false;
+  capsule.classList.toggle('running', !terminal);
+  capsule.classList.toggle('completed', terminal && !['failed', 'cancelled'].includes(job.state));
+  capsule.classList.toggle('failed', ['failed', 'cancelled'].includes(job.state));
+  if (kbPageEls.taskCapsuleTitle) {
+    kbPageEls.taskCapsuleTitle.textContent = t(kind === 'import' ? 'kb.taskCapsuleImport' : 'kb.taskCapsuleReindex');
+  }
+  if (kbPageEls.taskCapsulePhase) kbPageEls.taskCapsulePhase.textContent = kbPhaseText(job);
+  if (kbPageEls.taskCapsuleValue) {
+    kbPageEls.taskCapsuleValue.textContent = total && !progress.indeterminate
+      ? `${Math.min(completed, total)}/${total}`
+      : '';
+  }
+  kbPlaceTaskCapsule();
+}
+
+function kbDocumentResultHtml(item) {
+  const detail = kbFormat(t('kb.documentResult'), {
+    text: item.textChunks || 0,
+    images: item.imagesIndexed || 0,
+    imageTotal: item.imagesTotal || 0,
+  });
+  const warnings = item.warningCount
+    ? ` · ${kbFormat(t('kb.documentWarnings'), { count: item.warningCount })}`
+    : '';
+  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(detail + warnings)}</div>`;
+}
+
+function kbPreparationFailureHtml(item) {
+  const reason = item.errorCode ? kbErrorText(item.errorCode) : t('kb.error.processing_failed');
+  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(reason)}</div>`;
+}
+
+function kbFailedDocumentHtml(item) {
+  const codes = Array.isArray(item.errorCodes) ? item.errorCodes.filter(Boolean) : [];
+  const reasons = codes.length
+    ? [...new Set(codes.map(kbErrorText))].join('；')
+    : t('kb.error.processing_failed');
+  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(reasons)}</div>`;
+}
+
 function kbSetTask(job, kind) {
-  const counts = job.counts || job.summary || {};
-  if (kbPageEls.taskTitle) kbPageEls.taskTitle.textContent = kind === 'import' ? t('kb.importing') : t('kb.building');
+  kbState.job = job;
+  kind = kbJobKind(job, kind);
+  const counts = job.counts || {};
+  const documentProgress = job.documentProgress || {};
+  const summary = job.summary || {};
+  const terminal = kbJobTerminal(job);
+  const progress = job.progress || {};
+  const completed = Math.max(0, Number(progress.completed) || 0);
+  const total = Math.max(0, Number(progress.total) || 0);
+  const indeterminate = !terminal && !!progress.indeterminate;
+  const successfulTerminal = ['completed', 'completed_with_failures'].includes(job.state);
+  const percent = total > 0
+    ? Math.min(100, Math.round((completed / total) * 100))
+    : (successfulTerminal ? 100 : 0);
+
+  if (kbPageEls.taskTitle) {
+    kbPageEls.taskTitle.textContent = terminal
+      ? t(kind === 'import' ? 'kb.importResult' : 'kb.reindexResult')
+      : t(kind === 'import' ? 'kb.importing' : 'kb.building');
+  }
   if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = kbPhaseText(job);
   if (kbPageEls.taskCurrent) {
     let current = kbText(job.current);
     if (job.errorCode) current = kbErrorText(job.errorCode);
+    kbPageEls.taskCurrent.hidden = !current;
     kbPageEls.taskCurrent.textContent = current;
   }
-  const success = Number(counts.succeeded ?? counts.success ?? 0);
-  const failure = Number(counts.failed ?? counts.failure ?? 0);
-  const completed = Math.max(0, Number(
-    kind === 'import'
-      ? (counts.completed ?? success + failure)
-      : (job.done ?? counts.completed ?? success + failure + Number(counts.skipped || 0)),
-  ) || 0);
-  const total = Math.max(0, Number(
-    kind === 'import' ? counts.total : (job.total ?? counts.total),
-  ) || 0);
-  const terminal = ['completed', 'completed_with_failures', 'failed'].includes(job.state)
-    || String(job.phase || '').includes('completed');
-  const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : (terminal ? 100 : 0);
   if (kbPageEls.taskProgress) {
+    const progressRoot = kbPageEls.taskProgress.parentElement;
+    progressRoot?.classList.toggle('indeterminate', indeterminate);
     kbPageEls.taskProgress.style.width = `${percent}%`;
-    kbPageEls.taskProgress.parentElement?.setAttribute('aria-valuenow', String(percent));
+    progressRoot?.setAttribute('aria-valuenow', String(percent));
   }
   if (kbPageEls.taskProgressValue) {
-    kbPageEls.taskProgressValue.textContent = total ? `${Math.min(completed, total)}/${total}` : '';
+    kbPageEls.taskProgressValue.textContent = total && !indeterminate
+      ? `${Math.min(completed, total)}/${total}`
+      : '';
   }
+
+  const imageDocuments = Array.isArray(job.imageDocuments) ? job.imageDocuments : [];
+  if (kbPageEls.taskImages) {
+    const showImages = job.phase === 'image_analysis' && imageDocuments.length;
+    kbPageEls.taskImages.hidden = !showImages;
+    kbPageEls.taskImages.innerHTML = showImages
+      ? imageDocuments.map(item => (
+        `<div class="kb-task-image-document"><span>《${escapeHtml(item.name || '')}》</span>`
+        + `<span>${Number(item.completed) || 0}/${Number(item.total) || 0}</span></div>`
+      )).join('')
+      : '';
+  }
+
   if (kbPageEls.taskCounts) {
-    if (kind === 'import') {
-      const lines = [kbFormat(t('kb.importCounts'), {
-        completed: counts.completed || 0,
-        total: counts.total || 0,
-        success,
-        failure,
-      })];
+    if (kind === 'import' && terminal && summary.documents_total != null) {
+      kbPageEls.taskCounts.textContent = kbFormat(t('kb.finalCounts'), {
+        total: summary.documents_total || 0,
+        success: Math.max(0, Number(summary.documents_succeeded || 0) - Number(summary.documents_with_warnings || 0)),
+        warning: summary.documents_with_warnings || 0,
+        failure: summary.documents_failed || 0,
+      });
+    } else if (kind === 'import') {
+      const lines = [];
+      if (documentProgress.total) {
+        lines.push(kbFormat(t('kb.prepareCounts'), {
+          completed: Math.min(documentProgress.completed || 0, documentProgress.total || 0),
+          total: documentProgress.total || 0,
+        }));
+      }
       if ((counts.assets || 0) || (counts.ignored || 0)) {
         lines.push(kbFormat(t('kb.importExtras'), {
           assets: counts.assets || 0,
@@ -1268,78 +1503,216 @@ function kbSetTask(job, kind) {
         }));
       }
       kbPageEls.taskCounts.textContent = lines.join('\n');
+      kbPageEls.taskCounts.hidden = !lines.length;
     } else {
       kbPageEls.taskCounts.textContent = kbFormat(t('kb.buildCounts'), {
-        completed: job.done || success + failure + (counts.skipped || 0),
-        total: job.total || counts.total || 0,
-        success,
-        failure,
+        completed: job.done || 0,
+        total: job.total || 0,
+        success: successfulTerminal ? 1 : 0,
+        failure: job.state === 'failed' ? 1 : 0,
       });
+      kbPageEls.taskCounts.hidden = false;
+    }
+    if (kind === 'import' && terminal && summary.documents_total != null) {
+      kbPageEls.taskCounts.hidden = false;
     }
   }
-  const items = job.files || [];
-  const successItems = items.filter(item => ['succeeded', 'ready', 'built', 'up-to-date', 'empty'].includes(item.status));
-  const failureItems = items.filter(item => ['failed', 'error', 'missing', 'unavailable'].includes(item.status));
-  const renderItems = list => list.map(item => {
-    const error = item.errorCode ? kbErrorText(item.errorCode) : '';
-    return `<div>${escapeHtml(item.name || '')}${error ? `：${escapeHtml(error)}` : ''}</div>`;
-  }).join('');
-  if (kbPageEls.taskSuccess) {
-    kbPageEls.taskSuccess.hidden = !successItems.length;
-    kbPageEls.taskSuccess.innerHTML = successItems.length
-      ? `<strong>${escapeHtml(t('kb.successList'))}</strong>${renderItems(successItems)}`
+
+  const documents = terminal && Array.isArray(job.documents) ? job.documents : [];
+  const successItems = documents.filter(item => item.status === 'succeeded');
+  const warningItems = documents.filter(item => item.status === 'succeeded_with_warnings');
+  const failureItems = documents.filter(item => item.status === 'failed');
+  const preparationFailures = !documents.length && Array.isArray(job.files)
+    ? job.files.filter(item => item.status === 'failed')
+    : [];
+  const renderResult = (element, titleKey, items, renderer = kbDocumentResultHtml) => {
+    if (!element) return;
+    element.hidden = !items.length;
+    element.innerHTML = items.length
+      ? `<strong>${escapeHtml(t(titleKey))}</strong>${items.map(renderer).join('')}`
       : '';
+  };
+  renderResult(kbPageEls.taskSuccess, 'kb.successList', successItems);
+  renderResult(kbPageEls.taskWarning, 'kb.warningList', warningItems);
+  renderResult(
+    kbPageEls.taskFailure,
+    terminal ? 'kb.failureList' : 'kb.failureSoFar',
+    failureItems.length ? failureItems : preparationFailures,
+    failureItems.length ? kbFailedDocumentHtml : kbPreparationFailureHtml,
+  );
+  if (job.state === 'failed' && kbPageEls.taskFailure) {
+    kbPageEls.taskFailure.hidden = false;
+    const taskError = `<div>${escapeHtml(kbErrorText(job.errorCode || 'processing_failed'))}</div>`;
+    if (failureItems.length || preparationFailures.length) {
+      kbPageEls.taskFailure.insertAdjacentHTML('beforeend', taskError);
+    } else {
+      kbPageEls.taskFailure.innerHTML = `<strong>${escapeHtml(t('kb.failureList'))}</strong>${taskError}`;
+    }
   }
-  if (kbPageEls.taskFailure) {
-    kbPageEls.taskFailure.hidden = !failureItems.length;
-    kbPageEls.taskFailure.innerHTML = failureItems.length
-      ? `<strong>${escapeHtml(t('kb.failureList'))}</strong>${renderItems(failureItems)}`
-      : '';
+
+  if (kbPageEls.taskCancel) {
+    const cancellable = kind === 'import' && job.cancellable !== false;
+    kbPageEls.taskCancel.hidden = terminal || !cancellable;
+    kbPageEls.taskCancel.disabled = !!job.cancelRequested || job.state === 'cancelling';
+    kbPageEls.taskCancel.textContent = t(
+      job.cancelRequested || job.state === 'cancelling' ? 'kb.cancellingTask' : 'kb.cancelTask',
+    );
+  }
+  if (kbPageEls.taskBackground) kbPageEls.taskBackground.hidden = terminal;
+  if (kbPageEls.taskClose) kbPageEls.taskClose.hidden = !terminal;
+  kbRenderTaskCapsule();
+}
+
+function kbStopJobPolling() {
+  if (kbState.jobTimer) clearTimeout(kbState.jobTimer);
+  kbState.jobTimer = null;
+}
+
+function kbScheduleJobPoll(delay = 750) {
+  kbStopJobPolling();
+  if (!kbState.jobId || kbJobTerminal(kbState.job)) return;
+  kbState.jobTimer = setTimeout(() => void kbPollTrackedJob(), delay);
+}
+
+async function kbPollTrackedJob() {
+  const jobId = kbState.jobId;
+  if (!jobId) return;
+  try {
+    const job = await window.ga.kbJob(jobId);
+    if (jobId !== kbState.jobId) return;
+    kbState.jobPollFailures = 0;
+    kbSetTask(job, kbState.jobKind);
+    if (kbJobTerminal(job)) {
+      kbStopJobPolling();
+      kbState.documentLists.clear();
+      await kbRefresh({ force: true }).catch(() => {});
+      return;
+    }
+    kbScheduleJobPoll();
+  } catch (error) {
+    if (jobId !== kbState.jobId) return;
+    if (error?.status === 404 || error?.data?.error === 'kb_job_not_found') {
+      kbStopJobPolling();
+      kbSetTask({
+        ...kbState.job,
+        ok: false,
+        state: 'failed',
+        phase: 'failed',
+        errorCode: 'kb_job_not_found',
+        current: '',
+        cancellable: false,
+        progress: {
+          ...kbState.job?.progress,
+          indeterminate: false,
+        },
+      }, kbState.jobKind);
+      await kbRefresh({ force: true }).catch(() => {});
+      return;
+    }
+    kbState.jobPollFailures += 1;
+    if (kbPageEls.taskPhase && kbPageEls.task && !kbPageEls.task.hidden) {
+      kbPageEls.taskPhase.textContent = t('kb.taskMonitorRetrying');
+    }
+    kbRenderTaskCapsule();
+    if (kbPageEls.taskCapsulePhase) kbPageEls.taskCapsulePhase.textContent = t('kb.taskMonitorRetrying');
+    kbScheduleJobPoll(Math.min(5000, 750 * (2 ** Math.min(kbState.jobPollFailures, 3))));
   }
 }
 
-async function kbTrackJob(kind, jobId) {
-  if (kbState.jobTimer) clearInterval(kbState.jobTimer);
-  kbState.jobKind = kind; kbState.jobId = jobId;
-  if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = t('kb.loading');
-  if (kbPageEls.taskProgress) {
-    kbPageEls.taskProgress.style.width = '0%';
-    kbPageEls.taskProgress.parentElement?.setAttribute('aria-valuenow', '0');
-  }
-  if (kbPageEls.taskProgressValue) kbPageEls.taskProgressValue.textContent = '';
-  if (kbPageEls.taskCurrent) kbPageEls.taskCurrent.textContent = '';
-  if (kbPageEls.taskCounts) kbPageEls.taskCounts.textContent = '';
-  if (kbPageEls.taskSuccess) { kbPageEls.taskSuccess.hidden = true; kbPageEls.taskSuccess.innerHTML = ''; }
-  if (kbPageEls.taskFailure) { kbPageEls.taskFailure.hidden = true; kbPageEls.taskFailure.innerHTML = ''; }
-  if (kbPageEls.taskClose) kbPageEls.taskClose.hidden = true;
-  openModal('kb-task-modal');
-  const poll = async () => {
-    try {
-      const job = await window.ga.kbJob(jobId);
-      kbSetTask(job, kind);
-      const done = ['completed', 'completed_with_failures', 'failed'].includes(job.state) || String(job.phase).includes('completed');
-      if (done) {
-        clearInterval(kbState.jobTimer); kbState.jobTimer = null;
-        if (kbPageEls.taskClose) kbPageEls.taskClose.hidden = false;
-        kbState.documentLists.clear();
-        await kbRefresh({ force: true });
-        return true;
-      }
-      return false;
-    } catch (error) {
-      clearInterval(kbState.jobTimer); kbState.jobTimer = null;
-      if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = error.message || error;
-      if (kbPageEls.taskClose) kbPageEls.taskClose.hidden = false;
-      return true;
-    }
+async function kbTrackJob(kind, jobId, { open = true, initial = null } = {}) {
+  kbStopJobPolling();
+  kbState.jobKind = kind;
+  kbState.jobId = jobId;
+  kbState.job = initial || {
+    jobId,
+    mode: kind,
+    state: 'queued',
+    phase: 'queued',
+    progress: { completed: 0, total: 0, indeterminate: true },
   };
-  const finished = await poll();
-  if (!finished) kbState.jobTimer = setInterval(poll, 500);
+  kbState.jobDismissed = false;
+  kbState.jobPollFailures = 0;
+  kbSetTask(kbState.job, kind);
+  if (open) openModal('kb-task-modal');
+  else if (kbPageEls.task) kbPageEls.task.hidden = true;
+  kbRenderTaskCapsule();
+  await kbPollTrackedJob();
+}
+
+function kbBackgroundTask() {
+  if (kbPageEls.task) kbPageEls.task.hidden = true;
+  kbRenderTaskCapsule();
+}
+
+function kbOpenTrackedTask() {
+  if (!kbState.job) return;
+  kbState.jobDismissed = false;
+  kbSetTask(kbState.job, kbState.jobKind);
+  openModal('kb-task-modal');
+  kbRenderTaskCapsule();
+}
+
+async function kbCancelTrackedJob() {
+  const job = kbState.job;
+  const jobId = kbState.jobId;
+  if (
+    !jobId
+    || kbJobTerminal(job)
+    || job?.cancelRequested
+    || kbJobKind(job, kbState.jobKind) !== 'import'
+    || job?.cancellable === false
+  ) return;
+  const confirmed = await showConfirmDialog({
+    title: t('kb.cancelTask'),
+    message: t('kb.cancelTaskConfirm'),
+    okText: t('kb.cancelTask'),
+    okKind: 'danger',
+  });
+  if (!confirmed || jobId !== kbState.jobId) return;
+  if (kbPageEls.taskCancel) kbPageEls.taskCancel.disabled = true;
+  try {
+    const result = await window.ga.kbCancelJob(jobId);
+    if (jobId !== kbState.jobId) return;
+    kbSetTask(result, kbState.jobKind);
+    kbScheduleJobPoll(250);
+  } catch (error) {
+    if (jobId === kbState.jobId && kbPageEls.taskCancel) kbPageEls.taskCancel.disabled = false;
+    showError(`${t('kb.cancelTaskError')}: ${error.message || error}`);
+  }
+}
+
+function kbDismissTask() {
+  if (!kbJobTerminal(kbState.job)) {
+    kbBackgroundTask();
+    return;
+  }
+  kbStopJobPolling();
+  kbState.jobDismissed = true;
+  kbState.jobId = '';
+  kbState.job = null;
+  if (kbPageEls.task) kbPageEls.task.hidden = true;
+  kbRenderTaskCapsule();
+}
+
+async function kbRestoreJobs() {
+  if (kbState.jobId || typeof window.ga.kbJobs !== 'function') return;
+  try {
+    const result = await window.ga.kbJobs();
+    const jobs = Array.isArray(result?.jobs) ? result.jobs : [];
+    const active = jobs.find(job => !kbJobTerminal(job));
+    if (!kbState.jobId && active?.jobId) {
+      await kbTrackJob(kbJobKind(active), active.jobId, { open: false, initial: active });
+    }
+  } catch (_) {}
 }
 
 async function kbImport(sourceDir) {
   sourceDir = kbText(sourceDir).trim();
   if (!sourceDir) return;
+  if (kbState.job && !kbJobTerminal(kbState.job)) {
+    kbOpenTrackedTask();
+    return;
+  }
   try {
     const result = await window.ga.kbImport({ sourceDir });
     if (!result.jobId) throw new Error(result.error || t('err.kbImport'));
@@ -1382,6 +1755,7 @@ async function kbOpenBuildModal() {
 }
 
 function initKbPage() {
+  kbBindTaskCapsule();
   bindClick('kb-refresh-btn', () => void kbRefresh({ force: true }));
   bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb, { force: true }));
   bindClick('kb-import-btn', () => void kbPickAndImport());
@@ -1393,7 +1767,9 @@ function initKbPage() {
     try { await window.ga.kbOpen({ kbId: doc.kb_id, dataId: doc.data_id, ref: doc.ref }); }
     catch (error) { showError(`${t('file.openFailed')}: ${error.message || error}`); }
   });
-  bindClick('kb-task-close', () => closeModals());
+  bindClick('kb-task-background', kbBackgroundTask);
+  bindClick('kb-task-cancel', () => void kbCancelTrackedJob());
+  bindClick('kb-task-close', kbDismissTask);
   kbEl('kb-doc-search')?.addEventListener('input', kbRenderDocuments);
   kbPageEls.buildForm?.addEventListener('submit', async event => {
     event.preventDefault();
@@ -1401,12 +1777,17 @@ function initKbPage() {
     closeModals();
     try {
       if (!scope) throw new Error(t('kb.noReady'));
+      if (kbState.job && !kbJobTerminal(kbState.job)) {
+        kbOpenTrackedTask();
+        return;
+      }
       const result = await window.ga.kbReindex(scope);
       if (!result.jobId) throw new Error(result.error || t('err.kbBuild'));
       await kbTrackJob('reindex', result.jobId);
     } catch (error) { showError(`${t('err.kbBuild')}: ${error.message || error}`); }
   });
   kbRefresh();
+  void kbRestoreJobs();
 }
 
 window.gaKbShowLibraries = () => {
@@ -1522,10 +1903,13 @@ setTimeout(initKbPage, 0);
 /* ═══════════════ 弹窗开关 ═══════════════ */
 const openModal = (id) => { const m = document.getElementById(id); if (m) m.hidden = false; };
 window.gaOpenModal = openModal;
-const closeModals = () => document.querySelectorAll('.modal').forEach(m => {
-  m.hidden = true;
-  m.querySelectorAll('.field-limit-hint').forEach(h => h.style.display = 'none');
-});
+const closeModals = () => {
+  document.querySelectorAll('.modal').forEach(m => {
+    m.hidden = true;
+    m.querySelectorAll('.field-limit-hint').forEach(h => h.style.display = 'none');
+  });
+  kbRenderTaskCapsule();
+};
 const bindClick = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
 function openServiceManagerFromSettings() {
   closeModals();

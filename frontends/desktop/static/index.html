@@ -497,6 +497,15 @@
 
   </div>
 
+  <div class="kb-task-capsule" id="kb-task-capsule" hidden aria-live="polite" role="button" tabindex="0">
+    <span class="kb-task-capsule-dot" aria-hidden="true"></span>
+    <span class="kb-task-capsule-copy">
+      <strong id="kb-task-capsule-title"></strong>
+      <span id="kb-task-capsule-phase"></span>
+    </span>
+    <span class="kb-task-capsule-value" id="kb-task-capsule-value"></span>
+  </div>
+
   <div class="modal" id="kb-task-modal" hidden aria-live="polite">
     <div class="modal-backdrop"></div>
     <div class="modal-card kb-task-card" role="dialog" aria-modal="true">
@@ -515,10 +524,16 @@
           <div class="kb-task-progress-bar" id="kb-task-progress-bar"></div>
         </div>
         <div class="kb-task-current" id="kb-task-current"></div>
+        <div class="kb-task-image-documents" id="kb-task-image-documents" hidden></div>
         <div class="kb-task-counts" id="kb-task-counts"></div>
         <div class="kb-task-result" id="kb-task-successes" hidden></div>
+        <div class="kb-task-result kb-task-warnings" id="kb-task-warnings" hidden></div>
         <div class="kb-task-result kb-task-failures" id="kb-task-failures" hidden></div>
-        <div class="kb-task-actions"><button type="button" class="set-btn primary" id="kb-task-close" data-i18n="common.close" hidden></button></div>
+        <div class="kb-task-actions">
+          <button type="button" class="set-btn danger" id="kb-task-cancel" data-i18n="kb.cancelTask"></button>
+          <button type="button" class="set-btn" id="kb-task-background" data-i18n="kb.runInBackground"></button>
+          <button type="button" class="set-btn primary" id="kb-task-close" data-i18n="common.close" hidden></button>
+        </div>
       </div>
     </div>
   </div>
