@@ -2159,6 +2159,13 @@ def _kb_error_code(error) -> str:
         return "processing_timeout"
     if "already exists" in text or "已存在" in text:
         return "already_exists"
+    if (
+        "visionunsupported" in text
+        or "不支持图片" in str(error or "")
+        or "不支持视觉" in str(error or "")
+        or "仅支持文本" in str(error or "")
+    ):
+        return "vision_unsupported"
     if "kb_mutation_locked" in text:
         return "kb_mutation_locked"
     if "not found" in text or "不存在" in text:
@@ -2525,6 +2532,7 @@ async def kb_import_handler(request):
         "result": None,
         "error": "",
         "cancelRequested": False,
+        "cancelEvent": threading.Event(),
         "startedAt": int(time.time()),
         "updatedAt": int(time.time()),
     }
