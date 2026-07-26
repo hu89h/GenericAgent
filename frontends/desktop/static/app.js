@@ -755,7 +755,7 @@ function gaGoPage(key, { newConversation = false } = {}) {
   nav.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n === item));
   pages.forEach(p => p.classList.toggle('active', p.dataset.page === key));
   renderSessionList();
-  window.gaSetActiveFileComposer?.(key === 'collab' ? 'collab' : 'chat');
+  window.gaSetActiveFileComposer?.(key === 'collab' ? 'collab' : key === 'kb' ? 'kb' : 'chat');
   if (key === 'collab') window.collabInit?.();
   if (key === 'kb') window.gaKbShowLibraries?.();
   if (key === 'chat' && newConversation) newSession({ mode: 'all', origin: 'chat' });
@@ -1342,8 +1342,12 @@ function kbStartQaMirror(sess) {
 }
 
 async function kbAskQuestion() {
-  const question = kbText(kbPageEls.question?.value).trim();
+  let question = composerText('kb').trim();
   if (!question || kbState.qaBusy) return;
+  if (question.length > 20000) {
+    question = question.slice(0, 20000);
+    showToast(t('err.charLimit').replace('{n}', 20000), 'warn');
+  }
   kbState.qaBusy = true;
   if (kbPageEls.ask) kbPageEls.ask.disabled = true;
   const scope = kbKnowledgeScope(kbState.activeDoc
@@ -1354,14 +1358,14 @@ async function kbAskQuestion() {
   let sess = activeSess();
   if (!kbSessionMatchesScope(sess, scope)) sess = newSession(scope);
   else kbSetSessionScope(scope);
-  if (kbPageEls.question) kbPageEls.question.value = '';
   try {
     const accepted = await sendPrompt(question);
     if (!accepted) throw new Error(t('err.kbAsk'));
+    if (kbPageEls.question) kbPageEls.question.innerHTML = '';
     kbStartQaMirror(sess);
   } catch (error) {
     kbState.qaBusy = false;
-    if (kbPageEls.ask) kbPageEls.ask.disabled = false;
+    syncVisionSendState({ ctx: 'kb' });
     showError(`${t('err.kbAsk')}: ${error.message || error}`);
   }
 }
@@ -1882,7 +1886,6 @@ function initKbPage() {
   bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb, { force: true }));
   bindClick('kb-import-btn', () => void kbPickAndImport());
   bindClick('kb-build-btn', kbOpenBuildModal);
-  bindClick('kb-ask-btn', () => void kbAskQuestion());
   bindClick('kb-open-doc', async () => {
     const doc = kbState.activeDoc;
     if (!doc) return;
@@ -5059,18 +5062,21 @@ function activeModelSupportsImages() {
   return !!(profile?.vision && profile?.visionVerified);
 }
 
-function composerUsesImages() {
-  return !!composerCfg('chat').input?.querySelector('.ph-chip[data-kind="image"]');
+function composerUsesImages(ctx = 'chat') {
+  return !!composerCfg(ctx).input?.querySelector('.ph-chip[data-kind="image"]');
 }
 
-function syncVisionSendState({ notify = false } = {}) {
-  if (!sendBtn) return;
-  const blocked = composerUsesImages() && !activeModelSupportsImages();
-  const wasBlocked = sendBtn.dataset.visionBlocked === '1';
-  sendBtn.dataset.visionBlocked = blocked ? '1' : '0';
-  const locked = !!composerEl?.classList.contains('is-locked');
-  sendBtn.disabled = locked || blocked;
-  sendBtn.title = blocked ? t('err.visionRequired') : '';
+function syncVisionSendState({ notify = false, ctx = 'chat' } = {}) {
+  const root = composerRootEl(ctx);
+  const button = ctx === 'chat' ? sendBtn : root?.querySelector('.send');
+  if (!button) return;
+  const blocked = composerUsesImages(ctx) && !activeModelSupportsImages();
+  const wasBlocked = button.dataset.visionBlocked === '1';
+  button.dataset.visionBlocked = blocked ? '1' : '0';
+  const locked = !!root?.classList.contains('is-locked');
+  const busy = ctx === 'kb' && kbState.qaBusy;
+  button.disabled = locked || busy || blocked;
+  button.title = blocked ? t('err.visionRequired') : '';
   if (blocked && notify && !wasBlocked) showChanToast(t('err.visionRequired'), '', 'err');
 }
 
@@ -5113,7 +5119,8 @@ async function sendPrompt(text) {
   const usedFiles = collectUsedFiles(text);
   const previewImgs = usedFiles.filter(f => f.isImage).map(f => ({ id: 'f-' + f.sid, name: f.name, path: f.path }));
   if (previewImgs.length && !activeModelSupportsImages()) {
-    syncVisionSendState({ notify: true });
+    const imageContexts = new Set(usedFiles.filter(file => file.isImage).map(fileCtx));
+    imageContexts.forEach(ctx => syncVisionSendState({ notify: true, ctx }));
     return false;
   }
   if (r.busy) {
@@ -5391,6 +5398,7 @@ function updateModelChip() {
     state.conductorModelName || name, conductorProfile || profile,
   );
   syncVisionSendState();
+  syncVisionSendState({ ctx: 'kb' });
 }
 function modelDisplayName(p, fallbackName) {
   if (p && p.kind === 'mixin') {
@@ -5968,11 +5976,13 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('#model-menu') || e.target.closest('#model-chip') ||
       e.target.closest('#cdb-model-menu') || e.target.closest('#cdb-model-chip') ||
       e.target.closest('#chat-menu') || e.target.closest('#chat-plus-btn') ||
+      e.target.closest('#kb-qa-menu') || e.target.closest('#kb-qa-plus-btn') ||
       e.target.closest('#knowledge-scope-picker') ||
       e.target.closest('#cdb-menu') || e.target.closest('#cdb-plus-btn')) return;
   closeAllModelMenus();
   closeKnowledgeScopePicker();
   window.chatComposer?.closeMenu?.();
+  window.kbComposer?.closeMenu?.();
   window.collabComposer?.closeMenu?.();
 });
 document.addEventListener('keydown', (e) => {
@@ -5980,6 +5990,7 @@ document.addEventListener('keydown', (e) => {
     closeAllModelMenus();
     closeKnowledgeScopePicker();
     window.chatComposer?.closeMenu?.();
+    window.kbComposer?.closeMenu?.();
     window.collabComposer?.closeMenu?.();
   }
 });
@@ -6098,10 +6109,11 @@ function fileCtx(f) { return f.ctx || 'chat'; }
 function filesForCtx(ctx) { return state.pendingFiles.filter(f => fileCtx(f) === ctx); }
 
 function composerPageEl(ctx) {
-  const page = ctx === 'collab' ? 'collab' : 'chat';
-  return document.querySelector(`.page--chat-ui[data-page="${page}"]`);
+  const page = ctx === 'collab' ? 'collab' : ctx === 'kb' ? 'kb' : 'chat';
+  return document.querySelector(`.page[data-page="${page}"]`);
 }
 function composerRootEl(ctx) {
+  if (ctx === 'kb') return document.getElementById('kb-qa-composer');
   return composerPageEl(ctx)?.querySelector('.composer');
 }
 function composerCfg(ctx = activeFileComposer) {
@@ -6112,7 +6124,7 @@ function composerCfg(ctx = activeFileComposer) {
     strip: root?.querySelector('.thumb-strip') || null,
     uploadBtn: null,
     imgInput: root?.querySelector('input[type="file"]') || null,
-    dropZone: ctx === 'collab' ? page : chatPanel,
+    dropZone: ctx === 'chat' ? chatPanel : page,
   };
 }
 
@@ -6123,7 +6135,7 @@ function renderThumbStrip(ctx = activeFileComposer) {
   if (files.length === 0) {
     cfg.strip.innerHTML = '';
     cfg.strip.hidden = true;
-    if (ctx === 'chat') syncVisionSendState();
+    if (ctx === 'chat' || ctx === 'kb') syncVisionSendState({ ctx });
     return;
   }
   cfg.strip.innerHTML = files.map(f => {
@@ -6292,7 +6304,11 @@ async function addFiles(fileList) {
     uploadSid = 'collab';
   } else {
     let upSess = activeSess();
-    if (!upSess) { await newSession(); upSess = activeSess(); }
+    if (ctx === 'kb' && !kbSessionMatchesScope(upSess, kbVisibleScope())) {
+      upSess = newSession(kbVisibleScope());
+    } else if (!upSess) {
+      upSess = newSession();
+    }
     uploadSid = (upSess && (upSess.bridgeSessionId || upSess.id)) || '';
   }
   for (const f of accepted) {
@@ -6402,7 +6418,7 @@ function bindComposerUpload(ctx) {
     // 内容清空后浏览器可能残留 <br>，抹掉以便 :empty 占位提示生效
     if (!cfg.input.textContent.trim() && !cfg.input.querySelector('.ph-chip')) cfg.input.innerHTML = '';
     reconcilePendingFiles(ctx);  // chip 被删 → 同步清理附件 + 删磁盘文件
-    if (ctx === 'chat') syncVisionSendState({ notify: true });
+    if (ctx === 'chat' || ctx === 'kb') syncVisionSendState({ notify: true, ctx });
   });
   const zone = cfg.dropZone;
   const dropKey = `dropBound_${ctx}`;
@@ -6448,9 +6464,12 @@ function bindComposerUpload(ctx) {
 
 bindComposerUpload('chat');
 bindComposerUpload('collab');
+bindComposerUpload('kb');
 
 Object.assign(window, {
-  gaSetActiveFileComposer: ctx => { activeFileComposer = ctx === 'collab' ? 'collab' : 'chat'; },
+  gaSetActiveFileComposer: ctx => {
+    activeFileComposer = ctx === 'collab' ? 'collab' : ctx === 'kb' ? 'kb' : 'chat';
+  },
   gaPageStatusBar: pageStatusBar,
   gaExpandFilePlaceholders: expandFilePlaceholders,
   gaRenderMsgChips: renderMsgTextWithChips,
@@ -7725,11 +7744,10 @@ function bindComposerInRoot(root, opts) {
   function openMenu() {
     if (!menu || !plusBtn) return;
     closeAllModelMenus?.();
-    if (ctx === 'chat') {
-      closeKnowledgeScopePicker();
-      window.collabComposer?.closeMenu?.();
-    }
-    else window.chatComposer?.closeMenu?.();
+    closeKnowledgeScopePicker();
+    if (ctx !== 'chat') window.chatComposer?.closeMenu?.();
+    if (ctx !== 'kb') window.kbComposer?.closeMenu?.();
+    if (ctx !== 'collab') window.collabComposer?.closeMenu?.();
     menu.hidden = false;
     plusBtn.setAttribute('aria-expanded', 'true');
   }
@@ -7790,6 +7808,16 @@ function bindComposerInRoot(root, opts) {
     },
   });
   if (bound) window.chatComposer = { closeMenu: bound.closeMenu, focus: bound.focus };
+})();
+
+(function () {
+  'use strict';
+  const root = document.getElementById('kb-qa-composer');
+  const bound = bindComposerInRoot(root, {
+    ctx: 'kb',
+    onSend() { void kbAskQuestion(); },
+  });
+  if (bound) window.kbComposer = { closeMenu: bound.closeMenu, focus: bound.focus };
 })();
 
 (function () {

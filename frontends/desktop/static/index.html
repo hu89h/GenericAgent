@@ -258,7 +258,30 @@
                   <aside class="kb-qa-pane">
                     <div class="kb-pane-head"><div class="kb-pane-title" id="kb-qa-title" data-i18n="kb.qa"></div></div>
                     <div class="kb-qa-log" id="kb-qa-log"><div class="kb-empty" data-i18n="kb.qaEmpty"></div></div>
-                    <div class="kb-qa-compose"><textarea id="kb-question" class="kb-question" data-i18n-ph="kb.askPh" placeholder="" maxlength="4000"></textarea><button type="button" class="send kb-send" id="kb-ask-btn" data-i18n-title="act.send" title=""><span data-ga-icon="paperPlaneTilt"></span></button></div>
+                    <div class="composer kb-qa-composer" id="kb-qa-composer" data-composer-ctx="kb">
+                      <div class="composer-slot">
+                        <div class="composer-inset">
+                          <div class="thumb-strip" id="kb-thumb-strip" hidden></div>
+                          <div class="input" id="kb-question" contenteditable="true" role="textbox" aria-multiline="true" data-i18n-ph="kb.askPh"></div>
+                          <div class="composer-bot">
+                            <div class="composer-plus-wrap">
+                              <button type="button" class="ic-btn composer-plus" id="kb-qa-plus-btn" aria-haspopup="menu" aria-expanded="false" data-i18n-title="collab.plusMenu" data-no-tooltip title="">
+                                <span data-ga-icon="plus"></span>
+                              </button>
+                              <div class="ga-menu composer-menu" id="kb-qa-menu" hidden role="menu">
+                                <button type="button" class="ga-menu-item" data-composer-action="upload" role="menuitem">
+                                  <span data-ga-icon="paperclip"></span>
+                                  <span data-i18n="upload.button"></span>
+                                </button>
+                              </div>
+                            </div>
+                            <span class="spacer"></span>
+                            <button type="button" class="send kb-send" id="kb-ask-btn" data-i18n-title="act.send" title=""><span data-ga-icon="paperPlaneTilt"></span></button>
+                          </div>
+                        </div>
+                      </div>
+                      <input type="file" id="kb-file-input" multiple hidden>
+                    </div>
                   </aside>
                 </div>
               </main>
