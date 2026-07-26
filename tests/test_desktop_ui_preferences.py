@@ -33,6 +33,7 @@ class DesktopUiPreferenceTests(unittest.TestCase):
                 "config": {
                     "expandThinking": True,
                     "expandTools": False,
+                    "defaultKbEnabled": False,
                     "ignored": "not-a-ui-preference",
                 }
             })
@@ -47,11 +48,13 @@ class DesktopUiPreferenceTests(unittest.TestCase):
             stored = json.loads(settings_path.read_text(encoding="utf-8"))
             self.assertEqual(stored["ui"]["expandThinking"], True)
             self.assertEqual(stored["ui"]["expandTools"], False)
+            self.assertEqual(stored["ui"]["defaultKbEnabled"], False)
             self.assertNotIn("ignored", stored["ui"])
 
             payload = json.loads(response.text)
             self.assertEqual(payload["config"]["expandThinking"], True)
             self.assertEqual(payload["config"]["expandTools"], False)
+            self.assertEqual(payload["config"]["defaultKbEnabled"], False)
 
 
 if __name__ == "__main__":

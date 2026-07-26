@@ -40,6 +40,7 @@
   document.documentElement.style.setProperty('--chat-font',cfp+'px');
   if(localStorage.getItem('ga_expand_thinking')==='1') document.documentElement.dataset.expandThinking='1';
   if(localStorage.getItem('ga_expand_tools')==='1') document.documentElement.dataset.expandTools='1';
+  document.documentElement.dataset.defaultKbEnabled=localStorage.getItem('ga_default_kb_enabled')==='0'?'0':'1';
   var hljs=document.getElementById('hljs-theme');
   if(hljs&&app==='dark') hljs.href='https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css';
 })();
@@ -198,8 +199,12 @@
                     </button>
                   </div>
                 </div>
+                <button type="button" class="knowledge-scope-chip" id="knowledge-scope-chip" aria-haspopup="menu" aria-expanded="false">
+                  <span class="knowledge-scope-icon" data-ga-icon="books" aria-hidden="true"></span>
+                  <span class="knowledge-scope-label"></span>
+                  <span class="knowledge-scope-caret" data-ga-icon="caretDown" aria-hidden="true"></span>
+                </button>
                 <span class="spacer"></span>
-                <span class="knowledge-scope-chip" id="knowledge-scope-chip"></span>
                 <button type="button" class="chip" id="model-chip" data-i18n-title="model.menuLabel" title=""><span class="model-name"></span> <span class="chip-ic" data-ga-icon="caretDown"></span></button>
                 <button type="button" class="send" id="send-btn" aria-label="send">
                   <span data-ga-icon="paperPlaneTilt"></span>
@@ -769,6 +774,15 @@
           <div class="set-toggle-row">
             <span class="set-toggle-label" data-i18n="set.expandTools"></span>
             <button class="set-switch" type="button" id="expand-tools-switch" role="switch" aria-checked="false">
+              <span class="set-switch-knob" aria-hidden="true"></span>
+            </button>
+          </div>
+        </div>
+        <div class="set-block">
+          <div class="set-sec-t" data-i18n="set.chat"></div>
+          <div class="set-toggle-row">
+            <span class="set-toggle-label" data-i18n="set.defaultKbEnabled"></span>
+            <button class="set-switch" type="button" id="default-kb-enabled-switch" role="switch" aria-checked="true">
               <span class="set-switch-knob" aria-hidden="true"></span>
             </button>
           </div>

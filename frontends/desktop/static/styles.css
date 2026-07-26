@@ -1921,10 +1921,17 @@ html[data-appearance="dark"] .ga-menu-item.active{
 }
 .composer-menu .ga-menu-item svg{ width:16px; height:16px; flex:0 0 auto; color:var(--icon); }
 .knowledge-scope-chip{
-  display:inline-block; max-width:min(240px,24vw); min-width:0;
-  color:var(--accent); font-size:11px; line-height:24px;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  display:inline-flex; align-items:center; gap:4px; height:26px;
+  max-width:min(260px,32vw); min-width:0; padding:0 7px;
+  border:1px solid var(--line); border-radius:4px; background:transparent;
+  color:var(--accent); font:inherit; font-size:11px; cursor:pointer;
 }
+.knowledge-scope-chip:hover,.knowledge-scope-chip[aria-expanded="true"]{ background:var(--hover-2); }
+.knowledge-scope-chip[data-scope-mode="none"]{ color:var(--muted); }
+.knowledge-scope-icon,.knowledge-scope-caret{ display:inline-flex; flex:0 0 auto; }
+.knowledge-scope-icon svg{ width:14px; height:14px; }
+.knowledge-scope-caret svg{ width:11px; height:11px; }
+.knowledge-scope-label{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .knowledge-scope-picker{
   position:fixed; width:min(320px,calc(100vw - 16px)); max-height:min(460px,calc(100vh - 20px));
   overflow:auto; overscroll-behavior:contain; padding:6px; z-index:100;

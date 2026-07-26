@@ -403,6 +403,7 @@ const STORE = {
   fontSize: 'ga_font_size',
   expandThinking: 'ga_expand_thinking',
   expandTools: 'ga_expand_tools',
+  defaultKbEnabled: 'ga_default_kb_enabled',
   kbCapsulePosition: 'ga_kb_capsule_position',
 };
 const APPEARANCE_IDS = ['light', 'dark'];
@@ -429,6 +430,7 @@ function bootUiFromDom() {
     chatFontSize: CHAT_FONT_DEFAULT,
     defaultExpandThinking: false,
     defaultExpandTools: false,
+    defaultKbEnabled: true,
   };
   if (root.lang === 'en') out.lang = 'en';
   if (root.dataset.theme) out.theme = root.dataset.theme;
@@ -437,6 +439,7 @@ function bootUiFromDom() {
   if (root.dataset.chatFont) out.chatFontSize = normalizeChatFontSize(root.dataset.chatFont);
   out.defaultExpandThinking = root.dataset.expandThinking === '1';
   out.defaultExpandTools = root.dataset.expandTools === '1';
+  out.defaultKbEnabled = root.dataset.defaultKbEnabled !== '0';
   return out;
 }
 let {
@@ -447,6 +450,7 @@ let {
   chatFontSize,
   defaultExpandThinking,
   defaultExpandTools,
+  defaultKbEnabled,
 } = bootUiFromDom();
 
 function syncHljsTheme() {
@@ -467,6 +471,7 @@ function syncBootCache() {
   else localStorage.removeItem(STORE.expandThinking);
   if (defaultExpandTools) localStorage.setItem(STORE.expandTools, '1');
   else localStorage.removeItem(STORE.expandTools);
+  localStorage.setItem(STORE.defaultKbEnabled, defaultKbEnabled ? '1' : '0');
   if (plainUi) localStorage.setItem(STORE.plain, '1');
   else localStorage.removeItem(STORE.plain);
 }
@@ -482,6 +487,7 @@ async function persistUiPrefs() {
         fontSize: chatFontSize,
         expandThinking: defaultExpandThinking,
         expandTools: defaultExpandTools,
+        defaultKbEnabled,
       },
     });
     syncBootCache();
@@ -558,6 +564,7 @@ function applyI18n() {
   window.gaRefreshModelGuide?.();
   window.collabRetranslate?.();
   syncAskUserUi();
+  if (typeof updateKnowledgeScopeChip === 'function') updateKnowledgeScopeChip();
 }
 // 语言对应国旗 SVG(en 用美国旗,按要求)
 const FLAGS = {
@@ -721,6 +728,19 @@ function applyFoldDefaults(expandThinking, expandTools, { persist } = { persist:
     .forEach(el => { el.open = defaultExpandThinking; });
   document.querySelectorAll('details.fold-tool:not(.fold-tool-live), details.fold-result:not(.fold-tool-live)')
     .forEach(el => { el.open = defaultExpandTools; });
+  if (persist) void persistUiPrefs();
+}
+
+function syncDefaultKbEnabledSwitch() {
+  document.getElementById('default-kb-enabled-switch')
+    ?.setAttribute('aria-checked', defaultKbEnabled ? 'true' : 'false');
+}
+
+function applyDefaultKbEnabled(enabled, { persist } = { persist: true }) {
+  defaultKbEnabled = enabled !== false;
+  document.documentElement.dataset.defaultKbEnabled = defaultKbEnabled ? '1' : '0';
+  syncDefaultKbEnabledSwitch();
+  if (!activeSess()) updateKnowledgeScopeChip(null);
   if (persist) void persistUiPrefs();
 }
 
@@ -1903,6 +1923,7 @@ window.gaKbShowLibraries = () => {
 
 function closeKnowledgeScopePicker() {
   document.getElementById('knowledge-scope-picker')?.remove();
+  document.getElementById('knowledge-scope-chip')?.setAttribute('aria-expanded', 'false');
 }
 
 async function openKnowledgeScopePicker() {
@@ -1914,19 +1935,23 @@ async function openKnowledgeScopePicker() {
   picker.className = 'ga-menu knowledge-scope-picker';
   picker.innerHTML = `<div class="knowledge-scope-head">${escapeHtml(t('kb.choose'))}</div><div class="knowledge-scope-loading">${escapeHtml(t('kb.loading'))}</div>`;
   document.body.appendChild(picker);
+  document.getElementById('knowledge-scope-chip')?.setAttribute('aria-expanded', 'true');
   const rect = anchor.getBoundingClientRect();
   picker.style.left = `${Math.max(8, Math.min(window.innerWidth - 328, rect.left))}px`;
   picker.style.bottom = `${Math.max(10, window.innerHeight - rect.top + 6)}px`;
   let scopeKbs = [];
 
-  const currentScope = () => normalizeKnowledgeScope(activeSess()?.knowledgeScope);
+  const currentScope = () => normalizeKnowledgeScope(
+    activeSess()?.knowledgeScope || defaultChatKnowledgeScope(),
+  );
   const renderKbChoices = () => {
     const current = currentScope();
     picker.innerHTML = `<div class="knowledge-scope-head">${escapeHtml(t('kb.choose'))}</div>`
+      + `<button type="button" class="ga-menu-item ${current.mode === 'none' ? 'active' : ''}" data-knowledge-scope-kind="none">${escapeHtml(t('kb.disabled'))}</button>`
       + `<button type="button" class="ga-menu-item ${current.mode === 'all' ? 'active' : ''}" data-knowledge-scope-kind="all">${escapeHtml(t('kb.scopeAll'))}</button>`
       + (scopeKbs.length
         ? scopeKbs.map(kb => {
-          const active = current.mode === 'kb' && current.kb_id === kb.id;
+          const active = ['kb', 'document'].includes(current.mode) && current.kb_id === kb.id;
           return `<button type="button" class="ga-menu-item ${active ? 'active' : ''}" data-knowledge-scope-kb-id="${escapeHtml(kb.id)}" data-knowledge-scope-kb-name="${escapeHtml(kb.name || kb.id)}">${escapeHtml(kb.name || kb.id)}</button>`;
         }).join('')
         : `<div class="knowledge-scope-empty">${escapeHtml(t('kb.noReady'))}</div>`);
@@ -1952,20 +1977,56 @@ async function openKnowledgeScopePicker() {
         : `<div class="knowledge-scope-empty">${escapeHtml(t('kb.noDocs'))}</div>`);
   };
 
-  const chooseScope = async (scope) => {
-    closeKnowledgeScopePicker();
-    newSession(normalizeKnowledgeScope({ ...scope, origin: 'chat' }));
+  const chooseScope = async (scope, { close = true } = {}) => {
+    const normalized = normalizeKnowledgeScope({ ...scope, origin: 'chat' });
+    let sess = activeSess();
+    if (!sess) {
+      sess = newSession(normalized);
+    } else {
+      const previous = sess.knowledgeScope;
+      sess.knowledgeScope = normalized;
+      updateKnowledgeScopeChip(sess);
+      renderSessionList();
+      if (sess.bridgeSessionId) {
+        const sync = patchSession(sess, { knowledgeScope: normalized });
+        sess.knowledgeScopeSync = sync;
+        try {
+          await sync;
+        } catch (error) {
+          sess.knowledgeScope = previous;
+          updateKnowledgeScopeChip(sess);
+          renderSessionList();
+          throw error;
+        } finally {
+          if (sess.knowledgeScopeSync === sync) sess.knowledgeScopeSync = null;
+        }
+      }
+    }
+    if (close) closeKnowledgeScopePicker();
+    return sess;
+  };
+
+  const chooseScopeSafely = async (scope, options) => {
+    try {
+      return await chooseScope(scope, options);
+    } catch (error) {
+      closeKnowledgeScopePicker();
+      showError(error.message || t('err.kbLoad'));
+      return null;
+    }
   };
 
   picker.addEventListener('click', async event => {
     const back = event.target.closest('[data-knowledge-scope-action="back"]');
     if (back) { event.preventDefault(); renderKbChoices(); return; }
+    const none = event.target.closest('[data-knowledge-scope-kind="none"]');
+    if (none) { event.preventDefault(); await chooseScopeSafely({ mode: 'none' }); return; }
     const all = event.target.closest('[data-knowledge-scope-kind="all"]');
-    if (all) { event.preventDefault(); await chooseScope({ mode: 'all' }); return; }
+    if (all) { event.preventDefault(); await chooseScopeSafely({ mode: 'all' }); return; }
     const doc = event.target.closest('[data-knowledge-scope-doc]');
     if (doc) {
       event.preventDefault();
-      try { await chooseScope(JSON.parse(decodeURIComponent(doc.dataset.knowledgeScopeDoc))); }
+      try { await chooseScopeSafely(JSON.parse(decodeURIComponent(doc.dataset.knowledgeScopeDoc))); }
       catch (_) { closeKnowledgeScopePicker(); showError(t('err.kbLoad')); }
       return;
     }
@@ -1975,7 +2036,17 @@ async function openKnowledgeScopePicker() {
     const kb = scopeKbs.find(item => item.id === kbItem.dataset.knowledgeScopeKbId)
       || { id: kbItem.dataset.knowledgeScopeKbId, name: kbItem.dataset.knowledgeScopeKbName || kbItem.dataset.knowledgeScopeKbId };
     if (kbItem.dataset.knowledgeScopeSelectKb === '1') {
-      await chooseScope({ mode: 'kb', kb_id: kb.id, kb_name: kb.name || kb.id });
+      await chooseScopeSafely({ mode: 'kb', kb_id: kb.id, kb_name: kb.name || kb.id });
+      return;
+    }
+    try {
+      await chooseScope(
+        { mode: 'kb', kb_id: kb.id, kb_name: kb.name || kb.id },
+        { close: false },
+      );
+    } catch (error) {
+      closeKnowledgeScopePicker();
+      showError(error.message || t('err.kbLoad'));
       return;
     }
     picker.innerHTML = `<div class="knowledge-scope-head">${escapeHtml(kb.name || kb.id)}</div><div class="knowledge-scope-loading">${escapeHtml(t('kb.loading'))}</div>`;
@@ -1991,13 +2062,26 @@ async function openKnowledgeScopePicker() {
     const data = await window.ga.kbStatus();
     const allKbs = Array.isArray(data?.knowledge_bases) ? data.knowledge_bases : kbStatusKbs();
     scopeKbs = allKbs.filter(kb => ['ready', 'ready_with_warnings'].includes(kb.state));
-    renderKbChoices();
+    const current = currentScope();
+    const currentKb = scopeKbs.find(kb => kb.id === current.kb_id);
+    if (currentKb && ['kb', 'document'].includes(current.mode)) {
+      const docs = await window.ga.kbDocs({ kbId: currentKb.id });
+      renderDocChoices(currentKb, Array.isArray(docs?.documents) ? docs.documents : (Array.isArray(docs?.docs) ? docs.docs : []));
+    } else {
+      renderKbChoices();
+    }
   } catch (error) {
     picker.innerHTML = `<div class="knowledge-scope-empty">${escapeHtml(error.message || t('err.kbLoad'))}</div>`;
   }
 }
 
 window.gaOpenKnowledgeScopePicker = openKnowledgeScopePicker;
+document.getElementById('knowledge-scope-chip')?.addEventListener('click', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  if (document.getElementById('knowledge-scope-picker')) closeKnowledgeScopePicker();
+  else void openKnowledgeScopePicker();
+});
 // This block is declared before the generic modal helpers below; defer binding
 // until the current script has finished initializing those shared helpers.
 setTimeout(initKbPage, 0);
@@ -2967,12 +3051,13 @@ const isActive = (sess) => sess && sess.id === state.activeId;
 
 function normalizeKnowledgeScope(value) {
   const raw = value && typeof value === 'object' ? value : {};
-  const mode = raw.mode || raw.kind || 'all';
+  const mode = String(raw.mode || raw.kind || 'all').trim().toLowerCase();
   let origin = String(raw.origin || raw.source || '').trim().toLowerCase();
   if (origin !== 'chat' && origin !== 'knowledge') {
     origin = (mode === 'kb' || mode === 'knowledge_base' || mode === 'document' || mode === 'doc')
       ? 'knowledge' : 'chat';
   }
+  if (mode === 'none' || mode === 'disabled') return { mode: 'none', origin: 'chat' };
   if (mode === 'kb' || mode === 'knowledge_base') {
     const kbId = raw.kb_id || raw.kbId || raw.id;
     return kbId ? {
@@ -2996,29 +3081,42 @@ function normalizeKnowledgeScope(value) {
   return { mode: 'all', origin };
 }
 
+function defaultChatKnowledgeScope() {
+  return { mode: defaultKbEnabled ? 'all' : 'none', origin: 'chat' };
+}
+
 function knowledgeScopeLabel(scope) {
   const s = normalizeKnowledgeScope(scope);
-  if (s.mode === 'kb') return `${t('kb.scopeKb')}: ${s.kb_name || s.kb_id}`;
-  if (s.mode === 'document') return `${t('kb.scopeDoc')}: ${s.title || s.file_name || s.data_id}`;
+  if (s.mode === 'none') return t('kb.disabled');
+  if (s.mode === 'kb') return `${s.kb_name || s.kb_id} · ${t('kb.allInKb')}`;
+  if (s.mode === 'document') return `${s.kb_name || s.kb_id} · ${s.title || s.file_name || s.data_id}`;
   return t('kb.scopeAll');
 }
 
 function updateKnowledgeScopeChip(sess = activeSess()) {
   const chip = document.getElementById('knowledge-scope-chip');
   if (!chip) return;
-  const scope = normalizeKnowledgeScope(sess?.knowledgeScope);
-  chip.textContent = scope.origin === 'knowledge' || scope.mode !== 'all'
-    ? knowledgeScopeLabel(scope)
-    : '';
-  chip.title = chip.textContent;
+  const scope = normalizeKnowledgeScope(sess?.knowledgeScope || defaultChatKnowledgeScope());
+  const label = knowledgeScopeLabel(scope);
+  const labelEl = chip.querySelector('.knowledge-scope-label');
+  if (labelEl) labelEl.textContent = label;
+  chip.dataset.scopeMode = scope.mode;
+  chip.title = label;
 }
 
 function saveSessions() {}
 function patchSession(sess, fields) {
-  if (!sess.bridgeSessionId) return;
-  fetch(`${BRIDGE_ORIGIN}/session/${encodeURIComponent(sess.bridgeSessionId)}`, {
+  if (!sess.bridgeSessionId) return Promise.resolve();
+  const request = fetch(`${BRIDGE_ORIGIN}/session/${encodeURIComponent(sess.bridgeSessionId)}`, {
     method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(fields)
-  }).catch(() => {});
+  }).then(async response => {
+    if (response.ok) return response;
+    let message = response.statusText;
+    try { message = (await response.json()).error || message; } catch (_) {}
+    throw new Error(message || t('err.kbLoad'));
+  });
+  request.catch(() => {});
+  return request;
 }
 async function loadSessions() {
   try {
@@ -4398,9 +4496,9 @@ function discardEmptyDraftSessions() {
   }
 }
 function newSession(knowledgeScope = null) {
-  const scope = normalizeKnowledgeScope(knowledgeScope || {
-    mode: 'all', origin: currentPage === 'kb' ? 'knowledge' : 'chat',
-  });
+  const scope = normalizeKnowledgeScope(knowledgeScope || (
+    currentPage === 'kb' ? { mode: 'all', origin: 'knowledge' } : defaultChatKnowledgeScope()
+  ));
   const current = activeSess();
   if (current && !current.bridgeSessionId && !(current.messages && current.messages.length)) {
     current.knowledgeScope = scope;
@@ -5006,6 +5104,7 @@ async function sendPrompt(text) {
   saveSessions();
   setBusy(sess, true);
   try {
+    if (sess.knowledgeScopeSync) await sess.knowledgeScopeSync;
     let sid = await ensureBridgeSession(sess);
     try {
       await bridgeFetch(`/session/${encodeURIComponent(sid)}/restore`, { method: 'POST', body: {} });
@@ -5747,6 +5846,7 @@ function openSettings() {
   applyAppearance(appearance, plainUi, { persist: false });
   applyChatFontSize(chatFontSize, { persist: false });
   syncFoldDefaultSwitches();
+  syncDefaultKbEnabledSwitch();
   void loadKbServiceConfigs();
 }
 async function loadModelProfiles() {
@@ -5874,6 +5974,10 @@ const expandToolsSwitch = document.getElementById('expand-tools-switch');
 if (expandToolsSwitch) expandToolsSwitch.addEventListener('click', () => {
   applyFoldDefaults(defaultExpandThinking, !defaultExpandTools);
 });
+const defaultKbEnabledSwitch = document.getElementById('default-kb-enabled-switch');
+if (defaultKbEnabledSwitch) defaultKbEnabledSwitch.addEventListener('click', () => {
+  applyDefaultKbEnabled(!defaultKbEnabled);
+});
 async function loadBridgeConfig() {
   try {
     const res = await window.ga.getConfig();
@@ -5886,6 +5990,7 @@ async function loadBridgeConfig() {
     if (cfg.appearance) applyAppearance(cfg.appearance, !!cfg.plain, { persist: false });
     if (cfg.fontSize != null) applyChatFontSize(cfg.fontSize, { persist: false });
     applyFoldDefaults(cfg.expandThinking === true, cfg.expandTools === true, { persist: false });
+    applyDefaultKbEnabled(cfg.defaultKbEnabled !== false, { persist: false });
     if (cfg.llmNo != null && state.modelProfiles.length) {
       const p = state.modelProfiles.find(x => (x.id ?? 0) === cfg.llmNo);
       if (p) {
@@ -7551,10 +7656,12 @@ applyAppearance(appearance, plainUi, { persist: false });
 applyTheme(theme, { persist: false });
 initChatFontStepper();
 applyChatFontSize(chatFontSize, { persist: false });
+applyDefaultKbEnabled(defaultKbEnabled, { persist: false });
 syncHljsTheme();
 applyI18n();
 initCustomTooltips();
 updateModelChip();
+updateKnowledgeScopeChip();
 renderSessionList();
 loadCustomPresets();
 loadHiddenBuiltins();
