@@ -2594,6 +2594,22 @@ function stripThinkingBlocks(body) {
     .replace(/<(thinking|think)>[\s\S]*$/gi, '');
 }
 
+function isolateToolProtocolFromThinking(body) {
+  return String(body || '').replace(
+    /<(thinking|think)>((?:(?!<\/(?:thinking|think)>)[\s\S])*?)(?=\n(?:🛠️ Tool: `|`````))/gi,
+    '<$1>$2</$1>\n',
+  );
+}
+
+function stripOrphanToolResultFence(body) {
+  const text = String(body || '');
+  const fenceCount = (text.match(/^`````\s*$/gm) || []).length;
+  if (fenceCount % 2 === 1 && /(?:^|\n)`````\s*$/.test(text)) {
+    return text.replace(/\n?`````\s*$/, '');
+  }
+  return text;
+}
+
 function renderTurnBody(body, options = {}) {
   // 自包含：每次调用独立的占位栈，渲染完立即还原，无跨调用共享状态
   const folds = [];
@@ -2603,7 +2619,7 @@ function renderTurnBody(body, options = {}) {
     return `\n\n§§FOLD:${folds.length - 1}§§\n\n`;
   };
   const stashAsk = (data) => { asks.push(data); return `\n\n§§ASK:${asks.length - 1}§§\n\n`; };
-  let s = stripTurnMarker(body);
+  let s = isolateToolProtocolFromThinking(stripOrphanToolResultFence(stripTurnMarker(body)));
   s = s.replace(/<(thinking|think)>([\s\S]*?)(<\/\1>|$)/gi, (_m, _tag, inner, close) => {
     const live = !close;
     return stash(
