@@ -3865,8 +3865,11 @@ function collabItemToMsg(item) {
   return { role: 'system', content: item.msg || '' };
 }
 function renderAllMessages(sess) {
-  const box = ensureMsgs(); box.innerHTML = '';
+  const box = ensureMsgs();
+  const foldState = snapshotFoldState(box);
+  box.innerHTML = '';
   for (const m of sess.messages) box.appendChild(msgNode(m));
+  restoreFoldState(box, foldState);
   syncAskUserUi();
   // badge 恢复在 pollSession finally 中执行（此时 messages 已通过异步加载填充）
   refreshEmptyState(sess); scrollBottom(true);
@@ -3937,6 +3940,42 @@ function snapshotDraftScroll(root) {
   if (!root) return [];
   return [...root.querySelectorAll('.bubble .code-block pre, .bubble .fold-pre')].map(n => n.scrollTop);
 }
+
+function foldStateKey(detail, root) {
+  const classes = [...detail.classList].filter(name => name.startsWith('fold-')).sort().join('.');
+  const label = (detail.querySelector(':scope > summary')?.textContent || '').replace(/\s+…$/, '');
+  const base = `${classes}|${label}`;
+  const same = [...root.querySelectorAll('details.fold')].filter((item) => {
+    const itemClasses = [...item.classList].filter(name => name.startsWith('fold-')).sort().join('.');
+    const itemLabel = (item.querySelector(':scope > summary')?.textContent || '').replace(/\s+…$/, '');
+    return `${itemClasses}|${itemLabel}` === base;
+  });
+  return `${base}#${same.indexOf(detail)}`;
+}
+
+function snapshotFoldState(root) {
+  if (!root) return new Map();
+  const state = new Map();
+  root.querySelectorAll('details.fold').forEach((detail) => {
+    state.set(foldStateKey(detail, root), {
+      open: detail.open,
+      scrollTop: detail.querySelector(':scope > .fold-pre')?.scrollTop || 0,
+    });
+  });
+  return state;
+}
+
+function restoreFoldState(root, state) {
+  if (!root || !state?.size) return;
+  root.querySelectorAll('details.fold').forEach((detail) => {
+    const saved = state.get(foldStateKey(detail, root));
+    if (!saved) return;
+    detail.open = saved.open;
+    const pre = detail.querySelector(':scope > .fold-pre');
+    if (pre && saved.scrollTop) pre.scrollTop = saved.scrollTop;
+  });
+}
+
 function restoreDraftScroll(root, tops) {
   if (!root || !tops.length) return;
   const nodes = root.querySelectorAll('.bubble .code-block pre, .bubble .fold-pre');
@@ -4071,9 +4110,11 @@ function freezeCurrentTurnDom(r, turn) {
   if (!bubble) return;
   const cur = bubble.querySelector(':scope > .turn-cur');
   if (!cur) return;
+  const foldState = snapshotFoldState(cur);
   cur.className = 'turn-frozen';
   cur.dataset.turn = turn;
   cur.innerHTML = renderTurnFold((r.draftSegs || [])[turn] || '', turn);
+  restoreFoldState(cur, foldState);
   postRenderEnhance(cur);
 }
 
@@ -4096,7 +4137,9 @@ function paintDraft(r, turn, visibleCurrBody) {
   const body = visibleCurrBody || '';
   const prevBody = r._draftPaintBody || '';
   if (!tryPatchInflightToolDom(cur, body, prevBody)) {
+    const foldState = snapshotFoldState(cur);
     cur.innerHTML = renderTurnBody(body) + '<span class="cursor"></span>';
+    restoreFoldState(cur, foldState);
     postRenderEnhance(cur);
   } else if (!cur.querySelector('.cursor')) {
     cur.insertAdjacentHTML('beforeend', '<span class="cursor"></span>');
@@ -4635,7 +4678,9 @@ function upsert(sess, raw, partial) {
         bubble.className = 'bubble md';
         r.draftEl.appendChild(bubble);
       }
+      const foldState = snapshotFoldState(bubble);
       bubble.innerHTML = renderAssistantTurnsHtml(segs, curr, false);
+      restoreFoldState(bubble, foldState);
       postRenderEnhance(bubble);
     }
     const cursor = r.draftEl.querySelector('.cursor');
