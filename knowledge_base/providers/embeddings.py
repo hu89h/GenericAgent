@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Iterable, List
 
-from . import provider_http, provider_settings
+from . import provider_http, provider_settings, rate_limit
 
 
 # Real token usage reported by the embedding endpoint, accumulated per
@@ -63,10 +63,16 @@ def _runtime_config() -> dict:
         "dimension": int(raw.get("dimension") or 1024),
         "max_tokens": int(raw.get("max_tokens") or 8192),
         "timeout": int(raw.get("timeout") or 60),
-        "retries": int(raw.get("max_retries") or 3),
+        "retries": int(raw.get("max_retries") or 4),
         "batch_size": int(raw.get("batch_size") or 10),
         "concurrency": max(1, int(raw.get("concurrency") or 10)),
         "request_interval": max(0.0, float(raw.get("request_interval") or 0)),
+        "rpm_limit": max(1, int(os.environ.get("GA_KB_EMBED_RPM", "1800"))),
+        "tpm_limit": max(1, int(os.environ.get("GA_KB_EMBED_TPM", "1200000"))),
+        "rate_headroom": min(
+            0.95,
+            max(0.1, float(os.environ.get("GA_KB_EMBED_RATE_HEADROOM", "0.8"))),
+        ),
         "cache_enabled": os.environ.get("GA_KB_EMBED_CACHE", "1").strip().lower()
         not in ("0", "false", "no", "off"),
     }
@@ -82,6 +88,54 @@ def _rough_token_count(text: str) -> int:
     return max(1, len(text or "") // 2)
 
 
+def _rate_limit_token_estimate(texts: Iterable[str]) -> int:
+    """Conservative input-token estimate for mixed Chinese/Latin embedding text."""
+
+    total = 0.0
+    for value in texts:
+        text = str(value or "")
+        cjk = sum(
+            "\u3400" <= char <= "\u9fff"
+            or "\uf900" <= char <= "\ufaff"
+            for char in text
+        )
+        other = max(0, len(text) - cjk)
+        total += cjk + other / 4.0 + 8
+    return max(1, int(total * 1.15 + 0.999))
+
+
+def _usage_input_tokens(body: dict) -> int | None:
+    usage = body.get("usage") if isinstance(body, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    return int(
+        usage.get("input_tokens")
+        or usage.get("prompt_tokens")
+        or usage.get("total_tokens")
+        or 0
+    ) or None
+
+
+def _embedding_limiter(config: dict):
+    return rate_limit.get_limiter(
+        "kb_embedding",
+        rpm=config["rpm_limit"],
+        tpm=config["tpm_limit"],
+        headroom=config["rate_headroom"],
+    )
+
+
+def _request_token_budget(config: dict) -> int:
+    return max(
+        1,
+        int(
+            int(config["tpm_limit"])
+            * float(config["rate_headroom"])
+            / 60.0
+        ),
+    )
+
+
 def _trim_text(text: str, max_tokens: int | None = None) -> str:
     if max_tokens is None:
         max_tokens = _runtime_config()["max_tokens"]
@@ -92,16 +146,38 @@ def _trim_text(text: str, max_tokens: int | None = None) -> str:
     return text
 
 
+def _prepared_inputs(batch: List[str], config: dict) -> List[str]:
+    inputs = [_trim_text(t, config["max_tokens"]) for t in batch]
+    budget = _request_token_budget(config)
+    estimate = _rate_limit_token_estimate(inputs)
+    if estimate <= budget:
+        return inputs
+    if len(inputs) != 1:
+        raise ValueError(
+            f"embedding batch token estimate {estimate} exceeds TPS budget {budget}"
+        )
+    text = inputs[0]
+    while text and _rate_limit_token_estimate([text]) > budget:
+        estimate = _rate_limit_token_estimate([text])
+        ratio = budget / float(estimate)
+        text = text[: max(1, int(len(text) * ratio) - 16)]
+    return [text]
+
+
 def _post_embeddings(batch: List[str], config: dict) -> List[List[float]]:
     if not (config["api_key"] and config["base_url"] and config["model"]):
         raise RuntimeError("mykey.py 需要配置 kb_embedding_config.apikey/apibase/model")
+    inputs = _prepared_inputs(batch, config)
     body = provider_http.embeddings(
         model=config["model"],
-        inputs=[_trim_text(t, config["max_tokens"]) for t in batch],
+        inputs=inputs,
         base=config["base_url"],
         key=config["api_key"],
         timeout=config["timeout"],
         retries=config["retries"],
+        rate_limiter=_embedding_limiter(config),
+        estimated_tokens=_rate_limit_token_estimate(inputs),
+        usage_tokens=_usage_input_tokens,
     )
     _add_api_tokens("dense", body)
     rows = sorted(body.get("data") or [], key=lambda x: x.get("index", 0))
@@ -131,11 +207,12 @@ def embed_texts(texts: Iterable[str], batch_size: int | None = None) -> List[Lis
 def _post_sparse_embeddings(batch: List[str], text_type: str, config: dict) -> List[Dict[int, float]]:
     if not (config["api_key"] and config["base_url"] and config["model"]):
         raise RuntimeError("mykey.py 需要配置 kb_embedding_config.apikey/apibase/model")
+    inputs = _prepared_inputs(batch, config)
     body = provider_http.post_json(
         "/embeddings",
         {
             "model": config["model"],
-            "input": [_trim_text(t, config["max_tokens"]) for t in batch],
+            "input": inputs,
             "dimension": config["dimension"],
             "output_type": "sparse",
             "text_type": text_type,
@@ -145,6 +222,9 @@ def _post_sparse_embeddings(batch: List[str], text_type: str, config: dict) -> L
         timeout=config["timeout"],
         retries=config["retries"],
         error_prefix="sparse embedding endpoint",
+        rate_limiter=_embedding_limiter(config),
+        estimated_tokens=_rate_limit_token_estimate(inputs),
+        usage_tokens=_usage_input_tokens,
     )
     _add_api_tokens("sparse", body)
     rows = sorted(body.get("data") or [], key=lambda x: x.get("index", 0))
@@ -190,7 +270,7 @@ def _embed_cached(texts, *, batch_size, output_type, text_type, request_fn, norm
     if not config["cache_enabled"]:
         out = []
         for _, vectors in _run_batches(
-            _make_batches(texts, batch_size),
+            _make_batches(texts, batch_size, config=config),
             request_fn,
             concurrency=config["concurrency"],
             request_interval=config["request_interval"],
@@ -208,11 +288,13 @@ def _embed_cached(texts, *, batch_size, output_type, text_type, request_fn, norm
         else:
             out[i] = normalize_fn(cached)
     if missing:
-        missing_batches = []
         size = max(1, int(batch_size))
-        for start in range(0, len(missing), size):
-            rows = missing[start:start + size]
-            missing_batches.append((start, rows))
+        missing_batches = _partition_batches(
+            missing,
+            size,
+            config=config,
+            text_getter=lambda row: row[1],
+        )
         for _, rows in _run_batches(
             [(i, [text for _idx, text, _key in rows]) for i, rows in missing_batches],
             request_fn,
@@ -267,9 +349,47 @@ def _normalize_sparse_cached(value) -> Dict[int, float]:
     return {}
 
 
-def _make_batches(texts: List[str], batch_size: int) -> List[tuple[int, List[str]]]:
+def _partition_batches(items, batch_size: int, *, config: dict, text_getter):
     size = max(1, int(batch_size))
-    return [(i, texts[i:i + size]) for i in range(0, len(texts), size)]
+    budget = _request_token_budget(config)
+    batches = []
+    current = []
+    current_tokens = 0
+    start = 0
+    for position, item in enumerate(items):
+        text = _trim_text(text_getter(item), config["max_tokens"])
+        item_tokens = _rate_limit_token_estimate([text])
+        if current and (
+            len(current) >= size or current_tokens + item_tokens > budget
+        ):
+            batches.append((start, current))
+            current = []
+            current_tokens = 0
+            start = position
+        if not current:
+            start = position
+        current.append(item)
+        current_tokens += min(item_tokens, budget)
+    if current:
+        batches.append((start, current))
+    return batches
+
+
+def _make_batches(
+    texts: List[str],
+    batch_size: int,
+    *,
+    config: dict | None = None,
+) -> List[tuple[int, List[str]]]:
+    if config is None:
+        size = max(1, int(batch_size))
+        return [(i, texts[i:i + size]) for i in range(0, len(texts), size)]
+    return _partition_batches(
+        texts,
+        batch_size,
+        config=config,
+        text_getter=lambda text: text,
+    )
 
 
 def _run_batches(batches, fn, *, concurrency=1, request_interval=0.0):
@@ -322,6 +442,9 @@ def embedding_meta() -> dict:
         "dimension": config["dimension"],
         "batch_size": config["batch_size"],
         "concurrency": config["concurrency"],
+        "rpm_limit": config["rpm_limit"],
+        "tpm_limit": config["tpm_limit"],
+        "rate_headroom": config["rate_headroom"],
     }
 
 
@@ -335,4 +458,7 @@ def sparse_embedding_meta() -> dict:
         "output_type": "sparse",
         "batch_size": config["batch_size"],
         "concurrency": config["concurrency"],
+        "rpm_limit": config["rpm_limit"],
+        "tpm_limit": config["tpm_limit"],
+        "rate_headroom": config["rate_headroom"],
     }

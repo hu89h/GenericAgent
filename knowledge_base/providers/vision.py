@@ -8,7 +8,7 @@ import os
 import re
 from typing import Dict
 
-from . import provider_http, provider_settings
+from . import provider_http, provider_settings, rate_limit
 
 
 def _config() -> Dict[str, object]:
@@ -25,8 +25,17 @@ def _config() -> Dict[str, object]:
         "api_key": cfg.get("apikey") or "",
         "model": cfg.get("model") or "",
         "timeout": int(cfg.get("read_timeout") or cfg.get("timeout") or 120),
-        "retries": int(cfg.get("max_retries") or 2),
+        "retries": int(cfg.get("max_retries") or 4),
         "max_tokens": int(cfg.get("max_tokens") or 8192),
+        "rpm_limit": max(1, int(os.environ.get("GA_KB_VLM_RPM", "30000"))),
+        "tpm_limit": max(1, int(os.environ.get("GA_KB_VLM_TPM", "5000000"))),
+        "rate_headroom": min(
+            0.95,
+            max(0.1, float(os.environ.get("GA_KB_VLM_RATE_HEADROOM", "0.8"))),
+        ),
+        "token_reserve": max(
+            1, int(os.environ.get("GA_KB_VLM_TOKEN_RESERVE", "12000"))
+        ),
     }
 
 
@@ -235,6 +244,26 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
     cfg = _config()
     if not (cfg["api_key"] and cfg["base_url"] and cfg["model"]):
         raise RuntimeError("mykey.py 需要配置支持视觉输入的模型（kb_vision_config 或 native_oai_*）")
+    limiter = rate_limit.get_limiter(
+        "kb_vlm",
+        rpm=cfg["rpm_limit"],
+        tpm=cfg["tpm_limit"],
+        headroom=cfg["rate_headroom"],
+    )
+
+    def usage_tokens(response: dict) -> int | None:
+        usage = response.get("usage") if isinstance(response, dict) else None
+        if not isinstance(usage, dict):
+            return None
+        return int(
+            usage.get("total_tokens")
+            or (
+                int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                + int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+            )
+            or 0
+        ) or None
+
     body = provider_http.chat_completions(
         model=cfg["model"],
         messages=[
@@ -251,6 +280,9 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
         timeout=cfg["timeout"],
         retries=cfg["retries"],
         extra={"temperature": 0, "max_tokens": cfg["max_tokens"]},
+        rate_limiter=limiter,
+        estimated_tokens=cfg["token_reserve"],
+        usage_tokens=usage_tokens,
     )
     choice = body["choices"][0]
     content = choice["message"]["content"]

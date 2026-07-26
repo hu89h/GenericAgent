@@ -29,7 +29,7 @@ ZVEC_QUERY_FACTOR = max(1, int(os.environ.get("GA_KB_ZVEC_QUERY_FACTOR", "4")))
 ZVEC_VECTOR_WEIGHT = float(os.environ.get("GA_KB_VECTOR_WEIGHT", "1.2"))
 ZVEC_SPARSE_WEIGHT = float(os.environ.get("GA_KB_SPARSE_WEIGHT", "1.0"))
 IMAGE_ANALYSIS_CONCURRENCY = max(
-    1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY", "1"))
+    1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY", "8"))
 )
 
 CONFIG_PATH = config.CONFIG_PATH

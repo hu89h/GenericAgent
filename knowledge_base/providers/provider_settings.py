@@ -118,7 +118,7 @@ def vision_config() -> Dict[str, Any]:
     apikey = str(pick("apikey", "api_key", env="GA_KB_VISION_API_KEY")).strip()
     model = str(pick("model", env="GA_KB_VISION_MODEL")).strip()
     timeout = int(pick("read_timeout", "timeout", default=120) or 120)
-    retries = int(pick("max_retries", default=2) or 2)
+    retries = int(pick("max_retries", default=4) or 4)
     max_tokens = int(
         pick("max_tokens", env="GA_KB_VISION_MAX_TOKENS", default=8192) or 8192
     )

@@ -43,6 +43,19 @@
 #
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── 知识库向量模型（可选）──────────────────────────────────────────────────────
+# kb_embedding_config = {
+#     'apikey': '<your-embedding-api-key>',
+#     'apibase': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+#     'model': 'text-embedding-v4',
+#     'dimension': 1024,
+#     'batch_size': 10,
+#     'concurrency': 10,
+#     'max_retries': 4,
+# }
+# 默认按 RPM=1800、TPM=1200000 的 80% 预算限流；可通过
+# GA_KB_EMBED_RPM / GA_KB_EMBED_TPM / GA_KB_EMBED_RATE_HEADROOM 调整。
+
 # ── MinerU 知识库导入（可选）──────────────────────────────────────────────────
 # 非 Markdown 文件会在导入知识库时自动提交 MinerU；
 # 超过 200 页的 PDF 会在提交前被拒绝，请先手动拆分后再导入；
@@ -66,7 +79,10 @@
 #     # 'apikey': '<your-vision-api-key>',
 #     # 'model': '<vision-capable-model>',
 #     # 'max_tokens': 8192,  # 复杂图表描述的最大输出长度
+#     # 'max_retries': 4,
 # }
+# 构建期图片分析默认并发 8，并按 RPM=30000、TPM=5000000 的 80% 预算限流；
+# 可通过 GA_KB_IMAGE_CONCURRENCY、GA_KB_VLM_* 环境变量调整。
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  运行时参数调整：在 GA REPL 里输入
