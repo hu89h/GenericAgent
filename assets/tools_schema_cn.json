@@ -11,7 +11,7 @@
   }},
   {"type": "function", "function": {
     "name": "file_read",
-    "description": "读取文件内容。建议在修改文件前先读取，以确保获取最新的上下文和行号。支持分页读取或关键字搜索",
+    "description": "读取文件内容。文本支持分页或关键字搜索；图片会作为原生多模态输入加入下一轮。只有当任务确实需要判断视觉内容时才读取图片，不要为确认文件存在而调用",
     "parameters": {"type": "object", "properties": {
       "path": {"type": "string", "description": "文件相对或绝对路径"},
       "start": {"type": "integer", "description": "起始行号（从 1 开始）"},

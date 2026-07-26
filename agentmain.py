@@ -1,4 +1,5 @@
 import os, sys, threading, queue, time, json, re, random, locale, glob
+import multimodal
 os.environ.setdefault('GA_LANG', 'zh' if any(k in (locale.getlocale()[0] or '').lower() for k in ('zh', 'chinese')) else 'en')
 if sys.stdout is None: sys.stdout = open(os.devnull, "w")
 elif hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(errors='replace')
@@ -124,9 +125,30 @@ class GenericAgent:
             except Exception: pass
             
     def put_task(self, query, source="user", images=None):
+        image_blocks = multimodal.normalize_image_inputs(images)
+        if image_blocks and not getattr(self.llmclient, "supports_image_blocks", False):
+            raise multimodal.ImageContentError(
+                "vision_model_required",
+                "current model has not been verified for image input",
+            )
         display_queue = queue.Queue()
-        self.task_queue.put({"query": query, "source": source, "images": images or [], "output": display_queue})
+        self.task_queue.put({"query": query, "source": source, "images": image_blocks, "output": display_queue})
         return display_queue
+
+    @staticmethod
+    def _initial_user_content(query, image_blocks):
+        if not image_blocks:
+            return None
+        clean_query = re.sub(r"\[Image\s+#\d+(?::[^\]]*)?\]", "", str(query or ""), flags=re.I)
+        clean_query = re.sub(r"[ \t]+\n", "\n", clean_query).strip()
+        clean_query = re.sub(r"[ \t]{2,}", " ", clean_query)
+        content = [{"type": "text", "text": clean_query or "."}]
+        for block in image_blocks:
+            content.extend([
+                {"type": "text", "text": f"[Image: {block.get('name') or 'image'}]"},
+                dict(block),
+            ])
+        return content
 
     # i know it is dangerous, but raw_query is dangerous enough it doesn't enlarge
     def _handle_slash_cmd(self, raw_query, display_queue):
@@ -149,6 +171,7 @@ class GenericAgent:
             task = self.task_queue.get()
             if isinstance(task, str): break
             raw_query, source, display_queue = task["query"], task["source"], task["output"]
+            image_blocks = task.get("images") or []
             raw_query = self._handle_slash_cmd(raw_query, display_queue)
             if raw_query is None:
                 self.task_queue.task_done(); continue
@@ -175,8 +198,12 @@ class GenericAgent:
             if self.force_non_stream:
                 self.llmclient.backend.stream = False
                 self.llmclient.backend.read_timeout = max(self.llmclient.backend.read_timeout, 1200)
-            gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query, handler, TOOLS_SCHEMA, 
-                                    max_turns=180, verbose=self.verbose, yield_info=True)
+            initial_user_content = self._initial_user_content(raw_query, image_blocks)
+            gen = agent_runner_loop(
+                self.llmclient, sys_prompt, raw_query, handler, TOOLS_SCHEMA,
+                max_turns=180, verbose=self.verbose,
+                initial_user_content=initial_user_content, yield_info=True,
+            )
             try:
                 full_resp = ""; last_pos = 0; curr_turn = 0; turn_resps = self.all_outputs[-1]["outputs"]
                 for chunk in gen:

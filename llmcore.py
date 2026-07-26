@@ -1,5 +1,6 @@
-import os, json, re, time, requests, sys, threading, urllib3, base64, importlib, uuid, pathlib, copy
+import os, json, re, time, requests, sys, threading, urllib3, importlib, uuid, pathlib, copy
 from datetime import datetime
+import multimodal
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4()); _RESP_CODEX_KEY = str(uuid.uuid4())
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -103,7 +104,7 @@ def trim_messages_history(history, sess):
     cap = sess.context_win * 3
     target = int(cap * getattr(sess, 'trim_keep_rate', 0.6))
     kp = sess.trim_keep_prefix
-    def cost(ms): return sum(len(json.dumps(m, ensure_ascii=False)) for m in ms)
+    def cost(ms): return sum(multimodal.estimated_history_chars(m) for m in ms)
     compress_history_tags(history, interval=getattr(sess, 'cut_msg_interval', 5))
     STATS.update(ctx=(c := cost(history)), msgs=len(history)); print(f'[Debug] Current context: {c} chars, {len(history)} messages.')
     if c <= cap: return
@@ -582,6 +583,7 @@ def _msgs_claude2oai(messages):
                     if src.get("type") == "base64" and src.get("data"):
                         text_parts.append({"type": "image_url", "image_url": {"url": f"data:{src.get('media_type', 'image/png')};base64,{src.get('data', '')}"}})
                 elif b.get("type") == "image_url": text_parts.append(b)
+                elif b.get("type") == "image_path": text_parts.append(multimodal.openai_image_part(b))
                 elif b.get("type") == "text" and b.get("text"): text_parts.append({"type": "text", "text": b.get("text", "")})
             if text_parts: result.append({"role": "user", "content": text_parts})
         else: result.append(msg)
@@ -626,6 +628,7 @@ class BaseSession:
         self.api_mode = 'responses' if mode in ('responses', 'response') else 'chat_completions'
         self.temperature = cfg.get('temperature', 1)
         self.max_tokens = cfg.get('max_tokens')
+        self.supports_vision = bool(cfg.get('vision', False))
         self.default_ua = "claude-cli/2.1.152 (external, cli)"
         self.user_agent = cfg.get("user_agent", self.default_ua)
     def _apply_claude_thinking(self, payload):
@@ -751,6 +754,7 @@ class NativeClaudeSession(BaseSession):
         if self.max_tokens is None: self.max_tokens = 8192
         model = self.model
         messages = _fix_messages(messages)
+        messages = multimodal.materialize_anthropic_messages(messages)
         if 'claude' in model.lower(): messages = _drop_unsigned_thinking(messages)
         messages = _ensure_thinking_blocks(messages, self.model)
         beta_parts = ["claude-code-20250219", "interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12", "thinking-token-count-2026-05-13", "context-management-2025-06-27", "prompt-caching-scope-2026-01-05", "mid-conversation-system-2026-04-07", "effort-2025-11-24", "fallback-credit-2026-06-01"]
@@ -826,6 +830,96 @@ class NativeOAISession(NativeClaudeSession):
         messages = _fix_messages(messages)
         messages = _ensure_thinking_blocks(messages, self.model)
         return (yield from _openai_stream(self, _msgs_claude2oai(messages)))
+
+
+def probe_model_vision(cfg, protocol):
+    """Verify a pending model configuration with a generated visual challenge."""
+    if not cfg.get('vision'):
+        return
+
+    import random
+    import tempfile
+    normalized_protocol = str(protocol or '').strip().lower()
+    if normalized_protocol in {'claude', 'anthropic'}:
+        session_type = NativeClaudeSession
+    elif normalized_protocol in {'oai', 'openai'}:
+        session_type = NativeOAISession
+    else:
+        raise ValueError(f"vision_probe_failed: unsupported protocol: {protocol}")
+
+    sequence = ''.join(random.SystemRandom().choice('RGB') for _ in range(8))
+    colors = {'R': (224, 48, 48), 'G': (34, 166, 84), 'B': (44, 102, 220)}
+    probe_path = ''
+    try:
+        from PIL import Image, ImageDraw
+
+        image = Image.new('RGB', (800, 180), 'white')
+        draw = ImageDraw.Draw(image)
+        for index, code in enumerate(sequence):
+            x0 = 20 + index * 97
+            draw.rectangle((x0, 25, x0 + 78, 155), fill=colors[code], outline='black', width=4)
+        handle = tempfile.NamedTemporaryFile(prefix='ga-vision-probe-', suffix='.png', delete=False)
+        probe_path = handle.name
+        handle.close()
+        image.save(probe_path, 'PNG')
+
+        probe_cfg = dict(cfg)
+        probe_cfg.update({
+            'stream': False,
+            'max_retries': min(1, max(0, int(cfg.get('max_retries', 1)))),
+            'max_tokens': 32,
+            'timeout': min(15, max(3, int(cfg.get('connect_timeout', 10)))),
+            'read_timeout': min(60, max(15, int(cfg.get('read_timeout', 45)))),
+        })
+        session = session_type(probe_cfg)
+        session.system = "You are a visual capability verifier. Follow the user's output format exactly."
+        prompt = {
+            'role': 'user',
+            'content': [
+                {
+                    'type': 'text',
+                    'text': (
+                        'Read the eight colored blocks from left to right. '
+                        'Return exactly eight uppercase letters using R for red, '
+                        'G for green, and B for blue. Return no other text.'
+                    ),
+                },
+                multimodal.image_path_block(probe_path, 'vision-probe.png'),
+            ],
+        }
+        generator = session.ask(prompt)
+        response = None
+        try:
+            while True:
+                next(generator)
+        except StopIteration as stopped:
+            response = stopped.value
+        answer = str(getattr(response, 'content', '') or '').upper()
+        if sequence not in re.findall(r'[RGB]{8}', answer):
+            compact = re.sub(r'\s+', ' ', answer).strip()[:160]
+            raise ValueError(
+                'vision_probe_failed: model did not read the verification image'
+                + (f' ({compact})' if compact else '')
+            )
+    except Exception as error:
+        message = str(error)
+        api_key = str(cfg.get('apikey') or '')
+        if api_key:
+            message = message.replace(api_key, '[redacted]')
+        message = re.sub(
+            r'(?i)(bearer|api[-_ ]?key)\s+[A-Za-z0-9._-]+',
+            r'\1 [redacted]',
+            message,
+        )
+        if message.startswith('vision_probe_failed:'):
+            raise ValueError(message[:280]) from None
+        raise ValueError(f'vision_probe_failed: {type(error).__name__}: {message[:240]}') from None
+    finally:
+        if probe_path:
+            try:
+                os.unlink(probe_path)
+            except OSError:
+                pass
 
 def openai_tools_to_claude(tools):
     """[{type:'function', function:{name,description,parameters}}] → [{name,description,input_schema}]."""
@@ -1003,8 +1097,11 @@ def _write_llm_log(label, content, log_path=None, model=''):
     os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     if model: model = f' model={model}'
+    safe_content = multimodal.safe_log_value(content)
+    if not isinstance(safe_content, str):
+        safe_content = json.dumps(safe_content, ensure_ascii=False, default=str)
     with open(log_path, 'a', encoding='utf-8', errors='replace') as f:
-        f.write(f"=== {label} === {ts}{model}\n{content}\n\n")
+        f.write(f"=== {label} === {ts}{model}\n{safe_content}\n\n")
 
 def tryparse(json_str):
     try: return json.loads(json_str)
@@ -1024,7 +1121,10 @@ class MixinSession:
         'reasoning_effort', 'service_tier', 'thinking_type',
         'thinking_budget_tokens', 'omit_thinking', 'proxies', 'verify',
     })
-    _FACADE_STATE = frozenset({'name', 'history', 'system', 'tools', 'lock'})
+    _FACADE_STATE = frozenset({
+        'name', 'history', 'system', 'tools', 'lock',
+        'supports_vision',
+    })
 
     def __init__(self, all_sessions, cfg):
         self._retries = cfg.get('max_retries', 3)
@@ -1050,6 +1150,7 @@ class MixinSession:
         self.system = primary.system
         self.tools = getattr(primary, 'tools', None)
         self.lock = threading.Lock()
+        self.supports_vision = any(getattr(s, 'supports_vision', False) for s in self._sessions)
     @property
     def primary(self): return self._sessions[0]
     @property
@@ -1080,10 +1181,21 @@ class MixinSession:
         session.tools = openai_tools_to_claude(self.tools) if self.tools and type(session) is NativeClaudeSession else self.tools
         return messages if self._native else session.make_messages(messages)
     def raw_ask(self, messages):
-        base, n = self._pick(), len(self._sessions)
+        has_images = multimodal.contains_image_paths(messages)
+        eligible = [
+            i for i, session in enumerate(self._sessions)
+            if not has_images or getattr(session, 'supports_vision', False)
+        ]
+        if not eligible:
+            error = "!!!Error: vision_model_required"
+            yield error
+            return [{"type": "text", "text": error}]
+        current = self._pick()
+        base_pos = eligible.index(current) if current in eligible else 0
+        n = len(eligible)
         test_error = lambda x: isinstance(x, str) and x.lstrip().startswith(('!!!Error:', '[Error:'))
         for attempt in range(self._retries + 1):
-            idx = (base + attempt) % n
+            idx = eligible[(base_pos + attempt) % n]
             session = self._sessions[idx]
             gen = session.raw_ask(self._prepare(idx, messages))
             print(f'[MixinSession] Using session ({session.name})')
@@ -1098,13 +1210,13 @@ class MixinSession:
             if not is_err:
                 if attempt > 0: self._cur_idx = idx; self._switched_at = time.time()
                 elif isinstance(last_chunk, str) and '[!!! 流异常中断' in last_chunk and n > 1:
-                    self._cur_idx = (idx + 1) % n; self._switched_at = time.time()
+                    self._cur_idx = eligible[(eligible.index(idx) + 1) % n]; self._switched_at = time.time()
                     print(f'[MixinSession] Partial failure, next call → s{self._cur_idx} ({self.current.name})')
                 return return_val
             if attempt >= self._retries:
                 yield last_chunk; return return_val
-            nxt = (base + attempt + 1) % n
-            if nxt == base:
+            nxt = eligible[(base_pos + attempt + 1) % n]
+            if nxt == eligible[base_pos]:
                 rnd = (attempt + 1) // n
                 delay = min(30, self._base_delay * (1.5 ** rnd))
                 print(f'[MixinSession] {last_chunk[:80]}, round {rnd} exhausted, retry in {delay:.1f}s')
@@ -1124,8 +1236,6 @@ The reply body should first include a minimal one-line (<30 words) physical snap
 """.strip()
 
 class NativeToolClient:
-    supports_image_blocks = True
-
     @staticmethod
     def _thinking_prompt(): return THINKING_PROMPT_EN if os.environ.get('GA_LANG') == 'en' else THINKING_PROMPT_ZH
     def __init__(self, backend):
@@ -1134,6 +1244,8 @@ class NativeToolClient:
         self.name = self.backend.name
         self._pending_tool_ids = []
         self.log_path = None
+    @property
+    def supports_image_blocks(self): return bool(getattr(self.backend, 'supports_vision', False))
     def set_system(self, extra_system):
         combined = f"{extra_system}\n\n{self._thinking_prompt()}" if extra_system else self._thinking_prompt()
         if combined != self.backend.system: print(f"[Debug] Updated system prompt, length {len(combined)} chars.")
@@ -1159,11 +1271,16 @@ class NativeToolClient:
             if tid not in tr_id_set: tool_result_blocks.append({"type": "tool_result", "tool_use_id": tid, "content": ""})
         self._pending_tool_ids = []
         # Filter whitespace-only text blocks that cause 400 on strict API proxies
-        filtered_content = [c for c in combined_content if c.get("text", "").strip()]
+        filtered_content = [
+            c for c in combined_content
+            if not isinstance(c, dict)
+            or c.get("type") != "text"
+            or str(c.get("text", "")).strip()
+        ]
         final_content = tool_result_blocks + filtered_content
         if not final_content: final_content = [{"type": "text", "text": "."}]
         merged = {"role": "user", "content": final_content}
-        prompt_raw = '{"role": "user", "content": [\n' + ",\n".join(json.dumps(b, ensure_ascii=False) for b in final_content) + "]}"
+        prompt_raw = json.dumps(multimodal.safe_log_value(merged), ensure_ascii=False, indent=2)
         _write_llm_log('Prompt', prompt_raw, self.log_path)
         gen = self.backend.ask(merged)
         try:

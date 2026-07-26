@@ -11,7 +11,7 @@
   }},
   {"type": "function", "function": {
     "name": "file_read",
-    "description": "Read file. Read before modify for latest context and line numbers",
+    "description": "Read text files for content and line numbers. Raster images are attached to the next native multimodal turn; read an image only when the task requires visual evidence, never merely to confirm that a file exists",
     "parameters": {"type": "object", "properties": {
       "path": {"type": "string", "description": "Relative or absolute"},
       "start": {"type": "integer", "description": "Start line number (1-based)"},

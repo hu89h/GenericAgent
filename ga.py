@@ -2,6 +2,7 @@ import sys, os, re, json, time, threading, importlib, webbrowser
 from datetime import datetime
 from pathlib import Path
 import tempfile, traceback, subprocess, itertools, collections, difflib, shutil
+import multimodal
 if sys.stdout is None: sys.stdout = open(os.devnull, "w")
 if sys.stderr is None: sys.stderr = open(os.devnull, "w")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -295,6 +296,39 @@ class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
         self._pending_inline_blocks = []
         return blocks
 
+    def queue_image_for_next_turn(self, path, *, name="", context=""):
+        if not getattr(self.parent.llmclient, "supports_image_blocks", False):
+            return None, {
+                "error_code": "vision_model_required",
+                "error": "current model has not been verified for image input",
+            }
+        injected = sum(
+            1 for block in self._pending_inline_blocks
+            if isinstance(block, dict) and block.get("type") == "image_path"
+        )
+        if injected >= multimodal.MAX_TOOL_IMAGES_PER_TURN:
+            return None, {
+                "error_code": "image_count_exceeded",
+                "error": f"at most {multimodal.MAX_TOOL_IMAGES_PER_TURN} tool images can be viewed in one turn",
+            }
+        try:
+            prepared = multimodal.prepare_image(path)
+            block = multimodal.image_path_block(path, name or prepared.name)
+        except multimodal.ImageContentError as error:
+            return None, {"error_code": error.code, "error": str(error)}
+        if context:
+            self._pending_inline_blocks.append({"type": "text", "text": str(context)})
+        self._pending_inline_blocks.append(block)
+        return {
+            "kind": "image",
+            "name": block["name"],
+            "media_type": prepared.media_type,
+            "width": prepared.width,
+            "height": prepared.height,
+            "encoded_bytes": prepared.encoded_bytes,
+            "attach_status": "attached",
+        }, None
+
     def _get_tool_maxlen(self, l, args, growth_rate=1.0):
         multiplier = 1 + (self.parent.get_ctx_multiplier() - 1) * growth_rate
         return int(l * multiplier / args.get('_tool_num', 1))
@@ -435,6 +469,19 @@ class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
         '''读取文件内容。从第start行开始读取。如有keyword则返回第一个keyword(忽略大小写)周边内容'''
         path = self._get_abs_path(args.get("path", ""))
         yield f"\n[Action] Reading file: {path}\n"
+        if multimodal.is_raster_image_path(path):
+            result, error = self.queue_image_for_next_turn(
+                path,
+                context=(
+                    "[Local image] Inspect the following image directly. "
+                    "Use it only for visual facts required by the current task."
+                ),
+            )
+            next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+            if error:
+                return StepOutcome(error, next_prompt=next_prompt)
+            yield "[Info] Image attached to the next model turn.\n"
+            return StepOutcome(result, next_prompt=next_prompt)
         start = _arg(args, "start", 1, int)
         count = _arg(args, "count", 200, int)
         keyword = args.get("keyword")
