@@ -36,7 +36,7 @@ ALLOWED   = {str(x).strip() for x in mykeys.get("wecom_allowed_users", []) if st
 PORT      = 19531                # single-instance lock port
 TEMP_DIR  = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp")
 MEDIA_DIR = os.path.join(TEMP_DIR, "media")
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@ class WeComApp(AgentChatMixin):
             await self.send_media(chat_id, fp)
 
     # ── agent execution (single-channel via turn hook) ──────────────
-    async def run_agent(self, chat_id, text, **_):
+    async def run_agent(self, chat_id, text, *, images=None, **_):
         state = {"running": True}
         self.user_tasks[chat_id] = state
         done_event = threading.Event()
@@ -184,7 +184,7 @@ class WeComApp(AgentChatMixin):
         try:
             await self.send_text(chat_id, "🤔 思考中...")
             self._register_hook(hook_key, _on_turn)
-            self.agent.put_task(f"{FILE_HINT}\n\n{text}", source=self.source)
+            self.agent.put_task(f"{FILE_HINT}\n\n{text}", source=self.source, images=images or None)
 
             # Wait for: hook signals done / user stops / agent crashes
             t0 = time.time()
@@ -245,8 +245,17 @@ class WeComApp(AgentChatMixin):
         try:
             _tprint(f"[{_ts()}] {icon} {key.title()} from {sender_id}" + (f": {fname}" if fname else ""))
             path = await self._save_media(url, info.get("aeskey", ""), default)
-            label = "一张图片" if key == "image" else f"文件 {os.path.basename(path)}"
-            asyncio.create_task(self.run_agent(chat_id, f"[用户发送了{label}，已保存到: {path}]"))
+            if key == "image":
+                asyncio.create_task(self.run_agent(
+                    chat_id,
+                    f"[Image: {os.path.basename(path)}]",
+                    images=[path],
+                ))
+            else:
+                asyncio.create_task(self.run_agent(
+                    chat_id,
+                    f"[用户发送了文件 {os.path.basename(path)}，已保存到: {path}]",
+                ))
         except Exception as e:
             print(f"[WeCom] on_{key} error: {e}")
             await self.send_text(chat_id, f"❌ {key}处理失败: {e}")

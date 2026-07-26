@@ -1,0 +1,145 @@
+import json
+import inspect
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+from PIL import Image
+from aiohttp import web
+
+from frontends import desktop_bridge
+import llmcore
+
+
+class DesktopMultimodalTests(unittest.TestCase):
+    def test_build_cfg_persists_explicit_vision_state(self):
+        manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
+        cfg = manager._build_cfg({
+            "apikey": "secret",
+            "apibase": "https://example.test/v1",
+            "model": "model",
+            "vision": True,
+        })
+        self.assertIs(cfg["vision"], True)
+
+    def test_visual_probe_uses_pending_config_and_requires_correct_sequence(self):
+        response = SimpleNamespace(content="RRRRRRRR")
+
+        class FakeSession:
+            def __init__(self, cfg):
+                self.cfg = cfg
+                self.system = ""
+
+            def ask(self, message):
+                self.message = message
+                if False:
+                    yield None
+                return response
+
+        with mock.patch("random.SystemRandom.choice", return_value="R"), \
+             mock.patch("llmcore.NativeOAISession", FakeSession):
+            llmcore.probe_model_vision({
+                "apikey": "pending-key",
+                "apibase": "https://example.test/v1",
+                "model": "pending-model",
+                "vision": True,
+            }, "oai")
+
+        response.content = "BBBBBBBB"
+        with mock.patch("random.SystemRandom.choice", return_value="R"), \
+             mock.patch("llmcore.NativeOAISession", FakeSession), \
+             self.assertRaisesRegex(ValueError, "vision_probe_failed"):
+            llmcore.probe_model_vision({
+                "apikey": "pending-key",
+                "apibase": "https://example.test/v1",
+                "model": "pending-model",
+                "vision": True,
+            }, "oai")
+
+    def test_failed_visual_probe_does_not_write_model_config(self):
+        manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
+        manager.ga_root = str(Path(__file__).resolve().parents[1])
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "mykey.py"
+            target.write_text("# unchanged\n", encoding="utf-8")
+            manager._mykey_file = lambda: target
+            with mock.patch("llmcore.probe_model_vision", side_effect=ValueError("vision_probe_failed: rejected")), \
+                 self.assertRaisesRegex(ValueError, "vision_probe_failed"):
+                manager.add_model_profile({
+                    "protocol": "oai",
+                    "apikey": "pending-key",
+                    "apibase": "https://example.test/v1",
+                    "model": "pending-model",
+                    "vision": True,
+                })
+            self.assertEqual(target.read_text(encoding="utf-8"), "# unchanged\n")
+
+    def test_desktop_prompt_contract_has_no_legacy_images_argument(self):
+        parameters = inspect.signature(desktop_bridge.AgentManager.submit_prompt).parameters
+        self.assertNotIn("images", parameters)
+        self.assertFalse(hasattr(desktop_bridge, "normalize_prompt"))
+
+    def test_unverified_profile_rejects_images_before_persistence(self):
+        manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
+        manager.config = {}
+        manager.list_model_profiles = lambda: [{
+            "id": 0, "vision": False, "visionVerified": False,
+        }]
+        session = desktop_bridge.Session(id="s", llm_no=0)
+        with self.assertRaises(web.HTTPBadRequest) as error:
+            manager._require_session_vision(session, [{"path": "image.png"}])
+        payload = json.loads(error.exception.text)
+        self.assertEqual(payload["error"], "vision_model_unverified")
+
+    def test_desktop_image_paths_must_be_under_upload_root_and_decode(self):
+        manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
+        manager.ga_root = str(Path(__file__).resolve().parents[1])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            image = root / "good.png"
+            Image.new("RGB", (4, 3), "red").save(image)
+            with mock.patch.object(desktop_bridge, "_WEB_UPLOAD_DIR", root):
+                value = manager._validated_prompt_images([{"path": str(image), "name": "good.png"}])
+                self.assertEqual(value[0]["path"], str(image.resolve()))
+
+                outside = root.parent / "outside.png"
+                Image.new("RGB", (2, 2), "blue").save(outside)
+                try:
+                    with self.assertRaises(web.HTTPBadRequest):
+                        manager._validated_prompt_images([{"path": str(outside)}])
+                finally:
+                    outside.unlink(missing_ok=True)
+
+    def test_session_persistence_contains_image_references_not_base64(self):
+        manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
+        manager.lock = __import__("threading").RLock()
+        with tempfile.TemporaryDirectory() as temp:
+            manager._sessions_dir = Path(temp)
+            image = Path(temp) / "image.png"
+            Image.new("RGB", (2, 2), "red").save(image)
+            session = desktop_bridge.Session(
+                id="session-test",
+                messages=[{"role": "user", "content": "look", "images": [{"path": str(image), "name": "image.png"}]}],
+                llm_history=[{"role": "user", "content": [{"type": "image_path", "path": str(image), "name": "image.png"}]}],
+            )
+            manager._persist_session(session)
+            raw = manager._session_file(session.id).read_text(encoding="utf-8")
+            self.assertIn('"image_path"', raw)
+            self.assertNotIn("data:image", raw)
+            self.assertNotIn("base64", raw)
+
+    def test_missing_visible_session_image_becomes_explicit_text(self):
+        messages = [{
+            "role": "user",
+            "content": "look",
+            "images": [{"path": "Z:/missing/image.png", "name": "image.png"}],
+        }]
+        restored = desktop_bridge.AgentManager._restored_session_messages(messages)
+        self.assertEqual(restored[0]["images"], [])
+        self.assertIn("no longer available", restored[0]["content"])
+
+
+if __name__ == "__main__":
+    unittest.main()

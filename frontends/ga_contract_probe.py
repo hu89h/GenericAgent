@@ -57,7 +57,7 @@ def _probe(ga_root: str) -> dict:
     if callable(put_task):
         try:
             params = inspect.signature(put_task).parameters
-            # bridge calls put_task(prompt, images=[]); conductor calls put_task(msg, source=...)
+            # Image-capable frontends pass references separately; conductor sets source.
             if "source" not in params:
                 missing.append("GenericAgent.put_task(source=)")
             if "images" not in params:

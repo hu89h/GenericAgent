@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-import math, os, sys, json, glob, re, base64, time, threading
+import math, os, sys, json, glob, re, time, threading
 import queue as _queue
 from datetime import datetime
 from typing import Optional
@@ -28,6 +28,7 @@ from PySide6.QtGui import (
 )
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import multimodal
 from agentmain import GeneraticAgent
 from chatapp_common import FILE_HINT, HELP_TEXT, clean_reply, build_done_text, format_restore
 
@@ -460,18 +461,18 @@ def _save_history(history: list):
 def _build_prompt_with_uploads(prompt: str, files: list) -> tuple:
     """
     files: list of {'name': str, 'type': str, 'raw': bytes}
-    returns (full_prompt, display_prompt, display_attachments)
+    returns (full_prompt, display_prompt, image_refs)
     """
     if not files:
         return prompt, prompt, []
 
     os.makedirs("temp/uploaded", exist_ok=True)
-    attachment_chunks = ["\n\n[用户上传附件 — 文件已保存到本地磁盘，可用 file_read 工具读取]"]
-    display_attachments = []
+    attachment_chunks = []
+    image_refs = []
     img_count, file_names = 0, []
 
     for f in files:
-        raw, name, mime = f["raw"], f["name"], f.get("type", "")
+        raw, name = f["raw"], f["name"]
         size = len(raw)
         ext = os.path.splitext(name)[1].lower()
         safe = re.sub(r"[^A-Za-z0-9._\-]", "_", name)
@@ -485,27 +486,24 @@ def _build_prompt_with_uploads(prompt: str, files: list) -> tuple:
         except Exception:
             saved = "(保存失败)"
 
-        if mime.startswith("image/"):
-            b64 = base64.b64encode(raw).decode()
-            attachment_chunks.append(
-                f"\n- [图片附件] {name} ({size} bytes)\n  磁盘路径: {saved}"
-                f"\n  data:{mime};base64,{b64}"
-            )
-            display_attachments.append({"type": "image", "name": name})
+        if multimodal.is_raster_image_path(name) and saved != "(保存失败)":
+            image_refs.append({"path": os.path.abspath(saved), "name": name})
             img_count += 1
         elif ext in TEXT_FILE_EXTS:
+            if not attachment_chunks:
+                attachment_chunks.append("\n\n[用户上传附件 — 文件已保存到本地磁盘，可用 file_read 工具读取]")
             text = raw.decode("utf-8", errors="replace")
             attachment_chunks.append(
                 f"\n--- 文本文件: {name} ({size} bytes) ---\n磁盘路径: {saved}\n{text[:MAX_INLINE_CHARS]}"
                 + ("\n[内容已截断，请用 file_read 读取完整内容]" if len(text) > MAX_INLINE_CHARS else "")
             )
-            display_attachments.append({"type": "file", "name": name})
             file_names.append(name)
         else:
+            if not attachment_chunks:
+                attachment_chunks.append("\n\n[用户上传附件 — 文件已保存到本地磁盘，可用 file_read 工具读取]")
             attachment_chunks.append(
                 f"\n- 文件: {name} ({size} bytes)\n  磁盘路径: {saved}"
             )
-            display_attachments.append({"type": "file", "name": name})
             file_names.append(name)
 
     parts = []
@@ -514,7 +512,7 @@ def _build_prompt_with_uploads(prompt: str, files: list) -> tuple:
     if file_names:
         parts.append(f"{len(file_names)} 个文件（{'、'.join(file_names)}）")
     display_prompt = f"{prompt}\n\n📎 已附带：{'，'.join(parts)}" if parts else prompt
-    return prompt + "\n".join(attachment_chunks), display_prompt, display_attachments
+    return prompt + "\n".join(attachment_chunks), display_prompt, image_refs
 
 
 # ── small reusable widgets ────────────────────────────────────────────────────
@@ -1992,7 +1990,16 @@ class ChatPanel(QWidget):
             return
 
         prompt = text or "请分析我上传的附件。"
-        full_prompt, display_prompt, _ = _build_prompt_with_uploads(prompt, files)
+        full_prompt, display_prompt, image_refs = _build_prompt_with_uploads(prompt, files)
+        try:
+            display_queue = self.agent.put_task(
+                f"{FILE_HINT}\n\n{full_prompt}",
+                source="user",
+                images=image_refs or None,
+            )
+        except multimodal.ImageContentError as error:
+            QMessageBox.warning(self, "图片无法发送", str(error))
+            return
 
         # Clear input state
         self._input.clear()
@@ -2025,7 +2032,7 @@ class ChatPanel(QWidget):
         self._set_stop_mode()
         self._streaming_badge.show()
 
-        self._display_queue = self.agent.put_task(f"{FILE_HINT}\n\n{full_prompt}", source="user")
+        self._display_queue = display_queue
         self._poll_timer.start(40)
 
     def _handle_command(self, cmd: str):

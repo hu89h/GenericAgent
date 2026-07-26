@@ -3702,7 +3702,7 @@ function msgNode(msg) {
   if (msg.role === 'user') {
     const shown = (typeof msg.display === 'string' && msg.display.length) ? msg.display : msg.content;
     const imgsHtml = (msg.images && msg.images.length)
-      ? `<div class="user-imgs">${msg.images.map(im => `<img src="${im.dataUrl || uploadRawUrl(im.path)}" data-path="${escapeHtml(im.path || '')}" alt="">`).join('')}</div>`
+      ? `<div class="user-imgs">${msg.images.map(im => `<img src="${uploadRawUrl(im.path)}" data-path="${escapeHtml(im.path || '')}" alt="">`).join('')}</div>`
       : '';
     const filesHtml = (msg.files && msg.files.length)
       ? `<div class="user-files">${msg.files.map(f => {
@@ -3749,7 +3749,7 @@ function msgNode(msg) {
 function collabItemToMsg(item) {
   const attach = arr => (arr || []).map(x => {
     const sid = x.sid != null ? x.sid : (String(x.id || '').startsWith('f-') ? String(x.id).slice(2) : x.id);
-    return { id: 'f-' + sid, name: x.name, path: x.path, dataUrl: x.dataUrl };
+    return { id: 'f-' + sid, name: x.name, path: x.path };
   });
   if (item.role === 'user') {
     return { role: 'user', content: item.msg, display: item.msg, images: attach(item.images), files: attach(item.files) };
@@ -4470,7 +4470,9 @@ function normalize(m) {
   if (m.role !== 'assistant') o.content = m.content || '';
   if (typeof m.display === 'string' && m.display.length) o.display = m.display;
   if (m.stopped) o.stopped = true;
-  if (m.images) o.images = m.images;
+  if (m.images) o.images = m.images.map(image => ({
+    id: image.id, name: image.name, path: image.path,
+  }));
   if (m.files) o.files = m.files;
   if (Array.isArray(m.citations)) o.citations = m.citations;
   if (m.ts) o.ts = m.ts;
@@ -4752,11 +4754,29 @@ function setMsgLoading(on) {
 function setComposerLocked(on) {
   if (composerEl) composerEl.classList.toggle('is-locked', !!on);
   if (inputEl) inputEl.contentEditable = on ? 'false' : 'true';  // contenteditable 无 readOnly,改切 contentEditable
-  if (sendBtn) {
-    sendBtn.disabled = !!on;
-    sendBtn.classList.toggle('is-busy', !!on);
-    sendBtn.setAttribute('aria-busy', on ? 'true' : 'false');
-  }
+  if (sendBtn) sendBtn.classList.toggle('is-busy', !!on);
+  if (sendBtn) sendBtn.setAttribute('aria-busy', on ? 'true' : 'false');
+  syncVisionSendState();
+}
+
+function activeModelSupportsImages() {
+  const profile = (state.modelProfiles || []).find(p => (p.id ?? 0) === state.llmNo);
+  return !!(profile?.vision && profile?.visionVerified);
+}
+
+function composerUsesImages() {
+  return !!composerCfg('chat').input?.querySelector('.ph-chip[data-kind="image"]');
+}
+
+function syncVisionSendState({ notify = false } = {}) {
+  if (!sendBtn) return;
+  const blocked = composerUsesImages() && !activeModelSupportsImages();
+  const wasBlocked = sendBtn.dataset.visionBlocked === '1';
+  sendBtn.dataset.visionBlocked = blocked ? '1' : '0';
+  const locked = !!composerEl?.classList.contains('is-locked');
+  sendBtn.disabled = locked || blocked;
+  sendBtn.title = blocked ? t('err.visionRequired') : '';
+  if (blocked && notify && !wasBlocked) showChanToast(t('err.visionRequired'), '', 'err');
 }
 
 /** stapp.py 同款：运行中再发 → cancel 当前轮次，等 idle 后再提交新 prompt */
@@ -4795,15 +4815,19 @@ async function sendPrompt(text) {
   if (!state.bridgeReady) { showError(t('err.bridge')); return false; }
   if (!state.activeId) { await newSession(); if (!state.activeId) return false; }
   const sess = activeSess(); const r = rt(sess);
+  const usedFiles = collectUsedFiles(text);
+  const previewImgs = usedFiles.filter(f => f.isImage).map(f => ({ id: 'f-' + f.sid, name: f.name, path: f.path }));
+  if (previewImgs.length && !activeModelSupportsImages()) {
+    syncVisionSendState({ notify: true });
+    return false;
+  }
   if (r.busy) {
     const interrupted = await interruptBeforeSend(sess);
     if (!interrupted) return false;
   }
   // PLAN/AUTO 现在是预设功能（preset 卡片）一次性发送，不再是常驻 prefix
   const composedPrompt = expandFilePlaceholders(text).trim();
-  const usedFiles = collectUsedFiles(text);
   const userMsg = { role: 'user', content: text, ts: Date.now() / 1000 };
-  const previewImgs = usedFiles.filter(f => f.isImage).map(f => ({ id: 'f-' + f.sid, name: f.name, path: f.path, dataUrl: f.dataUrl || '' }));
   if (previewImgs.length) userMsg.images = previewImgs;
   const previewFiles = usedFiles.filter(f => !f.isImage).map(f => ({ id: 'f-' + f.sid, name: f.name, path: f.path }));
   if (previewFiles.length) userMsg.files = previewFiles;
@@ -4829,7 +4853,7 @@ async function sendPrompt(text) {
       }
     }
     const res = await window.ga.rpc('session/prompt', { sessionId: sid, prompt: composedPrompt, display: text,
-      files: previewFiles, imageMetas: previewImgs.map(im => ({ name: im.name, path: im.path })) });
+      files: previewFiles, imageMetas: previewImgs.map(im => ({ id: im.id, name: im.name, path: im.path })) });
     if (res?.error) throw new Error(res.error.message || res.error);
     removeUsedPendingFiles(usedFiles);
     const uid = Number(res.userMessageId || res.result?.userMessageId || 0);
@@ -5058,8 +5082,19 @@ document.querySelectorAll('.feature-grid').forEach(grid => {
 /* ═══════════════ 模型 / 设置 ═══════════════ */
 function updateModelChip() {
   const name = state.modelName || '';
-  if (modelNameEl) modelNameEl.textContent = name;
-  if (collabModelNameEl) collabModelNameEl.textContent = state.conductorModelName || name;
+  const profile = (state.modelProfiles || []).find(p => (p.id ?? 0) === state.llmNo);
+  const conductorProfile = (state.modelProfiles || []).find(p => (p.id ?? 0) === state.conductorLlmNo);
+  const labelWithCapability = (label, item) => {
+    const badge = item?.vision && item?.visionVerified
+      ? `<span class="model-vision-badge" title="${escapeHtml(t('model.visionBadge'))}">${GA_ICON('crosshair')}</span>`
+      : '';
+    return `${escapeHtml(label || '')}${badge}`;
+  };
+  if (modelNameEl) modelNameEl.innerHTML = labelWithCapability(name, profile);
+  if (collabModelNameEl) collabModelNameEl.innerHTML = labelWithCapability(
+    state.conductorModelName || name, conductorProfile || profile,
+  );
+  syncVisionSendState();
 }
 function modelDisplayName(p, fallbackName) {
   if (p && p.kind === 'mixin') {
@@ -5224,7 +5259,7 @@ const PROVIDER_PRESETS = {
   deepseek: {
     label: 'DeepSeek', descKey: 'pq.deepseekDesc',
     protocol: 'oai', apibase: 'https://api.deepseek.com/v1',
-    model: 'deepseek-v4-pro', name: 'DeepSeek',
+    model: 'deepseek-v4-pro', name: 'DeepSeek', vision: false,
     keyUrl: 'https://platform.deepseek.com/api_keys',
     color: '#4D6BFE', tint: 'rgba(77,107,254,.12)',
     logo: '<svg viewBox="0 0 24 24" fill="#4D6BFE" xmlns="http://www.w3.org/2000/svg"><path d="M23.748 4.651c-.254-.124-.364.113-.512.233-.051.04-.094.09-.137.137-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.155-.708-.311-.955-.65-.172-.24-.219-.509-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.094.172.187.129.323-.082.28-.18.553-.266.833-.055.179-.137.218-.328.14a5.5 5.5 0 0 1-1.737-1.179c-.857-.828-1.631-1.743-2.597-2.46a12 12 0 0 0-.689-.47c-.985-.957.13-1.743.387-1.836.27-.098.094-.433-.778-.428-.872.003-1.67.295-2.687.685a3 3 0 0 1-.465.136 9.6 9.6 0 0 0-2.883-.101c-1.885.21-3.39 1.1-4.497 2.622C.082 8.776-.231 10.854.152 13.02c.403 2.284 1.568 4.175 3.36 5.653 1.857 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.132-.284 4.994-1.86.47.234.962.328 1.78.398.629.058 1.235-.031 1.705-.129.735-.155.684-.836.418-.961-2.155-1.004-1.682-.595-2.112-.926 1.095-1.295 2.768-3.598 3.284-6.733.05-.346.115-.834.108-1.114-.004-.171.035-.238.23-.257a4.2 4.2 0 0 0 1.545-.475c1.397-.763 1.96-2.016 2.093-3.517.02-.23-.004-.467-.247-.588M11.58 18.168c-2.088-1.642-3.101-2.183-3.52-2.16-.39.024-.32.472-.234.763.09.288.207.487.371.74.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.168-1.361-.801-2.5-1.86-3.301-3.306-.775-1.393-1.225-2.888-1.299-4.482-.02-.385.094-.522.477-.592a4.7 4.7 0 0 1 1.53-.038c2.131.311 3.946 1.264 5.467 2.774.868.86 1.525 1.887 2.202 2.89.72 1.066 1.494 2.082 2.48 2.915.348.291.626.513.892.677-.802.09-2.14.109-3.055-.615zm1.001-6.44a.306.306 0 0 1 .415-.287.3.3 0 0 1 .113.074.3.3 0 0 1 .086.214c0 .17-.136.307-.308.307a.303.303 0 0 1-.306-.307m3.11 1.596c-.2.081-.4.151-.591.16a1.25 1.25 0 0 1-.798-.254c-.274-.23-.47-.358-.551-.758a1.7 1.7 0 0 1 .015-.588c.07-.327-.007-.537-.238-.727-.188-.156-.426-.199-.689-.199a.6.6 0 0 1-.254-.078.253.253 0 0 1-.114-.358 1 1 0 0 1 .192-.21c.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.392.451.462.576.685.915.176.264.336.536.446.848.066.194-.02.353-.25.45"/></svg>',
@@ -5232,7 +5267,7 @@ const PROVIDER_PRESETS = {
   qwen: {
     label: '通义千问', descKey: 'pq.qwenDesc',
     protocol: 'oai', apibase: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    model: 'qwen3.6-max-preview', name: '通义千问',
+    model: 'qwen3.6-max-preview', name: '通义千问', vision: true,
     keyUrl: 'https://bailian.console.aliyun.com/?apiKey=1',
     color: '#615CED', tint: 'rgba(97,92,237,.12)',
     logo: '<svg viewBox="0 0 24 24" fill="#615CED" xmlns="http://www.w3.org/2000/svg"><path d="M23.919 14.545 20.817 9.17l1.47-2.544a.56.56 0 0 0 0-.566l-1.633-2.83a.57.57 0 0 0-.49-.283h-6.207L12.487.402a.57.57 0 0 0-.49-.284H8.732a.56.56 0 0 0-.49.284L5.139 5.775h-2.94a.56.56 0 0 0-.49.284L.077 8.887a.56.56 0 0 0 0 .567L3.18 14.83l-1.47 2.545a.56.56 0 0 0 0 .566l1.634 2.83a.57.57 0 0 0 .49.283h6.205l1.47 2.545a.57.57 0 0 0 .49.284h3.266a.57.57 0 0 0 .49-.284l3.104-5.375h2.94a.57.57 0 0 0 .49-.283l1.634-2.828a.55.55 0 0 0-.004-.568M8.733.686l1.634 2.828-1.634 2.828H21.8L20.164 9.17H7.425L5.63 6.06Zm1.306 19.801-6.205-.002 1.634-2.83h3.265L2.201 6.344h3.267q3.182 5.517 6.367 11.032zm10.124-5.66L18.53 12l-6.532 11.315-1.634-2.83c2.129-3.673 4.25-7.351 6.373-11.028h3.592l3.102 5.374z"/></svg>',
@@ -5273,6 +5308,8 @@ function openAddModelFormForProvider(key) {
     form.model.value = p.model || '';
     form.apibase.value = p.apibase || '';
     form.name.value = p.name || '';
+    const vision = form.querySelector('input[name="vision"]');
+    if (vision) vision.checked = p.vision !== false;
     const pr = form.querySelector(`input[name="protocol"][value="${p.protocol}"]`);
     if (pr) pr.checked = true;
   }
@@ -5314,6 +5351,8 @@ async function openEditModelForm(id) {
       form.model.value = p.model || '';
       form.apibase.value = p.apibase || '';
       form.name.value = p.name || '';
+      const vision = form.querySelector('input[name="vision"]');
+      if (vision) vision.checked = !!p.vision;
       form.max_retries.value = p.max_retries ?? 5;
       form.connect_timeout.value = p.connect_timeout ?? 15;
       form.read_timeout.value = p.read_timeout ?? 300;
@@ -5416,7 +5455,8 @@ function renderSettingsModels() {
       // 独立列表按钮统一为「加入渠道组」（➕）；移除只在渠道组展开区做。
       // 已在渠道组的，按钮仍是「加入」，但点击只提示「已在渠道组中」，并用 is-in 给个淡淡的视觉区分。
       const mixToggle = !mixin ? '' : `<button type="button" class="model-act model-act-addmix${p.inMixin ? ' is-in' : ''}" data-act="addmix" title="${escapeHtml(p.inMixin ? t('model.alreadyInMixin') : t('model.addToMixin'))}">${GA_ICON('plus')}</button>`;
-      row.innerHTML = `<input type="radio" name="model-pick"${state.llmNo === id ? ' checked' : ''}><span class="model-row-name">${escapeHtml(label)}</span><span class="model-row-actions">${mixToggle}<button type="button" class="model-act" data-act="edit" title="${escapeHtml(t('common.edit'))}">${MODEL_ACT_EDIT}</button><button type="button" class="model-act model-act-del" data-act="delete" title="${escapeHtml(t('common.delete'))}">${MODEL_ACT_DEL}</button></span>`;
+      const visionBadge = p.vision ? `<span class="model-vision-badge" title="${escapeHtml(t('model.visionBadge'))}">${GA_ICON('crosshair')}</span>` : '';
+      row.innerHTML = `<input type="radio" name="model-pick"${state.llmNo === id ? ' checked' : ''}><span class="model-row-name">${escapeHtml(label)}${visionBadge}</span><span class="model-row-actions">${mixToggle}<button type="button" class="model-act" data-act="edit" title="${escapeHtml(t('common.edit'))}">${MODEL_ACT_EDIT}</button><button type="button" class="model-act model-act-del" data-act="delete" title="${escapeHtml(t('common.delete'))}">${MODEL_ACT_DEL}</button></span>`;
       row.querySelector('[data-act="edit"]').addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); openEditModelForm(id); });
       row.querySelector('[data-act="delete"]').addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); deleteModel(id, p.name); });
       const addBtn = row.querySelector('[data-act="addmix"]');
@@ -5573,7 +5613,8 @@ function renderModelMenu(menuEl) {
     const no = (p.id ?? i);
     const isActive = (selectedNo === no) ? ' active' : '';
     const label = (isActive && p.kind === 'mixin' && selectedName) ? selectedName : modelDisplayName(p);
-    return `<div class="ga-menu-item${isActive}" data-llmno="${no}">${escapeHtml(label || '')}</div>`;
+    const visionBadge = p.vision ? `<span class="model-vision-badge" title="${escapeHtml(t('model.visionBadge'))}">${GA_ICON('crosshair')}</span>` : '';
+    return `<div class="ga-menu-item${isActive}" data-llmno="${no}">${escapeHtml(label || '')}${visionBadge}</div>`;
   });
   menuEl.innerHTML = rows.join('');
   applyI18n();
@@ -5704,6 +5745,8 @@ if (addModelForm) addModelForm.addEventListener('submit', async (e) => {
     if (errEl) { errEl.textContent = t('err.modelRequired'); errEl.hidden = false; }
     return;
   }
+  const submitBtn = addModelForm.querySelector('button[type="submit"]');
+  if (submitBtn) submitBtn.disabled = true;
   try {
     const res = isEdit
       ? await bridgeFetch(`/model-profiles/${editingModelId}`, { method: 'PUT', body: payload })
@@ -5718,14 +5761,23 @@ if (addModelForm) addModelForm.addEventListener('submit', async (e) => {
     editingModelId = null;
     if (errEl) errEl.hidden = true;
   } catch (ex) {
-    if (errEl) { errEl.textContent = (ex.message || t('err.modelSave')); errEl.hidden = false; }
+    const message = ex.message || t('err.modelSave');
+    if (errEl) {
+      errEl.textContent = message.includes('vision_probe_failed')
+        ? `${t('err.visionProbe')}: ${message.replace(/^vision_probe_failed:\s*/, '')}`
+        : message;
+      errEl.hidden = false;
+    }
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
   }
 });
 
 /* ═══════════════ 文件上传（图片+任意文件，tuiapp_v2 模式） ═══════════════ */
 const MAX_UPLOAD_FILES = 10;
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB
-const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+const MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
+const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|tiff?|ico)$/i;
 const thumbStrip = document.getElementById('thumb-strip');
 const chatPanel = document.querySelector('main.main');
 let activeFileComposer = 'chat';
@@ -5759,6 +5811,7 @@ function renderThumbStrip(ctx = activeFileComposer) {
   if (files.length === 0) {
     cfg.strip.innerHTML = '';
     cfg.strip.hidden = true;
+    if (ctx === 'chat') syncVisionSendState();
     return;
   }
   cfg.strip.innerHTML = files.map(f => {
@@ -5774,6 +5827,7 @@ function renderThumbStrip(ctx = activeFileComposer) {
   }).join('');
   cfg.strip.hidden = false;
   applyI18n();
+  if (ctx === 'chat') syncVisionSendState();
 }
 
 // 在 ctx 对应输入框(contenteditable)的光标处插入原子 chip（删不进中间，像 @人）
@@ -5850,7 +5904,9 @@ function placeholderFor(file) {
 function expandFilePlaceholders(text) {
   return text.replace(/\[(Image|File) #(\d+)\]/g, (m, kind, n) => {
     const f = state.pendingFiles.find(x => x.sid === Number(n));
-    return (f && f.path) ? f.path : '';  // #3 悬空占位符(无对应文件)→ 删掉,不把垃圾发给 agent
+    if (!f) return '';
+    if (kind === 'Image') return '';
+    return f.path || '';  // 文件依然通过路径交给 file_read
   });
 }
 
@@ -5908,7 +5964,8 @@ async function addFiles(fileList) {
   const accepted = [];
   for (const f of files) {
     if (!f || f.size === 0) { emptyHit = true; continue; }
-    if (f.size > MAX_UPLOAD_BYTES) { skipped = true; continue; }
+    const image = isImageFile(f);
+    if (f.size > (image ? MAX_IMAGE_UPLOAD_BYTES : MAX_UPLOAD_BYTES)) { skipped = true; continue; }
     if (state.pendingFiles.length + accepted.length >= MAX_UPLOAD_FILES) { skipped = true; break; }
     accepted.push(f);
   }
@@ -6033,6 +6090,7 @@ function bindComposerUpload(ctx) {
     // 内容清空后浏览器可能残留 <br>，抹掉以便 :empty 占位提示生效
     if (!cfg.input.textContent.trim() && !cfg.input.querySelector('.ph-chip')) cfg.input.innerHTML = '';
     reconcilePendingFiles(ctx);  // chip 被删 → 同步清理附件 + 删磁盘文件
+    if (ctx === 'chat') syncVisionSendState({ notify: true });
   });
   const zone = cfg.dropZone;
   const dropKey = `dropBound_${ctx}`;
@@ -7786,13 +7844,13 @@ function bindComposerInRoot(root, opts) {
     if (gen !== wsGen) return;
     if (data.type === 'hello') {
       S.historyReady = true;
-      S.messages = (data.chat || []).map(raw => ({ id: raw.id, role: raw.role || 'system', msg: raw.msg || '', ts: raw.ts, read: raw.read, files: raw.files || [], images: raw.images || [] }));
+      S.messages = (data.chat || []).map(raw => ({ id: raw.id, role: raw.role || 'system', msg: raw.msg || '', ts: raw.ts, read: raw.read, files: raw.files || [], images: (raw.images || []).map(image => ({ path: image.path, name: image.name, sid: image.sid, id: image.id })) }));
       S.conductorTyping = !!data.running;
       setWorkers(data.subagents || []);
       syncMessages();
       setConnUi();
     } else if (data.type === 'subagents') setWorkers(data.items || []);
-    else if (data.type === 'chat') pushMsg({ id: data.item.id, role: data.item.role || 'system', msg: data.item.msg || '', ts: data.item.ts, read: data.item.read, files: data.item.files || [], images: data.item.images || [] });
+    else if (data.type === 'chat') pushMsg({ id: data.item.id, role: data.item.role || 'system', msg: data.item.msg || '', ts: data.item.ts, read: data.item.read, files: data.item.files || [], images: (data.item.images || []).map(image => ({ path: image.path, name: image.name, sid: image.sid, id: image.id })) });
   }
 
   function resetWs() {
@@ -7864,7 +7922,7 @@ function bindComposerInRoot(root, opts) {
     const clearUsed = window.gaClearUsedPendingFiles || (() => {});
     const used = collect(text);
     const images = [], files = [];
-    for (const f of used) (f.isImage ? images : files).push(f.isImage ? { path: f.path, dataUrl: f.dataUrl, name: f.name, sid: f.sid } : { path: f.path, name: f.name, sid: f.sid });
+    for (const f of used) (f.isImage ? images : files).push({ path: f.path, name: f.name, sid: f.sid });
     S.messages.push({ id: `_local_${++localSeq}`, _local: true, role: 'user', msg: text, ts: Date.now() / 1000, images, files });
     S.conductorTyping = true;
     syncMessages();

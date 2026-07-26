@@ -7,6 +7,7 @@ import asyncio, json, os, queue as Q, re, sys, threading, time
 from collections import OrderedDict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import multimodal
 from agentmain import GeneraticAgent
 from chatapp_common import (
     AgentChatMixin, build_done_text, ensure_single_instance, extract_files,
@@ -186,7 +187,7 @@ class DiscordApp(AgentChatMixin):
             try:
                 await att.save(local_path)
                 paths.append(local_path)
-                print(f"[Discord] saved attachment: {local_path}")
+                print(f"[Discord] saved attachment: {os.path.basename(local_path)}")
             except Exception as e:
                 print(f"[Discord] failed to save attachment {att.filename}: {e}")
         return paths
@@ -280,14 +281,14 @@ class DiscordApp(AgentChatMixin):
             return await self.send_text(chat_id, _reset_conversation(ga), **ctx)
         return await self.send_text(chat_id, HELP_TEXT, **ctx)
 
-    async def run_agent(self, chat_id, text, **ctx):
+    async def run_agent(self, chat_id, text, *, images=None, **ctx):
         """Run the isolated per-chat Discord agent."""
         ga = self._get_agent(chat_id)
         state = {"running": True}
         self.user_tasks[chat_id] = state
         try:
             await self.send_text(chat_id, "思考中...", **ctx)
-            dq = ga.put_task(f"{FILE_HINT}\n\n{text}", source=self.source)
+            dq = ga.put_task(f"{FILE_HINT}\n\n{text}", source=self.source, images=images or None)
             last_ping = time.time()
             last_step = ""
             step_no = 0
@@ -367,10 +368,16 @@ class DiscordApp(AgentChatMixin):
         # Download attachments
         attachment_paths = await self._download_attachments(message)
 
-        # Build message text with attachment paths
-        if attachment_paths:
-            paths_text = "\n".join(f"[附件: {p}]" for p in attachment_paths)
+        image_paths = [path for path in attachment_paths if multimodal.is_raster_image_path(path)]
+        file_paths = [path for path in attachment_paths if path not in image_paths]
+
+        # Non-image files remain path-addressable through file_read. Images use
+        # native content blocks and never expose their local download paths.
+        if file_paths:
+            paths_text = "\n".join(f"[附件: {p}]" for p in file_paths)
             content = f"{content}\n{paths_text}" if content else paths_text
+        if image_paths and not content:
+            content = "请分析收到的图片。"
 
         if not content:
             return
@@ -380,7 +387,7 @@ class DiscordApp(AgentChatMixin):
         if content.startswith("/"):
             return await self.handle_command(chat_id, content)
 
-        task = asyncio.create_task(self.run_agent(chat_id, content))
+        task = asyncio.create_task(self.run_agent(chat_id, content, images=image_paths))
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
 

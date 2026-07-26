@@ -2756,8 +2756,7 @@ def _grab_clipboard_file() -> Optional[tuple[str, bool]]:
 
 class InputArea(TextArea):
     _PASTE_RE = re.compile(r'\[Pasted text #(\d+) \+\d+ lines\]')
-    # `[Image #N]` is the folded form; expand_placeholders restores the raw path at submit time.
-    # The longer `[Image #N: ...]` form is tolerated for backward compatibility only.
+    # Image placeholders stay in prompt text; their paths travel separately via put_task(images=).
     _IMAGE_RE = re.compile(r'\[Image #(\d+)(?::[^\]]*)?\]')
     _FILE_RE = re.compile(r'\[File #(\d+)\]')
     _PLACEHOLDER_RES = (_PASTE_RE, _IMAGE_RE, _FILE_RE)
@@ -2989,9 +2988,16 @@ class InputArea(TextArea):
         def repl(m):
             sid = int(m.group(1))
             return self._pastes.get(sid, m.group(0))
-        for pat in self._PLACEHOLDER_RES:
+        for pat in (self._PASTE_RE, self._FILE_RE):
             text = pat.sub(repl, text)
         return text
+
+    def image_paths(self, text: str) -> list[str]:
+        return [
+            self._pastes[sid]
+            for sid in (int(match.group(1)) for match in self._IMAGE_RE.finditer(text))
+            if sid in self._pastes
+        ]
 
     # ---- history public API ----
     def record_history(self, raw_text: str) -> None:
@@ -4693,8 +4699,8 @@ class GenericAgentTUI(App[None]):
         inp = event.input_area
         if inp.id != "input":
             return
+        images = inp.image_paths(event.value)
         text = inp.expand_placeholders(event.value).rstrip()
-        images = re.findall(r"\[Image #\d+: (.*?)\]", text)
         inp.record_history(event.value)
         inp.reset()
         self._hide_palette()
@@ -6535,7 +6541,7 @@ class GenericAgentTUI(App[None]):
         except Exception:
             pass
         try:
-            dq = sess.agent.put_task(text, source="user")
+            dq = sess.agent.put_task(text, source="user", images=image_paths or None)
         except Exception as e:
             sess.status = "error"
             self._update_assistant(sess.agent_id, f"[ERROR] put_task: {e}", task_id=tid, refresh_chrome=True)

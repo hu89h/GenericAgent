@@ -614,6 +614,11 @@
               <label class="seg-opt"><input type="radio" name="stream" value="false"><span data-i18n="model.streamOff"></span></label>
             </div>
           </div>
+          <label class="model-vision-toggle">
+            <span class="model-vision-copy"><span data-i18n="model.vision"></span><span class="field-hint" data-i18n="model.visionHint"></span></span>
+            <input type="checkbox" name="vision" value="true" checked>
+            <span class="model-toggle-track" aria-hidden="true"><span></span></span>
+          </label>
           <label><span data-i18n="model.name"></span><input name="name" data-i18n-ph="model.namePh" data-optional-ph maxlength="50"></label>
           <div class="model-form-row">
             <label class="model-form-mini"><span data-i18n="model.retries"></span><input name="max_retries" type="text" inputmode="numeric" pattern="[0-9]*" min="1" max="20" value="5"></label>

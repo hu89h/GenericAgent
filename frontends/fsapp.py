@@ -544,7 +544,7 @@ def _download_and_save_media(msg_type, content_json, message_id):
 
 def _describe_media(msg_type, file_path, filename):
     if msg_type == "image":
-        return f"[image: {filename}]\n[Image: source: {file_path}]"
+        return f"[Image: {filename}]"
     if msg_type == "audio":
         return f"[audio: {filename}]\n[File: source: {file_path}]"
     if msg_type in ("file", "media"):

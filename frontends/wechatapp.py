@@ -274,6 +274,7 @@ class WxBotClient:
 
 # ── Unified media download (IMAGE/VIDEO/FILE/VOICE) ──
 _MEDIA_KEYS = {'image_item': '.jpg', 'video_item': '.mp4', 'file_item': '', 'voice_item': '.silk'}
+_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.ico'}
 
 def _dl_media(items):
     """Download & decrypt all media items → list of local file paths."""
@@ -324,11 +325,15 @@ def _start_conductor():
         if _cond_up(): return True
     return False
 
-def _cond_forward(bot, text, seq):
+def _cond_forward(bot, text, seq, images=None):
     if not _start_conductor():
         bot.reply_text('Conductor 启动失败，请发 /switch 切回 agent。'); return
     try:
-        mine = requests.post(_COND, json={'msg': text, 'role': 'user'}, timeout=10).json()
+        mine = requests.post(
+            _COND,
+            json={'msg': text, 'role': 'user', 'images': images or []},
+            timeout=10,
+        ).json()
     except Exception as e:
         bot.reply_text(f'Conductor 转发失败: {e}\n请发 /switch。'); return
     seen = {mine['id']}
@@ -389,8 +394,12 @@ def on_message(bot, msg):
     ctx = msg.get('context_token', '')
     media_paths = _dl_media(msg.get('item_list', []))
     if not text and not media_paths: return
-    if media_paths:
-        text = (text + '\n' if text else '') + '\n'.join(f'[用户发送文件: {p}]' for p in media_paths)
+    image_paths = [p for p in media_paths if os.path.splitext(p)[1].lower() in _IMAGE_EXTS]
+    file_paths = [p for p in media_paths if p not in image_paths]
+    if file_paths:
+        text = (text + '\n' if text else '') + '\n'.join(f'[用户发送文件: {p}]' for p in file_paths)
+    if image_paths and not text:
+        text = '请分析收到的图片。'
     print(f'[WX] 收到: {text[:80]}', file=sys.__stdout__)
 
     # Commands
@@ -419,12 +428,13 @@ def on_message(bot, msg):
 
     if _MODE == 'conductor':
         _cond_seq += 1
-        threading.Thread(target=_cond_forward, args=(bot, text, _cond_seq), daemon=True).start()
+        image_refs = [{'path': path, 'name': os.path.basename(path)} for path in image_paths]
+        threading.Thread(target=_cond_forward, args=(bot, text, _cond_seq, image_refs), daemon=True).start()
         return
 
     def _handle():
         prompt = text if text.startswith('/') else f"If you need to show files to user, use [FILE:filepath] in your response.\n\n{text}"
-        dq = agent.put_task(prompt, source="wechat")
+        dq = agent.put_task(prompt, source="wechat", images=image_paths or None)
         _typing_stop = threading.Event()
         def _keep_typing():
             ticket = bot.get_typing_ticket(uid, ctx)

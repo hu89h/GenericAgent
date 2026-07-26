@@ -1392,7 +1392,7 @@ class AgentBridge:
         # next_prompt now carries our text — clear the list.  At an exit
         # boundary the file was consumed but next_prompt is discarded — replay
         # via put_task so the user's words aren't lost.
-        self._intervene_pending: list[str] = []
+        self._intervene_pending: list[dict] = []
         self._intervene_lk = threading.Lock()
         # Display queue created when an exit-boundary replay re-submits queued
         # user messages (see `_on_turn_end`).  Handed to the UI via
@@ -1438,10 +1438,18 @@ class AgentBridge:
                 f.write(sep + text)
             if track:
                 with self._intervene_lk:
-                    self._intervene_pending.append(text)
+                    self._intervene_pending.append({"text": text, "images": []})
             return True
         except Exception:
             return False
+
+    def queue_after_turn(self, text: str, images: list[str]) -> bool:
+        """Queue an image-bearing message for replay after the active task exits."""
+        if not images or not getattr(self.agent, 'is_running', False):
+            return False
+        with self._intervene_lk:
+            self._intervene_pending.append({"text": text, "images": list(images)})
+        return True
 
     def _run_safe(self):
         try:
@@ -1463,12 +1471,26 @@ class AgentBridge:
             if not self._intervene_pending:
                 return
             if (ctx or {}).get('exit_reason'):
-                combined = '\n\n'.join(self._intervene_pending)
+                combined = '\n\n'.join(str(item.get("text") or "") for item in self._intervene_pending)
+                images = [
+                    image
+                    for item in self._intervene_pending
+                    for image in (item.get("images") or [])
+                ]
                 self._intervene_pending = []
-                try: self._replay_dq = self.agent.put_task(combined, source='user')
-                except Exception: pass
+                try:
+                    self._replay_dq = self.agent.put_task(combined, source='user', images=images or None)
+                except Exception as error:
+                    self._replay_dq = queue.Queue()
+                    code = getattr(error, "code", type(error).__name__)
+                    self._replay_dq.put({"done": f"[ERROR] {code}: {error}", "source": "user"})
             else:
-                self._intervene_pending = []
+                # Text interventions were consumed into next_prompt. Image
+                # messages cannot be injected into a running turn and remain
+                # queued until the task reaches an exit boundary.
+                self._intervene_pending = [
+                    item for item in self._intervene_pending if item.get("images")
+                ]
 
     def take_replay_dq(self) -> "queue.Queue | None":
         """Hand off the display_queue from an exit-boundary replay once.
@@ -4212,13 +4234,10 @@ class SB:
             t = _FILE_REF_RE.sub(_r, t)
         for num, content in self._pstore.items():
             t = _PASTE_PH_RE.sub(lambda m: content if int(m.group(1)) == num else m.group(0), t)
-        # `[File #N]` / `[Image #N]` placeholders expand to the real path inline
-        # (v2 parity) — that's how the model actually sees the file/image; the
-        # bare `[Image #N]` block alone tells it nothing.
+        # Files still expand to paths for file_read. Image paths travel through
+        # put_task(images=), so prompt text keeps only the user-facing marker.
         for num, path in self._fstore.items():
             t = _FILE_PH_RE.sub(lambda m: path if int(m.group(1)) == num else m.group(0), t)
-        for num, path in self._imgs.items():
-            t = _IMG_PH_RE.sub(lambda m: path if int(m.group(1)) == num else m.group(0), t)
         return t
 
     def _on_enter(self) -> None:
@@ -4287,10 +4306,8 @@ class SB:
             self._cmd(expanded)
             self._pstore.clear(); self._fstore.clear(); self._imgs.clear()
             return
-        # Expand placeholders FIRST so the agent receives the resolved text,
-        # not the [Image #N] / [Pasted #N] markers.  This matches the idle
-        # submit path below — keeping the form identical means a queued
-        # message and an immediate one feed the LLM the same bytes.
+        # Expand pasted text and ordinary files. Image markers stay in the
+        # visible prompt while their paths travel through put_task(images=).
         imgs = [self._imgs[i] for i in
                 (int(m.group(1)) for m in _IMG_PH_RE.finditer(raw)) if i in self._imgs]
         expanded = self._expand(raw)
@@ -4299,7 +4316,11 @@ class SB:
         agent_text = at_complete.absolutize_mentions(expanded, self._at_root()) if "@" in expanded else expanded
         if self._running:
             wrapped = _t('pending.inject_wrap', text=agent_text)
-            if self._bridge and self._bridge.inject_intervene(wrapped, track=True):
+            queued = bool(
+                self._bridge and imgs
+                and self._bridge.queue_after_turn(agent_text, imgs)
+            )
+            if queued or (self._bridge and self._bridge.inject_intervene(wrapped, track=True)):
                 self._pending.append(agent_text)
                 self._commit_user(_t('pending.queued_marker', text=expanded))
                 self._pstore.clear(); self._fstore.clear(); self._imgs.clear()

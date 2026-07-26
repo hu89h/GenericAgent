@@ -49,7 +49,7 @@ WS API (state sync):
 """
 from __future__ import annotations
 
-import asyncio, atexit, contextlib, hashlib, importlib, json, os, re, shutil, signal, subprocess, sys
+import asyncio, atexit, base64, contextlib, hashlib, importlib, json, os, re, shutil, signal, subprocess, sys
 from collections import Counter, deque
 import threading, time, traceback, uuid
 from dataclasses import dataclass, field
@@ -391,8 +391,35 @@ class AgentManager:
         for s in sessions:
             self._persist_session(s)
 
+    @staticmethod
+    def _restored_session_messages(messages) -> list[dict]:
+        restored = []
+        for raw in messages or []:
+            if not isinstance(raw, dict):
+                continue
+            message = dict(raw)
+            available, missing = [], []
+            for image in message.get("images") or []:
+                if not isinstance(image, dict):
+                    continue
+                path = str(image.get("path") or "")
+                if path and os.path.isfile(path):
+                    available.append(dict(image))
+                else:
+                    missing.append(str(image.get("name") or Path(path).name or "image"))
+            if "images" in message:
+                message["images"] = available
+            if missing:
+                note = "\n".join(
+                    f"[Historical image is no longer available: {name}]" for name in missing
+                )
+                field = "display" if isinstance(message.get("display"), str) else "content"
+                message[field] = f"{str(message.get(field) or '').rstrip()}\n{note}".strip()
+            restored.append(message)
+        return restored
+
     def _session_from_item(self, item: dict) -> "Session":
-        msgs = item.get("messages", [])
+        msgs = self._restored_session_messages(item.get("messages", []))
         return Session(id=item["id"], title=item.get("title", "New chat"),
                        cwd=item.get("cwd", self.ga_root),
                        created_at=item.get("created_at", time.time()),
@@ -404,10 +431,17 @@ class AgentManager:
                        plan_scan_baseline=_load_plan_baseline(item, msgs),
                        plan_path=_sanitize_desktop_plan_path(item["id"], item.get("plan_path") or ""),
                        status="idle", agent=None,
-                       llm_history=item.get("llm_history"),
+                       llm_history=self._restored_llm_history(item.get("llm_history")),
                        llm_no=item.get("llm_no"),
                        knowledge_scope=normalize_knowledge_scope(
                            item.get("knowledge_scope") or item.get("knowledgeScope")))
+
+    def _restored_llm_history(self, history):
+        if not history:
+            return history
+        self.ensure_ga_import_path()
+        import multimodal
+        return multimodal.restore_image_references(history)
 
     def _load_sessions(self):
         # New format: one file per session under temp/desktop_sessions/.
@@ -610,6 +644,12 @@ class AgentManager:
         # reasoning_effort / fake_cc_system_prompt / thinking_type …），避免 GUI 编辑时丢失
         cfg: Dict[str, Any] = dict(existing or {})
         cfg.update({"apikey": apikey, "apibase": apibase, "model": model})
+        raw_vision = data.get("vision", False)
+        cfg["vision"] = (
+            raw_vision
+            if isinstance(raw_vision, bool)
+            else str(raw_vision).strip().lower() in {"1", "true", "yes", "on"}
+        )
         if "name" in data:
             name = str(data.get("name") or "").strip()
             if name:
@@ -839,6 +879,9 @@ class AgentManager:
         cfg = self._build_cfg(data)
         text = self._mykey_file().read_text(encoding="utf-8")
         var = self._next_native_var(text, data.get("protocol", ""))
+        self.ensure_ga_import_path()
+        from llmcore import probe_model_vision
+        probe_model_vision(cfg, "claude" if "claude" in var else "oai")
         profiles = self._save_mykey_text(text.rstrip() + f"\n{var} = {self._format_py_dict(cfg)}\n")
         return {"varName": var, "profileId": profiles[-1]["id"] if profiles else 0, "profiles": profiles}
 
@@ -847,12 +890,18 @@ class AgentManager:
         ks = ("model", "apibase", "apikey", "name", "max_retries", "connect_timeout", "read_timeout")
         out = {"id": profile_id, "varName": var, **{k: cfg.get(k, d) for k, d in zip(ks, ("", "", "", "", 5, 15, 300))}}
         out["stream"] = cfg.get("stream", True)
+        out["vision"] = bool(cfg.get("vision", False))
+        out["visionVerified"] = "vision" in cfg
         return out
 
     def update_model_profile(self, profile_id: int, data: dict) -> dict:
         var, existing = self._profile_at(profile_id)
         text = self._mykey_file().read_text(encoding="utf-8")
-        profiles = self._save_mykey_text(self._patch_var_block(text, var, self._build_cfg(data, existing, require_key=False)))
+        cfg = self._build_cfg(data, existing, require_key=False)
+        self.ensure_ga_import_path()
+        from llmcore import probe_model_vision
+        probe_model_vision(cfg, "claude" if "claude" in var else "oai")
+        profiles = self._save_mykey_text(self._patch_var_block(text, var, cfg))
         return {"varName": var, "profileId": profile_id, "profiles": profiles}
 
     def delete_model_profile(self, profile_id: int) -> dict:
@@ -938,16 +987,34 @@ class AgentManager:
                 all_mixin_members.update(str(m) for m in (cfg.get("llm_nos") or []))
         active = self.config.get("llmNo", 0)
         out = []
+        vision_by_name = {
+            self._base_display_name(k, mk.get(k) if isinstance(mk.get(k), dict) else {}): bool(
+                (mk.get(k) or {}).get("vision", False)
+            )
+            for k in keys if "mixin" not in k
+        }
+        vision_known_by_name = {
+            self._base_display_name(k, mk.get(k) if isinstance(mk.get(k), dict) else {}): (
+                "vision" in (mk.get(k) or {})
+            )
+            for k in keys if "mixin" not in k
+        }
         for i, k in enumerate(keys):
             cfg = mk.get(k) if isinstance(mk.get(k), dict) else {}
             if "mixin" in k:
                 members = [str(m) for m in (cfg.get("llm_nos") or [])]
+                supports_vision = any(vision_by_name.get(m, False) for m in members)
                 out.append({"id": i, "varName": k, "kind": "mixin", "name": "",
-                            "members": members, "active": i == active})
+                            "members": members, "vision": supports_vision,
+                            "visionVerified": supports_vision or (
+                                bool(members) and all(vision_known_by_name.get(m, False) for m in members)
+                            ), "active": i == active})
             else:
                 name = self._base_display_name(k, cfg)
                 out.append({"id": i, "varName": k, "kind": "native", "name": name,
                             "model": cfg.get("model", ""),
+                            "vision": bool(cfg.get("vision", False)),
+                            "visionVerified": "vision" in cfg,
                             "group": "native" if "native" in k else "std",
                             "inMixin": name in all_mixin_members, "active": i == active})
         return out
@@ -1096,26 +1163,75 @@ class AgentManager:
                     sess.agent.abort()
         emit_session_state(sess, "closed")
         self._delete_session_file(sid)
-        _purge_session_uploads(sid)
+        _purge_session_uploads(sid, sess.messages)
         return {"ok": True, "sessionId": sid}
 
-    def submit_prompt(self, sid: str, prompt: Any, images: Optional[list] = None, display: Optional[str] = None, files_meta: Optional[list] = None, image_metas: Optional[list] = None) -> dict:
-        prompt, image_ids = normalize_prompt(prompt, images)
+    def _validated_prompt_images(self, image_metas: Optional[list]) -> list[dict]:
+        if not image_metas:
+            return []
+        self.ensure_ga_import_path()
+        import multimodal
+
+        if not isinstance(image_metas, list):
+            raise web.HTTPBadRequest(
+                text=json.dumps({"error": "image_input_invalid"}),
+                content_type="application/json",
+            )
+        normalized = []
+        upload_root = _WEB_UPLOAD_DIR.resolve()
+        try:
+            for item in image_metas:
+                if not isinstance(item, dict):
+                    raise multimodal.ImageContentError("image_input_invalid", "image metadata must be an object")
+                path = Path(str(item.get("path") or "")).resolve()
+                path.relative_to(upload_root)
+                normalized.append({
+                    "id": str(item.get("id") or ""),
+                    "name": str(item.get("name") or path.name),
+                    "path": str(path),
+                })
+            multimodal.normalize_image_inputs(normalized)
+        except (ValueError, OSError) as error:
+            code = getattr(error, "code", "image_path_forbidden")
+            raise web.HTTPBadRequest(
+                text=json.dumps({"error": code, "message": str(error)}, ensure_ascii=False),
+                content_type="application/json",
+            ) from None
+        return normalized
+
+    def _require_session_vision(self, sess: Session, images: list[dict]) -> None:
+        if not images:
+            return
+        no = sess.llm_no if sess.llm_no is not None else _global_default_llm_no()
+        profile = next((item for item in self.list_model_profiles() if item.get("id") == no), None)
+        if not profile or not profile.get("visionVerified") or not profile.get("vision"):
+            code = "vision_model_unverified" if profile and not profile.get("visionVerified") else "vision_model_required"
+            raise web.HTTPBadRequest(
+                text=json.dumps({"error": code}, ensure_ascii=False),
+                content_type="application/json",
+            )
+
+    def submit_prompt(self, sid: str, prompt: str, display: Optional[str] = None, files_meta: Optional[list] = None, image_metas: Optional[list] = None) -> dict:
+        if not isinstance(prompt, str):
+            raise web.HTTPBadRequest(
+                text=json.dumps({"error": "invalid_prompt", "message": "prompt must be a string"}, ensure_ascii=False),
+                content_type="application/json",
+            )
+        prompt_images = self._validated_prompt_images(image_metas)
         with self.lock:
             sess = self.sessions.get(sid)
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             if sess.status == "running":
                 raise web.HTTPConflict(text=json.dumps({"error": "session is already running"}, ensure_ascii=False), content_type="application/json")
+            self._require_session_vision(sess, prompt_images)
             extra = {}
-            if image_ids:
-                extra["image_ids"] = image_ids
             if isinstance(display, str) and display.strip() and display != prompt:
                 extra["display"] = display
             if files_meta:
                 extra["files"] = files_meta
-            if image_metas:
-                extra["images"] = image_metas
+            if prompt_images:
+                extra["images"] = prompt_images
             user_msg = self.add_message(sess, "user", prompt, **extra)
             turn_id = uuid.uuid4().hex
             sess.status = "running"
@@ -1124,14 +1240,14 @@ class AgentManager:
             sess.last_error = ""
             sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True,
                             "curr_turn": 0, "turn_segs": []}  # turn_segs[i]=第i轮全文(权威结构化,前端按轮渲染);content保留双轨兜底
-            t = threading.Thread(target=self.run_agent_turn, args=(sess, prompt, None, turn_id), daemon=True, name=f"Turn-{sid}")
+            t = threading.Thread(target=self.run_agent_turn, args=(sess, prompt, prompt_images, turn_id), daemon=True, name=f"Turn-{sid}")
             sess.thread = t
             t.start()
             seq = sess.msg_seq
         emit_session_state(sess, "running")
         return {"ok": True, "sessionId": sid, "accepted": True, "userMessageId": user_msg["id"], "seq": seq}
 
-    def run_agent_turn(self, sess: Session, prompt: str, images: Optional[list] = None, turn_id: str = ""):
+    def run_agent_turn(self, sess: Session, prompt: str, image_refs: Optional[list] = None, turn_id: str = ""):
         def turn_state() -> tuple[bool, bool]:
             with self.lock:
                 return sess.active_turn_id == turn_id, sess.cancel_requested
@@ -1150,7 +1266,7 @@ class AgentManager:
             done_outputs = None  # done时agent给的全量轮文本(turn_resps.copy())
             done_citations = []
             if hasattr(agent, "put_task"):
-                display_q = agent.put_task(prompt, images=images or [])
+                display_q = agent.put_task(prompt, images=image_refs or [])
                 pieces = []
                 import queue as _queue
                 while True:
@@ -1322,16 +1438,25 @@ class AgentManager:
                 agent.next_llm(int(no))
         if sess.llm_history:
             try:
-                agent.llmclient.backend.history = sess.llm_history
+                agent.llmclient.backend.history = self._restored_llm_history(sess.llm_history)
             except Exception as e:
                 print(f"[bridge] restore llm_history failed: {e}", file=sys.stderr)
         else:
             history = []
+            self.ensure_ga_import_path()
+            import multimodal
             for m in sess.messages:
                 role = m.get("role")
                 content = m.get("content", "")
                 if role == "user":
-                    history.append({"role": "user", "content": [{"type": "text", "text": content}]})
+                    blocks = [{"type": "text", "text": content}]
+                    for image in m.get("images") or []:
+                        path = str(image.get("path") or "") if isinstance(image, dict) else ""
+                        if path and os.path.isfile(path):
+                            blocks.append(multimodal.image_path_block(path, image.get("name") or ""))
+                        else:
+                            blocks.append({"type": "text", "text": "[Historical image is no longer available.]"})
+                    history.append({"role": "user", "content": blocks})
                 elif role == "assistant":
                     history.append({"role": "assistant", "content": [{"type": "text", "text": content}]})
             if history:
@@ -1358,30 +1483,6 @@ class AgentManager:
             sess.updated_at = time.time()
         self._persist_session(sess)
         return {"ok": True, "sessionId": sid, "llmNo": sess.llm_no, "model": self._live_model(sess)}
-
-
-import base64
-
-
-def normalize_prompt(prompt: Any, images: Optional[list] = None):
-    """Flatten a prompt (str or content-part list) to plain text.
-
-    Image/file attachments are handled by the frontend, which inlines the
-    uploaded file path into the prompt text (see expandFilePlaceholders) and
-    sends path-only metadata via files/imageMetas — so no per-prompt image
-    persistence happens here. The `images` arg is accepted for backward compat
-    and ignored; the returned image-id list is always empty.
-    """
-    if isinstance(prompt, list):
-        text_parts = []
-        for part in prompt:
-            if isinstance(part, str):
-                text_parts.append(part)
-            elif isinstance(part, dict) and part.get("type") in ("text", "input_text"):
-                text_parts.append(str(part.get("text") or part.get("content") or ""))
-        prompt = "\n".join([p for p in text_parts if p])
-
-    return str(prompt or ""), []
 
 
 manager = AgentManager()
@@ -2041,14 +2142,13 @@ async def patch_session_handler(request):
 async def prompt_handler(request):
     sid = request.match_info["sid"]
     data = await read_json(request)
-    prompt = data.get("prompt", data.get("content", data.get("message", "")))
-    images = data.get("images") or []
+    prompt = data.get("prompt")
     display = data.get("display")
     files_meta = data.get("files") or []        # 非图片附件 [{name, path}]
     image_metas = data.get("imageMetas") or []   # 图片附件 [{name, path}]（不含 dataUrl）
     # 模型不再随 prompt 携带:切换模型走 POST /session/{sid}/model 这一唯一入口,
     # 发消息只使用会话已绑定的 sess.llm_no(未绑定则回退全局默认)。
-    return json_ok(manager.submit_prompt(sid, prompt, images, display=display,
+    return json_ok(manager.submit_prompt(sid, prompt, display=display,
                                           files_meta=files_meta, image_metas=image_metas))
 
 
@@ -2940,9 +3040,19 @@ def _session_upload_dir(sid: str) -> Path:
     return d
 
 
-def _purge_session_uploads(sid: str) -> None:
-    """Best-effort: drop a session's whole upload subdir when the session is deleted."""
+def _purge_session_uploads(sid: str, messages: Optional[list] = None) -> None:
+    """Best-effort: remove a deleted session's uploaded attachments."""
     import shutil
+    upload_root = _WEB_UPLOAD_DIR.resolve()
+    for message in messages or []:
+        for item in [*(message.get("images") or []), *(message.get("files") or [])]:
+            if not isinstance(item, dict) or not item.get("path"):
+                continue
+            with contextlib.suppress(ValueError, OSError):
+                target = Path(item["path"]).resolve()
+                target.relative_to(upload_root)
+                if target.is_file():
+                    target.unlink()
     with contextlib.suppress(Exception):
         shutil.rmtree(_WEB_UPLOAD_DIR / _safe_session_dir(sid), ignore_errors=True)
 
@@ -2952,10 +3062,19 @@ def _sweep_stale_uploads(retention_days: int = UPLOAD_RETENTION_DAYS) -> None:
     then drop empty session subdirs. Replaces the old wholesale rmtree-on-startup
     so attachments persist across restarts while temp storage can't grow forever."""
     cutoff = time.time() - retention_days * 86400
+    referenced = set()
+    with manager.lock:
+        sessions = list(manager.sessions.values())
+    for session in sessions:
+        for message in session.messages:
+            for item in [*(message.get("images") or []), *(message.get("files") or [])]:
+                if isinstance(item, dict) and item.get("path"):
+                    with contextlib.suppress(OSError):
+                        referenced.add(Path(item["path"]).resolve())
     try:
         for f in _WEB_UPLOAD_DIR.rglob("*"):
             try:
-                if f.is_file() and f.stat().st_mtime < cutoff:
+                if f.is_file() and f.resolve() not in referenced and f.stat().st_mtime < cutoff:
                     f.unlink()
             except OSError:
                 pass
@@ -2989,19 +3108,32 @@ async def upload_handler(request):
         return json_ok({"ok": False, "error": f"invalid request: {e}"})
     name = (data.get("name") or "file").strip().replace("/", "_").replace("\\", "_")
     data_url = data.get("dataUrl") or ""
+    data_url_header = data_url.split(",", 1)[0].strip().lower() if "," in data_url else ""
     if "," in data_url:
         b64 = data_url.split(",", 1)[1]
     else:
         b64 = data_url
     try:
-        blob = base64.b64decode(b64)
+        blob = base64.b64decode(b64, validate=True)
     except Exception as e:
         return json_ok({"ok": False, "error": f"decode failed: {e}"})
     if not blob:
         return json_ok({"ok": False, "error": "empty file"})
     safe_name = name or "file"
+    manager.ensure_ga_import_path()
+    import multimodal
+    image_upload = data_url_header.startswith("data:image/") or multimodal.is_raster_image_path(safe_name)
+    if image_upload and len(blob) > multimodal.MAX_SOURCE_BYTES:
+        return json_ok({"ok": False, "error": "image_source_too_large"}, status=413)
     fpath = _session_upload_dir(data.get("sid") or "") / f"{uuid.uuid4().hex[:12]}__{safe_name}"
     fpath.write_bytes(blob)
+    if image_upload:
+        try:
+            multimodal.prepare_image(fpath)
+        except multimodal.ImageContentError as error:
+            with contextlib.suppress(OSError):
+                fpath.unlink()
+            return json_ok({"ok": False, "error": error.code, "message": str(error)}, status=400)
     return json_ok({"ok": True, "path": str(fpath)})
 
 
