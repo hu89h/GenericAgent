@@ -222,7 +222,7 @@ and persist the result into its own memory.
 | :--- | :--- |
 | 🌐 Web automation | *"Set up your web automation capability."* — GA guides you through the one manual step: dragging the bundled Chrome extension into `chrome://extensions`. |
 | 🔤 OCR | *"Set up your OCR capability with rapidocr and save it to memory."* |
-| 👁️ Vision | *"Set up your vision capability from the template in memory/."* — GA copies the template, wires it to your existing LLM keys, and self-tests. |
+| 👁️ Native image input | Enable **Supports image input** in Desktop model settings and save. GA runs a real visual verification before accepting the configuration; pasted images and images opened with `file_read` then reach the active model directly. |
 | 🖱️ Computer use | *"Probe this system and set up your computer-use capability."* |
 
 > 💡 **About language**: the pre-installed SOPs are written in Chinese — GA reads them

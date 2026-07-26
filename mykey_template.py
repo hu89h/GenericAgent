@@ -104,6 +104,8 @@
 #   apibase         必填。参见上方 apibase 自动拼接规则。
 #   model           必填。后缀 '[1m]' 触发 context-1m-2025-08-07 beta（发出前会
 #                   自动去掉 [1m]）。
+#   vision          图片输入能力。建议在桌面端勾选“支持图片输入”并保存，由真实视觉
+#                   自测通过后写入。缺少该字段时视为未验证，不能发送图片。
 #   name            可选。展示名；也是 mixin_config['llm_nos'] 引用的凭据。不填
 #                   默认取 model。
 #   proxy           可选。单 session 代理，'http://127.0.0.1:2082' 这种。不填则
@@ -185,6 +187,7 @@ mixin_config = {
 #     'apikey': 'sk-user-<your-relay-key>',        # 非 sk-ant- 前缀 → Bearer 鉴权
 #     'apibase': 'https://<your-cc-switch-host>/claude/office',   # CC switch 端点
 #     'model': 'claude-opus-4-7',                  # 或 claude-sonnet-4-6
+#     'vision': False,                              # 在桌面端启用并验证后改为 True
 #     'fake_cc_system_prompt': True,               # CC 透传渠道必须置 True
 #     'thinking_type': 'adaptive',                 # 某些渠道必须要求填写thinking_type字段
 # }
@@ -284,6 +287,7 @@ mixin_config = {
 #     'apikey': 'sk-<your-openai-key>',                # Bearer 鉴权
 #     'apibase': 'https://api.openai.com/v1',          # 补齐到 /v1/chat/completions
 #     'model': 'gpt-5.4',                              # gpt-5/o 系列
+#     'vision': False,                                  # 在桌面端启用并验证后改为 True
 #     'api_mode': 'chat_completions',                  # 'chat_completions'（默认）|'responses'
 #     # 'reasoning_effort': 'high',                    # none|minimal|low|medium|high|xhigh
 #                                                      # chat_completions → payload.reasoning_effort
