@@ -14,6 +14,14 @@
     "core:window:allow-close",
     "core:window:allow-get-all-windows",
     "core:webview:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://sso.openxlab.org.cn/mineru-login*"
+        }
+      ]
+    },
     "allow-start-bridge",
     "allow-start-bridge-with-config",
     "allow-get-config",
