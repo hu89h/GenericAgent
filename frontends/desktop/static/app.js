@@ -1107,6 +1107,10 @@ function kbCitationLabel(citation) {
 
 function kbAppendCitations(row, msg) {
   if (msg.role !== 'assistant' || !Array.isArray(msg.citations) || !msg.citations.length) return;
+  const imageCitations = msg.citations.filter(citation =>
+    citation?.kind === 'image' || !!citation?.image_id
+  );
+  if (!imageCitations.length) return;
   const bubble = row.querySelector(':scope > .bubble.md');
   if (!bubble) return;
   const citations = document.createElement('div');
@@ -1115,11 +1119,11 @@ function kbAppendCitations(row, msg) {
   title.className = 'kb-citations-title';
   title.textContent = t('kb.citations');
   citations.appendChild(title);
-  for (const citation of msg.citations) {
+  for (const citation of imageCitations) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'kb-citation-btn';
-    button.textContent = citation.image_id ? `🖼 ${kbCitationLabel(citation)}` : kbCitationLabel(citation);
+    button.textContent = `🖼 ${kbCitationLabel(citation)}`;
     button.title = t('kb.openCitation');
     button.addEventListener('click', () => void kbOpenCitation(citation));
     citations.appendChild(button);

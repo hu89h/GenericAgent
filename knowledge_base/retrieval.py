@@ -692,11 +692,11 @@ class KnowledgeBaseRetriever:
         content = clean_public_text(body)
         if len(content) > max_chars:
             content = content[:max_chars] + f"\n…[已截断，本次读取共 {len(content)} 字]"
-        head = f"# {fields.get('title', '')}\n"
+        head = f"# 原始文档：{fields.get('title', '')}\n"
         section = section_label(fields.get("header_path"))
         if section:
             head += f"章节：{section}\n"
-        head += f"分段：{int(fields.get('chunk_index') or chunk_index)}\n{'-' * 40}\n"
+        head += f"{'-' * 40}\n"
         return head + content
 
     def reference_for_chunk(

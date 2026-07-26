@@ -14,6 +14,18 @@ from agent_loop import StepOutcome
 from .references import clean_public_text, public_reference
 
 
+KB_RESPONSE_SOURCE_INSTRUCTIONS = """
+[SYSTEM] 知识库回答来源规则：
+- 如果最终回答实际使用了知识库信息，在答案末尾自行添加“**信息来源**”段。
+- 来源只能使用工具结果中的 source_hint，只列出实际支撑回答的来源，不要罗列所有搜索命中。
+- 同一原始文档必须合并为一条项目并对章节或图号去重，禁止重复书写文档名。格式固定为：
+  **信息来源**
+  - 《原始文档名》：“章节一”“章节二”
+- data_id、ref、chunk_index、内部路径、处理后 Markdown 文件名、哈希前缀和检索诊断仅供工具调用，禁止出现在面向用户的回答中。
+- 未使用知识库信息时不要添加“信息来源”段。
+""".strip()
+
+
 KB_TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -179,23 +191,54 @@ class KnowledgeBaseToolsMixin:
         keep = (
             "score", "score_type",
             "matched_by", "channel_ranks", "final_rank",
-            "header_path", "snippet", "body", "description", "table_markdown",
+            "snippet", "body", "description", "table_markdown",
             "related_text", "near_text", "uncertain", "caption",
             "display_label",
         )
         result = public_reference(hit, kind=hit.get("kind"))
         result.update({key: hit[key] for key in keep if key in hit and hit[key] is not None})
+        result["source_hint"] = KnowledgeBaseToolsMixin._source_hint(result)
         for key in ("body", "snippet", "related_text"):
             if key in result:
                 result[key] = clean_public_text(result[key])
         return result
 
-    def _record_knowledge_citations(self, *items):
-        """Keep stable knowledge references for the Desktop message metadata.
+    @staticmethod
+    def _source_hint(reference):
+        name = str(
+            reference.get("source_file_name")
+            or reference.get("title")
+            or ""
+        ).strip()
+        if not name:
+            return ""
+        if reference.get("kind") == "image":
+            section = str(
+                reference.get("display_label")
+                or reference.get("caption")
+                or reference.get("ref_key")
+                or reference.get("source_section")
+                or ""
+            ).strip()
+        else:
+            section = str(reference.get("source_section") or "").strip()
+        return f"《{name}》：“{section}”" if section else f"《{name}》"
 
-        The model-facing tool result can contain large text, while the UI only
-        needs identifiers it can send back to the bridge.  Never copy a local
-        path into this metadata.
+    @classmethod
+    def _clean_document(cls, document):
+        result = public_reference(document, kind="document")
+        for key in ("folder", "size", "source_size", "source_exists"):
+            if key in document:
+                result[key] = document.get(key)
+        result["source_hint"] = cls._source_hint(result)
+        return result
+
+    def _record_knowledge_citations(self, *items):
+        """Keep only image references for Desktop open-image actions.
+
+        Text provenance is written by the agent as a safe source footer.  The
+        Desktop metadata channel remains only for real image assets that have
+        a meaningful open action.
         """
         citations = getattr(self, "_knowledge_citations", None)
         if citations is None:
@@ -218,10 +261,10 @@ class KnowledgeBaseToolsMixin:
                 if not isinstance(raw, dict):
                     continue
                 citation = public_reference(raw, kind=raw.get("kind"))
+                if citation.get("kind") != "image" or not citation.get("image_id"):
+                    continue
                 if raw.get("display_label"):
                     citation["display_label"] = str(raw.get("display_label")).strip()
-                if not any(citation.get(key) for key in ("data_id", "ref", "image_id")):
-                    continue
                 key = (
                     citation.get("kb_id", ""), citation.get("data_id", ""),
                     citation.get("image_id", ""), citation.get("chunk_index", -1),
@@ -238,9 +281,10 @@ class KnowledgeBaseToolsMixin:
         return citations
 
     def _anchor_outcome(self, args, data):
+        next_prompt = self._get_anchor_prompt(skip=args.get("_index", 0) > 0)
         return StepOutcome(
             data,
-            next_prompt=self._get_anchor_prompt(skip=args.get("_index", 0) > 0),
+            next_prompt=f"{next_prompt}\n{KB_RESPONSE_SOURCE_INSTRUCTIONS}\n",
         )
 
     def do_kb_search(self, args, response):
@@ -268,12 +312,6 @@ class KnowledgeBaseToolsMixin:
             "hits": [self._clean_hit(hit) for hit in hits],
             "diagnostics": search_result.get("diagnostics") or [],
         }
-        # Search results are candidates.  An image becomes a citation only
-        # after kb_image_read successfully resolves it, so unrelated vector
-        # hits cannot leak into the final answer's citation list.
-        self._record_knowledge_citations(
-            [hit for hit in hits if hit.get("kind") != "image"]
-        )
         yield "[Info] kb_search done.\n"
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -291,6 +329,7 @@ class KnowledgeBaseToolsMixin:
         except (TypeError, ValueError):
             start, span, max_chars = 0, 1, 4000
         parts = []
+        source_hints = []
         backend = self._kb_backend()
         for index in range(start, start + span):
             content = backend.read_chunk(
@@ -303,15 +342,19 @@ class KnowledgeBaseToolsMixin:
             if str(content).startswith("[未找到]"):
                 break
             parts.append(str(content))
-        if parts:
-            self._record_knowledge_citations(
-                backend.reference_for_chunk(
-                    data_id=data_id,
-                    ref=ref,
-                    kb_id=self._scope_kb_id(),
-                    chunk_index=start,
-                )
+            reference = backend.reference_for_chunk(
+                data_id=data_id,
+                ref=ref,
+                kb_id=self._scope_kb_id(),
+                chunk_index=index,
             )
+            hint = self._source_hint(reference)
+            if hint and hint not in source_hints:
+                source_hints.append(hint)
+        if parts:
+            source_note = "\n".join(f"- {hint}" for hint in source_hints)
+            if source_note:
+                parts.insert(0, f"[可公开使用的原始来源口径]\n{source_note}")
         yield "[Info] kb_read done.\n"
         return self._anchor_outcome(args, "\n\n".join(parts) or "[kb_read] 未读到内容。")
 
@@ -331,6 +374,22 @@ class KnowledgeBaseToolsMixin:
                 kb_id=self._scope_kb_id(),
                 preview_chars=preview,
             )
+            if isinstance(result, dict) and not result.get("error"):
+                source = self._kb_backend().reference_for_chunk(
+                    data_id=data_id,
+                    ref=ref,
+                    kb_id=self._scope_kb_id(),
+                    chunk_index=0,
+                )
+                result = dict(result)
+                result.pop("file_name", None)
+                result["title"] = (
+                    source.get("source_file_name")
+                    or source.get("title")
+                    or result.get("title")
+                    or ""
+                )
+                result["source_hint"] = self._source_hint(source)
         else:
             documents = self._kb_backend().list_documents(kb_id=self._scope_kb_id())
             if self._knowledge_scope()["mode"] == "document":
@@ -347,8 +406,12 @@ class KnowledgeBaseToolsMixin:
                         file_name=document.get("file_name"),
                     ) == expected
                 ]
-            self._record_knowledge_citations(documents)
-            result = {"documents": documents}
+            result = {
+                "documents": [
+                    self._clean_document(document)
+                    for document in documents
+                ]
+            }
         yield "[Info] kb_list done.\n"
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -388,6 +451,7 @@ class KnowledgeBaseToolsMixin:
         ):
             if key in info:
                 result[key] = info.get(key)
+        result["source_hint"] = KnowledgeBaseToolsMixin._source_hint(result)
         return result
 
     def do_kb_image_read(self, args, response):

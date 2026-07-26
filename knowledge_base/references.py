@@ -24,6 +24,7 @@ REFERENCE_FIELDS = (
     "title",
     "file_name",
     "source_file_name",
+    "source_section",
     "citation_label",
     "ref",
 )
@@ -107,6 +108,7 @@ def reference_fields(item: dict[str, Any] | None, *, kind: str | None = None) ->
     source_file_name = _source_name(
         raw.get("source_file_name") or raw.get("source_name") or raw.get("file_name")
     )
+    source_section = section_label(raw.get("header_path"))
     title = _label_text(raw.get("title"))
     if resolved_kind == "document" and os.path.splitext(title)[1]:
         title = _source_name(title)
@@ -122,6 +124,7 @@ def reference_fields(item: dict[str, Any] | None, *, kind: str | None = None) ->
         "title": title,
         "file_name": _relative(raw.get("file_name")),
         "source_file_name": source_file_name,
+        "source_section": source_section,
         "ref": _relative(raw.get("ref") or raw.get("source_ref")),
     }
     fields["citation_label"] = _citation_label(raw | fields, resolved_kind, source_file_name)
