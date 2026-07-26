@@ -16,6 +16,8 @@ HTTP API:
   POST   /kb/import
   GET    /kb/jobs/{job_id}
   GET    /kb/{kb_id}/status
+  GET    /kb/{kb_id}/source
+  GET    /kb/{kb_id}/source/asset
   POST   /kb/{kb_id}/reindex
   DELETE /kb/{kb_id}
   POST   /kb/{kb_id}/open
@@ -2109,6 +2111,54 @@ async def kb_open_handler(request):
         return json_ok({"ok": False, "error": str(error)}, status=400)
 
 
+async def kb_source_handler(request):
+    """Serve the original source document registered for a processed record."""
+    kb_id = str(request.match_info.get("kb_id") or "").strip()
+    source = _kb_backend().resolve_source_document(
+        kb_id=kb_id,
+        data_id=request.query.get("dataId", request.query.get("data_id")),
+        file_name=request.query.get("fileName", request.query.get("file_name")),
+        ref=request.query.get("ref"),
+    )
+    target = Path(source.get("path") or "")
+    if source.get("error") or not source.get("is_original") or not target.is_file():
+        raise web.HTTPNotFound(text=source.get("error") or "source document not found")
+    import mimetypes
+    from urllib.parse import quote
+
+    content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return web.FileResponse(
+        path=target,
+        headers={
+            "Content-Type": content_type,
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(target.name)}",
+            "Cache-Control": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+async def kb_source_asset_handler(request):
+    """Serve an image referenced relative to an original text/Markdown file."""
+    kb_id = str(request.match_info.get("kb_id") or "").strip()
+    target = _kb_backend().resolve_source_asset(
+        kb_id=kb_id,
+        data_id=request.query.get("dataId", request.query.get("data_id")),
+        ref=request.query.get("ref"),
+        image_path=request.query.get("path", request.query.get("imagePath")),
+    )
+    if not target or not os.path.isfile(target):
+        raise web.HTTPNotFound(text="source asset not found")
+    return web.FileResponse(
+        path=target,
+        headers={
+            "Cache-Control": "private, max-age=60",
+            "Content-Disposition": "inline",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 async def kb_import_handler(request):
     data = await read_json(request)
     source_dir = str(data.get("sourceDir") or data.get("path") or "").strip()
@@ -2932,6 +2982,8 @@ def create_app():
     app.router.add_post("/kb/import", kb_import_handler)
     app.router.add_get("/kb/jobs/{job_id}", kb_job_status_handler)
     app.router.add_get("/kb/{kb_id}/status", kb_detail_status_handler)
+    app.router.add_get("/kb/{kb_id}/source/asset", kb_source_asset_handler)
+    app.router.add_get("/kb/{kb_id}/source", kb_source_handler)
     app.router.add_post("/kb/{kb_id}/reindex", kb_reindex_handler)
     app.router.add_post("/kb/{kb_id}/open", kb_open_handler)
     app.router.add_delete("/kb/{kb_id}", kb_delete_handler)

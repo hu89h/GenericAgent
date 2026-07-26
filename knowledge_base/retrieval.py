@@ -10,6 +10,7 @@ import json
 import os
 import re
 import threading
+from urllib.parse import unquote
 
 from . import documents
 from .references import clean_public_text, public_reference, section_label, with_reference
@@ -21,6 +22,11 @@ _FIGURE_REF = re.compile(
     r"[图表]\s*[0-9０-９一二三四五六七八九十百]+"
     r"(?:[-－—–.．][0-9０-９一二三四五六七八九十百]+){0,3}"
 )
+_SOURCE_IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp", ".tif", ".tiff",
+}
+
+
 class KnowledgeBaseRetriever:
     """Read-only retrieval facade for configured Zvec knowledge bases."""
 
@@ -961,22 +967,14 @@ class KnowledgeBaseRetriever:
         ref: str | None = None,
         max_chars: int = 200000,
     ) -> dict:
-        data_id = str(data_id or "")
-        kb = self._kb_by_id(kb_id or (data_id.split("::", 1)[0] if "::" in data_id else ""))
-        if kb is None and ref:
-            kb = self._kb_by_id(str(ref).split("/", 1)[0])
-        if kb is None:
-            return {"error_code": "knowledge_base_not_found", "error": "[未找到知识库]"}
-        if data_id and "::" in data_id:
-            rel = data_id.split("::", 1)[1].split("::image::", 1)[0]
-        elif ref:
-            ref_value = str(ref).replace("\\", "/")
-            prefix = kb["id"] + "/"
-            rel = ref_value[len(prefix):] if ref_value.startswith(prefix) else ref_value
-        elif file_name:
-            rel = str(file_name).replace("\\", "/")
-        else:
-            return {"error_code": "document_target_missing", "error": "[未指定文档]"}
+        kb, rel, error = self._document_locator(
+            kb_id=kb_id,
+            data_id=data_id,
+            file_name=file_name,
+            ref=ref,
+        )
+        if error:
+            return error
         target = os.path.realpath(os.path.join(kb["path"], rel))
         if not self._path_is_within(kb["path"], target) or not os.path.isfile(target):
             return {"error_code": "document_not_found", "error": "[未找到文档]"}
@@ -995,6 +993,45 @@ class KnowledgeBaseRetriever:
             "ref": f"{kb['id']}/{rel}",
         }, kind="document")
 
+    def _document_locator(
+        self,
+        *,
+        kb_id: str | None = None,
+        data_id: str | None = None,
+        file_name: str | None = None,
+        ref: str | None = None,
+    ):
+        data_id = str(data_id or "")
+        kb = self._kb_by_id(kb_id or (data_id.split("::", 1)[0] if "::" in data_id else ""))
+        if kb is None and ref:
+            kb = self._kb_by_id(str(ref).split("/", 1)[0])
+        if kb is None:
+            return None, "", {
+                "error_code": "knowledge_base_not_found",
+                "error": "[未找到知识库]",
+            }
+        if data_id and "::" in data_id:
+            rel = data_id.split("::", 1)[1].split("::image::", 1)[0]
+        elif ref:
+            ref_value = str(ref).replace("\\", "/")
+            prefix = kb["id"] + "/"
+            rel = ref_value[len(prefix):] if ref_value.startswith(prefix) else ref_value
+        elif file_name:
+            rel = str(file_name).replace("\\", "/")
+        else:
+            return None, "", {
+                "error_code": "document_target_missing",
+                "error": "[未指定文档]",
+            }
+        rel = rel.replace("\\", "/").lstrip("/")
+        target = os.path.realpath(os.path.join(kb["path"], rel))
+        if not self._path_is_within(kb["path"], target):
+            return None, "", {
+                "error_code": "document_not_found",
+                "error": "[未找到文档]",
+            }
+        return kb, rel, None
+
     def resolve_source_document(
         self,
         kb_id: str | None = None,
@@ -1002,16 +1039,14 @@ class KnowledgeBaseRetriever:
         file_name: str | None = None,
         ref: str | None = None,
     ) -> dict:
-        document = self.read_document(
-            kb_id=kb_id, data_id=data_id, file_name=file_name, ref=ref, max_chars=1
+        kb, processed_rel, error = self._document_locator(
+            kb_id=kb_id,
+            data_id=data_id,
+            file_name=file_name,
+            ref=ref,
         )
-        if document.get("error"):
-            return document
-        kb = self._kb_by_id(document["kb_id"])
-        if kb is None:
-            return {"error": "[未找到知识库]"}
-        processed_rel = str(document["file_name"]).replace("\\", "/")
-        processed_path = os.path.realpath(os.path.join(kb["path"], processed_rel))
+        if error:
+            return error
         package_root = os.path.realpath(os.path.dirname(kb["path"]))
         source_rel = ""
         manifest = os.path.join(package_root, "manifest.json")
@@ -1023,25 +1058,75 @@ class KnowledgeBaseRetriever:
                 if processed_rel in processed:
                     source_rel = str(entry.get("source") or "").replace("\\", "/")
                     break
-        except Exception:
-            pass
+        except Exception as manifest_error:
+            return {
+                "error_code": "source_manifest_invalid",
+                "error": f"[原始文档清单不可用] {manifest_error}",
+            }
+        if not source_rel:
+            return {
+                "error_code": "source_document_not_registered",
+                "error": "[未登记原始文档]",
+            }
         source_root_value = str(kb.get("source_path") or "").strip()
         source_root = os.path.realpath(source_root_value) if source_root_value else ""
-        external_path = os.path.realpath(os.path.join(source_root, source_rel)) if source_root and source_rel else ""
-        external_is_safe = bool(source_root and source_rel and self._path_is_within(source_root, external_path))
-        if external_is_safe and os.path.isfile(external_path):
-            source_path = external_path
-        else:
-            source_path = processed_path
-        if not os.path.isfile(source_path):
-            return {"error": "[未找到原始文档]"}
+        source_path = (
+            os.path.realpath(os.path.join(source_root, source_rel))
+            if source_root
+            else ""
+        )
+        if (
+            not source_root
+            or not self._path_is_within(source_root, source_path)
+            or not os.path.isfile(source_path)
+        ):
+            return {
+                "error_code": "source_document_not_found",
+                "error": "[未找到原始文档]",
+            }
         return with_reference({
-            "kb_id": document["kb_id"],
-            "data_id": document["data_id"],
-            "file_name": document["file_name"],
-            "source_file_name": source_rel or processed_rel,
-            "title": os.path.basename(source_rel or processed_rel),
+            "kb_id": kb["id"],
+            "data_id": f"{kb['id']}::{processed_rel}",
+            "file_name": processed_rel,
+            "source_file_name": source_rel,
+            "title": os.path.basename(source_rel),
             "path": source_path,
-            "is_original": bool(source_rel and source_path == external_path),
-            "ref": document["ref"],
+            "is_original": True,
+            "ref": f"{kb['id']}/{processed_rel}",
         }, kind="document")
+
+    def resolve_source_asset(
+        self,
+        *,
+        kb_id: str | None = None,
+        data_id: str | None = None,
+        ref: str | None = None,
+        image_path: str | None = None,
+    ) -> str | None:
+        source = self.resolve_source_document(
+            kb_id=kb_id,
+            data_id=data_id,
+            ref=ref,
+        )
+        if source.get("error") or not source.get("is_original"):
+            return None
+        kb = self._kb_by_id(source.get("kb_id") or kb_id or "")
+        source_root_value = str((kb or {}).get("source_path") or "").strip()
+        if kb is None or not source_root_value:
+            return None
+        raw = str(image_path or "").strip().strip("<>")
+        raw = unquote(raw.split("?", 1)[0].split("#", 1)[0]).replace("\\", "/")
+        if (
+            not raw
+            or raw.startswith("/")
+            or re.match(r"^[a-z][a-z0-9+.-]*:", raw, re.I)
+            or os.path.splitext(raw)[1].lower() not in _SOURCE_IMAGE_EXTENSIONS
+        ):
+            return None
+        source_root = os.path.realpath(source_root_value)
+        target = os.path.realpath(
+            os.path.join(os.path.dirname(source["path"]), raw.replace("/", os.sep))
+        )
+        if not self._path_is_within(source_root, target) or not os.path.isfile(target):
+            return None
+        return target

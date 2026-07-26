@@ -338,6 +338,19 @@ let bridgeUiOffline = false;
       : null,
     kbStatus: () => rpc('kb/status', {}),
     kbDocs: (params = {}) => rpc('kb/docs', params),
+    kbSourceUrl: (params = {}, assetPath = '') => {
+      const id = params.kbId || params.kb_id || '';
+      if (!id) throw new Error('kb/source missing kbId');
+      const query = new URLSearchParams();
+      const dataId = params.dataId || params.data_id || '';
+      const fileName = params.fileName || params.file_name || '';
+      if (dataId) query.set('dataId', dataId);
+      if (fileName) query.set('fileName', fileName);
+      if (params.ref) query.set('ref', params.ref);
+      if (assetPath) query.set('path', assetPath);
+      const endpoint = assetPath ? 'source/asset' : 'source';
+      return `${bridgeBase}/kb/${encodeURIComponent(id)}/${endpoint}?${query.toString()}`;
+    },
     kbOpen: (params = {}) => rpc('kb/open', params),
     kbImport: (params = {}) => rpc('kb/import', params),
     kbJob: (jobId) => rpc('kb/job', { jobId }),
@@ -669,6 +682,7 @@ const kbState = {
   statusUpdatedAt: 0, documentsLoading: false,
   statusRequest: null, documentRequests: new Map(),
   documentLists: new Map(),
+  documentHtml: new Map(),
 };
 const kbEl = id => document.getElementById(id);
 const kbPageEls = {
@@ -750,6 +764,44 @@ function kbDocumentMeta(doc) {
   const type = dot >= 0 ? title.slice(dot + 1).toUpperCase() : t('kb.document');
   const size = doc.source_file_name ? doc.source_size : doc.size;
   return kbFormat(t('kb.documentMeta'), { type, size: kbFormatBytes(size) });
+}
+
+function kbDocumentSourceUrl(doc, imagePath = '') {
+  return window.ga.kbSourceUrl({
+    kbId: doc.kb_id || '',
+    dataId: doc.data_id || '',
+    fileName: doc.file_name || '',
+    ref: doc.ref || '',
+  }, imagePath);
+}
+
+function kbDocumentSourceType(doc) {
+  const name = kbText(doc.source_file_name || doc.title || doc.file_name);
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function kbOriginalImageUrl(doc, source) {
+  const value = kbText(source).trim();
+  if (!value || /^(?:https?:|data:|blob:)/i.test(value)) return value;
+  if (value.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(value)) return '';
+  return kbDocumentSourceUrl(doc, value);
+}
+
+function kbCachedDocumentHtml(key) {
+  const html = kbState.documentHtml.get(key);
+  if (html == null) return null;
+  kbState.documentHtml.delete(key);
+  kbState.documentHtml.set(key, html);
+  return html;
+}
+
+function kbCacheDocumentHtml(key, html) {
+  kbState.documentHtml.delete(key);
+  kbState.documentHtml.set(key, html);
+  while (kbState.documentHtml.size > 8) {
+    kbState.documentHtml.delete(kbState.documentHtml.keys().next().value);
+  }
 }
 
 function kbPhaseText(job) {
@@ -937,19 +989,63 @@ async function kbOpenDocuments(kb, { force = false } = {}) {
 
 async function kbOpenDocument(doc, { session = null } = {}) {
   if (!doc) return;
-  kbState.activeDoc = doc;
-  const scope = kbScopeForDoc(doc);
-  if (session && activeSess()?.id !== session.id) setActiveSession(session.id);
-  if (kbPageEls.title) kbPageEls.title.textContent = kbDocumentName(doc);
-  if (kbPageEls.source) {
-    kbPageEls.source.innerHTML = `<div class="kb-original-file"><div class="kb-original-file-name">${escapeHtml(kbDocumentName(doc))}</div><div class="kb-empty">${escapeHtml(t('kb.openExternalHint'))}</div></div>`;
-    kbPageEls.source.classList.remove('kb-original-source');
+  try {
+    kbState.activeDoc = doc;
+    const scope = kbScopeForDoc(doc);
+    if (session && activeSess()?.id !== session.id) setActiveSession(session.id);
+    if (kbPageEls.title) kbPageEls.title.textContent = kbDocumentName(doc);
+    if (kbPageEls.source) {
+      kbPageEls.source.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.loading'))}</div>`;
+      kbPageEls.source.classList.remove('kb-original-source');
+    }
+    if (kbPageEls.open) kbPageEls.open.disabled = false;
+    kbRenderView();
+    const current = activeSess();
+    if (kbSessionMatchesScope(current, scope)) kbRenderQa(current);
+    else kbRenderQa(null);
+    if (!doc.source_exists) throw new Error(t('kb.originalUnavailable'));
+
+    const sourceType = kbDocumentSourceType(doc);
+    const sourceUrl = kbDocumentSourceUrl(doc);
+    const cacheKey = `original:${doc.data_id}:${doc.source_size || 0}`;
+    const cachedHtml = kbCachedDocumentHtml(cacheKey);
+    const mountHtml = html => {
+      if (!kbPageEls.source || kbState.activeDoc?.data_id !== doc.data_id) return;
+      kbPageEls.source.innerHTML = html;
+      kbPageEls.source.classList.add('kb-original-source');
+      postRenderEnhance(kbPageEls.source);
+    };
+    if (cachedHtml) {
+      mountHtml(cachedHtml);
+      return;
+    }
+
+    const imageTypes = new Set(['png', 'jpg', 'jpeg', 'jp2', 'webp', 'gif', 'bmp', 'tif', 'tiff']);
+    const textTypes = new Set(['md', 'markdown', 'txt', 'text', 'csv', 'tsv', 'json', 'yaml', 'yml', 'xml', 'html', 'htm']);
+    let html;
+    if (sourceType === 'pdf') {
+      html = `<iframe class="kb-original-frame" src="${escapeHtml(sourceUrl)}" title="${escapeHtml(kbDocumentName(doc))}"></iframe>`;
+    } else if (imageTypes.has(sourceType)) {
+      html = `<div class="kb-original-image-wrap"><img class="kb-original-image" src="${escapeHtml(sourceUrl)}" alt="${escapeHtml(kbDocumentName(doc))}"></div>`;
+    } else if (textTypes.has(sourceType)) {
+      const response = await fetch(sourceUrl, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`${t('kb.originalUnavailable')} (${response.status})`);
+      const content = await response.text();
+      html = content
+        ? `<div class="bubble md kb-document-markdown">${renderTurnBody(content, { resolveImage: image => kbOriginalImageUrl(doc, image) })}</div>`
+        : `<div class="kb-empty">${escapeHtml(t('kb.noData'))}</div>`;
+    } else {
+      html = `<div class="kb-original-file"><div class="kb-original-file-name">${escapeHtml(kbDocumentName(doc))}</div><div class="kb-empty">${escapeHtml(t('kb.previewUnavailable'))}</div></div>`;
+    }
+    kbCacheDocumentHtml(cacheKey, html);
+    mountHtml(html);
+  } catch (error) {
+    if (kbState.activeDoc?.data_id === doc.data_id && kbPageEls.source) {
+      kbPageEls.source.innerHTML = `<div class="kb-empty kb-error">${escapeHtml(error.message || error)}</div>`;
+      kbPageEls.source.classList.remove('kb-original-source');
+    }
+    showError(`${t('err.kbLoad')}: ${error.message || error}`);
   }
-  if (kbPageEls.open) kbPageEls.open.disabled = false;
-  kbRenderView();
-  const current = activeSess();
-  if (kbSessionMatchesScope(current, scope)) kbRenderQa(current);
-  else kbRenderQa(null);
 }
 
 async function kbOpenSessionScope(sess) {

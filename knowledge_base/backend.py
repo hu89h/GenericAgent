@@ -381,6 +381,15 @@ def resolve_source_document(kb_id=None, data_id=None, file_name=None, ref=None):
     )
 
 
+def resolve_source_asset(kb_id=None, data_id=None, ref=None, image_path=None):
+    return _runtime().retrieval.resolve_source_asset(
+        kb_id=kb_id,
+        data_id=data_id,
+        ref=ref,
+        image_path=image_path,
+    )
+
+
 def resolve_open_target(
     *,
     kb_id: str,
