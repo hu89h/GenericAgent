@@ -401,6 +401,8 @@ const STORE = {
   appearance: 'ga_appearance',
   plain: 'ga_plain',
   fontSize: 'ga_font_size',
+  expandThinking: 'ga_expand_thinking',
+  expandTools: 'ga_expand_tools',
   kbCapsulePosition: 'ga_kb_capsule_position',
 };
 const APPEARANCE_IDS = ['light', 'dark'];
@@ -419,15 +421,33 @@ function normalizeChatFontSize(value) {
 
 function bootUiFromDom() {
   const root = document.documentElement;
-  const out = { lang: 'zh', theme: '1', appearance: 'light', plainUi: false, chatFontSize: CHAT_FONT_DEFAULT };
+  const out = {
+    lang: 'zh',
+    theme: '1',
+    appearance: 'light',
+    plainUi: false,
+    chatFontSize: CHAT_FONT_DEFAULT,
+    defaultExpandThinking: false,
+    defaultExpandTools: false,
+  };
   if (root.lang === 'en') out.lang = 'en';
   if (root.dataset.theme) out.theme = root.dataset.theme;
   if (APPEARANCE_IDS.includes(root.dataset.appearance)) out.appearance = root.dataset.appearance;
   if (out.appearance === 'light' && root.dataset.plain === '1') out.plainUi = true;
   if (root.dataset.chatFont) out.chatFontSize = normalizeChatFontSize(root.dataset.chatFont);
+  out.defaultExpandThinking = root.dataset.expandThinking === '1';
+  out.defaultExpandTools = root.dataset.expandTools === '1';
   return out;
 }
-let { lang, theme, appearance, plainUi, chatFontSize } = bootUiFromDom();
+let {
+  lang,
+  theme,
+  appearance,
+  plainUi,
+  chatFontSize,
+  defaultExpandThinking,
+  defaultExpandTools,
+} = bootUiFromDom();
 
 function syncHljsTheme() {
   const link = document.getElementById('hljs-theme');
@@ -443,13 +463,26 @@ function syncBootCache() {
   localStorage.setItem(STORE.theme, theme);
   localStorage.setItem(STORE.appearance, appearance);
   localStorage.setItem(STORE.fontSize, String(chatFontSize));
+  if (defaultExpandThinking) localStorage.setItem(STORE.expandThinking, '1');
+  else localStorage.removeItem(STORE.expandThinking);
+  if (defaultExpandTools) localStorage.setItem(STORE.expandTools, '1');
+  else localStorage.removeItem(STORE.expandTools);
   if (plainUi) localStorage.setItem(STORE.plain, '1');
   else localStorage.removeItem(STORE.plain);
 }
 async function persistUiPrefs() {
   try {
     await window.ga.saveConfig({
-      config: { lang, theme, appearance, plain: plainUi, llmNo: state.llmNo, fontSize: chatFontSize },
+      config: {
+        lang,
+        theme,
+        appearance,
+        plain: plainUi,
+        llmNo: state.llmNo,
+        fontSize: chatFontSize,
+        expandThinking: defaultExpandThinking,
+        expandTools: defaultExpandTools,
+      },
     });
     syncBootCache();
   } catch (_) {}
@@ -666,6 +699,28 @@ function applyAppearance(nextApp, nextPlain, { persist } = { persist: true }) {
   });
   syncPlainSwitch();
   syncHljsTheme();
+  if (persist) void persistUiPrefs();
+}
+
+function syncFoldDefaultSwitches() {
+  document.getElementById('expand-thinking-switch')
+    ?.setAttribute('aria-checked', defaultExpandThinking ? 'true' : 'false');
+  document.getElementById('expand-tools-switch')
+    ?.setAttribute('aria-checked', defaultExpandTools ? 'true' : 'false');
+}
+
+function applyFoldDefaults(expandThinking, expandTools, { persist } = { persist: true }) {
+  defaultExpandThinking = !!expandThinking;
+  defaultExpandTools = !!expandTools;
+  if (defaultExpandThinking) document.documentElement.dataset.expandThinking = '1';
+  else delete document.documentElement.dataset.expandThinking;
+  if (defaultExpandTools) document.documentElement.dataset.expandTools = '1';
+  else delete document.documentElement.dataset.expandTools;
+  syncFoldDefaultSwitches();
+  document.querySelectorAll('details.fold-thinking:not(.fold-thinking-live)')
+    .forEach(el => { el.open = defaultExpandThinking; });
+  document.querySelectorAll('details.fold-tool:not(.fold-tool-live), details.fold-result:not(.fold-tool-live)')
+    .forEach(el => { el.open = defaultExpandTools; });
   if (persist) void persistUiPrefs();
 }
 
@@ -2555,7 +2610,7 @@ function renderTurnBody(body, options = {}) {
       `${t('fold.thinking')}${live ? ' …' : ''}`,
       inner,
       live ? 'fold-thinking fold-thinking-live' : 'fold-thinking',
-      { open: live },
+      { open: live || defaultExpandThinking },
     );
   });
   s = foldAgentProtocolBlocks(s, {
@@ -2566,16 +2621,18 @@ function renderTurnBody(body, options = {}) {
       }
       const live = !!meta?.inFlight;
       return stash(`${t('fold.tool')}: ${name}${live ? ' …' : ''}`, json,
-        live ? 'fold-tool fold-tool-live' : 'fold-tool', { open: live });
+        live ? 'fold-tool fold-tool-live' : 'fold-tool', { open: live || defaultExpandTools });
     },
     onResult(b, meta) {
       const live = !!meta?.inFlight;
       return stash(`${t('fold.toolResult')}${live ? ' …' : ''}`, b,
-        live ? 'fold-result fold-tool-live' : 'fold-result', { open: live });
+        live ? 'fold-result fold-tool-live' : 'fold-result', { open: live || defaultExpandTools });
     },
   });
-  s = s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi, m => stash(t('fold.tool'), m, 'fold-tool'));
-  s = s.replace(/<function_results>[\s\S]*?<\/function_results>/gi, m => stash(t('fold.toolResult'), m, 'fold-result'));
+  s = s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi,
+    m => stash(t('fold.tool'), m, 'fold-tool', { open: defaultExpandTools }));
+  s = s.replace(/<function_results>[\s\S]*?<\/function_results>/gi,
+    m => stash(t('fold.toolResult'), m, 'fold-result', { open: defaultExpandTools }));
   s = s.replace(/<summary>([\s\S]*?)<\/summary>/gi, (_, inner) => `<div class="turn-summary">${inner}</div>`);
   let html = renderMarkdown(s, options);
   // 还原占位符
@@ -5628,6 +5685,7 @@ function openSettings() {
   applyTheme(theme, { persist: false });
   applyAppearance(appearance, plainUi, { persist: false });
   applyChatFontSize(chatFontSize, { persist: false });
+  syncFoldDefaultSwitches();
   void loadKbServiceConfigs();
 }
 async function loadModelProfiles() {
@@ -5747,6 +5805,14 @@ const plainUiSwitch = document.getElementById('plain-ui-switch');
 if (plainUiSwitch) plainUiSwitch.addEventListener('click', () => {
   if (appearance === 'light') applyAppearance('light', !plainUi);
 });
+const expandThinkingSwitch = document.getElementById('expand-thinking-switch');
+if (expandThinkingSwitch) expandThinkingSwitch.addEventListener('click', () => {
+  applyFoldDefaults(!defaultExpandThinking, defaultExpandTools);
+});
+const expandToolsSwitch = document.getElementById('expand-tools-switch');
+if (expandToolsSwitch) expandToolsSwitch.addEventListener('click', () => {
+  applyFoldDefaults(defaultExpandThinking, !defaultExpandTools);
+});
 async function loadBridgeConfig() {
   try {
     const res = await window.ga.getConfig();
@@ -5758,6 +5824,7 @@ async function loadBridgeConfig() {
     if (cfg.theme != null) applyTheme(cfg.theme, { persist: false });
     if (cfg.appearance) applyAppearance(cfg.appearance, !!cfg.plain, { persist: false });
     if (cfg.fontSize != null) applyChatFontSize(cfg.fontSize, { persist: false });
+    applyFoldDefaults(cfg.expandThinking === true, cfg.expandTools === true, { persist: false });
     if (cfg.llmNo != null && state.modelProfiles.length) {
       const p = state.modelProfiles.find(x => (x.id ?? 0) === cfg.llmNo);
       if (p) {

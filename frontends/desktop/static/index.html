@@ -38,6 +38,8 @@
   var cfp=chatFontPx(fs);
   document.documentElement.dataset.chatFont=String(cfp);
   document.documentElement.style.setProperty('--chat-font',cfp+'px');
+  if(localStorage.getItem('ga_expand_thinking')==='1') document.documentElement.dataset.expandThinking='1';
+  if(localStorage.getItem('ga_expand_tools')==='1') document.documentElement.dataset.expandTools='1';
   var hljs=document.getElementById('hljs-theme');
   if(hljs&&app==='dark') hljs.href='https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css';
 })();
@@ -754,6 +756,21 @@
               <span class="chat-font-scale-min">10</span>
               <span class="chat-font-scale-max">20</span>
             </div>
+          </div>
+        </div>
+        <div class="set-block">
+          <div class="set-sec-t" data-i18n="set.responseDisplay"></div>
+          <div class="set-toggle-row">
+            <span class="set-toggle-label" data-i18n="set.expandThinking"></span>
+            <button class="set-switch" type="button" id="expand-thinking-switch" role="switch" aria-checked="false">
+              <span class="set-switch-knob" aria-hidden="true"></span>
+            </button>
+          </div>
+          <div class="set-toggle-row">
+            <span class="set-toggle-label" data-i18n="set.expandTools"></span>
+            <button class="set-switch" type="button" id="expand-tools-switch" role="switch" aria-checked="false">
+              <span class="set-switch-knob" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
         <div class="set-block">
