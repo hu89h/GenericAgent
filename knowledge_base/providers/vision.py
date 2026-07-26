@@ -1,12 +1,12 @@
-"""Synchronous DashScope/OpenAI-compatible vision provider."""
+"""Build-time knowledge-base image analysis provider."""
 from __future__ import annotations
 
-import base64
 import json
-import mimetypes
 import os
 import re
 from typing import Dict
+
+import multimodal
 
 from . import provider_http, provider_settings, rate_limit
 
@@ -70,15 +70,7 @@ def _config() -> Dict[str, object]:
 
 
 def prompt_version() -> int:
-    return int(os.environ.get("GA_KB_IMAGE_PROMPT_VERSION", "6"))
-
-
-def max_image_bytes() -> int:
-    return int(os.environ.get("GA_KB_IMAGE_MAX_BYTES", str(8 * 1024 * 1024)))
-
-
-def runtime_image_qa_on() -> bool:
-    return provider_http.env_bool("GA_KB_RUNTIME_IMAGE_QA", "1")
+    return int(os.environ.get("GA_KB_IMAGE_PROMPT_VERSION", "7"))
 
 
 _TABLE_FOCUS_RE = re.compile(
@@ -110,12 +102,7 @@ def enabled() -> bool:
 
 
 def build_analysis_meta() -> Dict[str, object]:
-    """Only the fields that affect what gets baked into the index.
-
-    Used for the Zvec build/freshness fingerprint.  Deliberately excludes
-    ``runtime_image_qa``: that is a pure query-time switch and must not force
-    a full re-index when toggled.
-    """
+    """Fields that affect what gets baked into the index and VLM cache."""
     cfg = _config()
     return {
         "enabled": enabled(),
@@ -123,14 +110,12 @@ def build_analysis_meta() -> Dict[str, object]:
         "model": cfg["model"],
         "protocol": cfg["protocol"],
         "prompt_version": prompt_version(),
+        "preprocess_version": multimodal.IMAGE_PREPROCESS_VERSION,
     }
 
 
 def analysis_meta() -> Dict[str, object]:
-    """Full meta for display / asset-file record (superset of the build meta)."""
-    meta = build_analysis_meta()
-    meta["runtime_image_qa"] = runtime_image_qa_on()
-    return meta
+    return build_analysis_meta()
 
 
 def understanding_focus(
@@ -147,20 +132,6 @@ def understanding_focus(
     if _FIGURE_FOCUS_RE.search(text):
         return "figure"
     return "general"
-
-
-def _mime(path: str) -> str:
-    return mimetypes.guess_type(path)[0] or "image/jpeg"
-
-
-def _data_url(path: str) -> str:
-    size = os.path.getsize(path)
-    limit = max_image_bytes()
-    if size > limit:
-        raise RuntimeError(f"image too large: {size} bytes > {limit}")
-    with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("ascii")
-    return f"data:{_mime(path)};base64,{b64}"
 
 
 def _prompt(focus: str, title: str, near_text: str, ref_candidates: list[str]) -> str:
@@ -246,32 +217,8 @@ def _extract_json(text: str) -> Dict[str, object]:
     return {"error": "model did not return valid JSON", "raw": raw[:1000]}
 
 
-def _qa_prompt(question: str, title: str, context: Dict[str, object]) -> str:
-    context_json = json.dumps(context or {}, ensure_ascii=False, indent=2)
-    return (
-        "你是图书知识库的实时图片问答器。用户已经通过检索定位到一张图书图片，"
-        "离线预处理信息可能不完整；请同时依据图片本身、图题、已有预处理信息和邻近正文回答用户问题。\n\n"
-        "要求：\n"
-        "1. 优先回答用户问题，不要重新做通用图片描述。\n"
-        "2. 必须区分图片中可直接看见的信息、已有图片预处理信息、邻近正文提供的解释。\n"
-        "3. 如果问题需要的细节在图片中看不清或无法判断，明确说明不确定，不要编造。\n"
-        "4. 输出严格 JSON 对象，不要输出 Markdown 代码块，不要输出解释性前后缀。\n\n"
-        "JSON 字段必须完整包含：\n"
-        "- answer: 针对用户问题的中文答案。\n"
-        "- visual_evidence: 数组，列出来自图片本身或已有图片预处理结果的依据。\n"
-        "- text_context_evidence: 数组，列出来自邻近正文或已有资产文本的依据。\n"
-        "- uncertain: 数组，记录看不清、无法确认或可能误读的内容。\n\n"
-        f"用户问题：{question or ''}\n"
-        f"图题/alt：{title or ''}\n"
-        f"已有图片资产信息：{context_json[:6000]}"
-    )
-
-
 def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
-    """Shared single-image vision call: POST one text+image message, parse the
-    JSON reply, and stamp model/prompt_version/usage/request_id.  Callers own
-    the enablement gate and the prompt; this is the common transport body that
-    analyze_image and answer_image_question previously duplicated."""
+    """POST one build-time text+image request and parse its JSON reply."""
     cfg = _config()
     if not (cfg["api_key"] and cfg["base_url"] and cfg["model"]):
         raise RuntimeError("mykey.py 需要配置支持视觉输入的模型（kb_vision_config、native_oai_* 或 native_claude_*）")
@@ -295,11 +242,9 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
             or 0
         ) or None
 
-    data_url = _data_url(path)
+    image_ref = multimodal.image_path_block(path)
     protocol = str(cfg.get("protocol") or "openai").strip().lower()
     if protocol == "anthropic":
-        header, image_data = data_url.split(",", 1)
-        media_type = header[5:].split(";", 1)[0] or "image/jpeg"
         body = provider_http.anthropic_messages(
             model=cfg["model"],
             messages=[
@@ -307,14 +252,7 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt_text},
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": image_data,
-                            },
-                        },
+                        multimodal.anthropic_image_part(image_ref),
                     ],
                 }
             ],
@@ -343,7 +281,7 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt_text},
-                        {"type": "image_url", "image_url": {"url": data_url}},
+                        multimodal.openai_image_part(image_ref),
                     ],
                 }
             ],
@@ -369,18 +307,6 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
     if body.get("id"):
         result["_request_id"] = body.get("id")
     return result
-
-
-def answer_image_question(
-    path: str,
-    *,
-    question: str,
-    title: str = "",
-    context: Dict[str, object] | None = None,
-) -> Dict[str, object]:
-    if not runtime_image_qa_on():
-        raise RuntimeError("GA_KB_RUNTIME_IMAGE_QA 未开启，无法实时图片问答")
-    return _vision_chat(path, _qa_prompt(question, title, context or {}))
 
 
 def analyze_image(

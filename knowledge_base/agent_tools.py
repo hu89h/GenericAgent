@@ -4,9 +4,7 @@ This module deliberately contains only the agent-facing adapter.  Retrieval,
 asset validation, and index lifecycle remain owned by :mod:`knowledge_base.backend`.
 """
 
-import base64
 import json
-import mimetypes
 import os
 
 from agent_loop import StepOutcome
@@ -83,26 +81,17 @@ KB_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "kb_image_read",
-            "description": "读取知识库定位图片的图题、VLM 描述、表格 Markdown、关联正文和引用信息；attach_image=true 时同时把原图加入下一轮多模态模型输入用于核对图片细节，不能读取任意本地路径。只能使用 kb_search 返回的完整 data_id，或在当前文档范围内提供图1-1、表8-1等图表编号。",
+            "description": "读取知识库定位图片的原图、图题、VLM 描述、表格 Markdown、关联正文和引用信息。调用成功后原图会自动加入下一轮多模态输入。只有当用户要求查看图像细节，或 kb_search 返回的描述不足以回答时才调用，避免浪费视觉 token。不能读取任意本地路径；只能使用 kb_search 返回的完整 data_id，或当前文档范围内的图表编号。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "data_id": {"type": "string"},
                     "ref_key": {"type": "string", "description": "图1-1、表8-1等知识库返回的图表编号"},
-                    "attach_image": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "为 true 时把原图注入下一轮多模态模型输入用于核对细节",
-                    },
                 },
             },
         },
     },
 ]
-
-_MAX_INLINE_IMAGES = 3
-_MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024
-
 
 class KnowledgeBaseToolsMixin:
     """Tool implementations mixed into ``GenericAgentHandler``."""
@@ -458,59 +447,34 @@ class KnowledgeBaseToolsMixin:
         info, error = self._read_image_asset(args)
         if error:
             return self._anchor_outcome(args, error)
+        attach_error = self._queue_image_view(info)
+        if attach_error:
+            return self._anchor_outcome(args, f"[Error] 原图无法加入模型输入: {attach_error}")
         self._record_knowledge_citations(info)
         result = self._public_image(info)
-        # Q4: one tool, one switch.  attach_image=true additionally injects the
-        # original image into the next multimodal turn.  A failed/­capped attach
-        # never discards the read payload — it degrades to a status note so the
-        # model can still answer from the description/table.
-        if bool(args.get("attach_image")):
-            attach_error = self._queue_image_view(info)
-            result["attach_status"] = "unavailable" if attach_error else "attached"
-            result["attach_message"] = attach_error or "原图已加入下一轮模型输入。"
+        result["attach_status"] = "attached"
+        result["attach_message"] = "原图已加入下一轮模型输入。"
         yield "[Info] kb_image_read done.\n"
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
-    @staticmethod
-    def _image_data_url(path):
-        mime = mimetypes.guess_type(path)[0] or "image/png"
-        with open(path, "rb") as handle:
-            encoded = base64.b64encode(handle.read()).decode("ascii")
-        return f"data:{mime};base64,{encoded}"
-
     def _queue_image_view(self, info):
-        pending = getattr(self, "_pending_inline_blocks", None)
-        if pending is None:
-            self._pending_inline_blocks = pending = []
-        # Count actual injected images (image_url blocks) rather than assuming
-        # a fixed 2 blocks per image — robust if the text/image block layout
-        # ever changes.
-        injected = sum(1 for block in pending if block.get("type") == "image_url")
-        if injected >= _MAX_INLINE_IMAGES:
-            return f"[attach_image] 本轮最多查看 {_MAX_INLINE_IMAGES} 张图片。"
         path = str(info.get("image_abspath") or "")
         if not os.path.isfile(path):
-            return "[attach_image] 图片文件不存在，无法注入原图；可使用已返回的图片描述回答。"
-        try:
-            size = os.path.getsize(path)
-            if size > _MAX_INLINE_IMAGE_BYTES:
-                return "[attach_image] 图片文件过大，无法安全注入当前模型上下文；可使用图片描述回答。"
-            data_url = self._image_data_url(path)
-        except OSError as error:
-            return f"[attach_image] 图片读取失败: {error}"
-        pending.extend(
-            [
-                {
-                    "type": "text",
-                    "text": (
-                        "[知识库图片原图]\n"
-                        f"图题: {info.get('display_label') or info.get('title') or ''}\n"
-                        f"来源: {info.get('source_file_name') or ''}\n"
-                        f"引用: {info.get('citation_label') or info.get('title') or '图片'}\n"
-                        "请直接查看紧随其后的原图，并结合工具结果回答用户问题。"
-                    ),
-                },
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ]
+            return "[知识库图片] 原图文件不存在。"
+        queue_image = getattr(self, "queue_image_for_next_turn", None)
+        if not callable(queue_image):
+            return "[知识库图片] 当前 Agent 不支持原生图片输入。"
+        _metadata, error = queue_image(
+            path,
+            name=info.get("display_label") or info.get("title") or os.path.basename(path),
+            context=(
+                "[知识库图片原图]\n"
+                f"图题: {info.get('display_label') or info.get('title') or ''}\n"
+                f"来源: {info.get('source_file_name') or ''}\n"
+                f"引用: {info.get('citation_label') or info.get('title') or '图片'}\n"
+                "请直接查看原图，并结合工具结果回答用户问题。"
+            ),
         )
+        if error:
+            return f"[{error.get('error_code')}] {error.get('error')}"
         return None

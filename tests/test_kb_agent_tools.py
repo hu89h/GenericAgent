@@ -23,6 +23,18 @@ class _Backend:
             "citation_label": "source.pdf · 方法",
         }
 
+    @staticmethod
+    def read_image(**_kwargs):
+        return {
+            "kind": "image",
+            "kb_id": "kb-test",
+            "data_id": "kb-test::doc.md::image::1",
+            "image_id": "image-1",
+            "image_abspath": __file__,
+            "source_file_name": "source.pdf",
+            "description": "diagram",
+        }
+
 
 class _Handler(KnowledgeBaseToolsMixin):
     def __init__(self):
@@ -35,6 +47,10 @@ class _Handler(KnowledgeBaseToolsMixin):
     @staticmethod
     def _get_anchor_prompt(skip=False):
         return "\n" if skip else "\nanchor"
+
+    def queue_image_for_next_turn(self, path, **_kwargs):
+        self.queued_image = path
+        return {"attach_status": "attached"}, None
 
 
 class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
@@ -50,6 +66,22 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
             "default",
             search["parameters"]["properties"]["mode"],
         )
+
+    def test_kb_image_read_has_no_attach_switch_and_always_queues_image(self):
+        schema = next(
+            item["function"]
+            for item in KB_TOOL_SCHEMAS
+            if item["function"]["name"] == "kb_image_read"
+        )
+        self.assertNotIn("attach_image", schema["parameters"]["properties"])
+
+        handler = _Handler()
+        outcome = exhaust(handler.do_kb_image_read(
+            {"data_id": "kb-test::doc.md::image::1"}, None,
+        ))
+
+        self.assertEqual(handler.queued_image, __file__)
+        self.assertIn('"attach_status": "attached"', outcome.data)
 
     def test_text_references_are_not_desktop_citations(self):
         handler = _Handler()

@@ -2,6 +2,7 @@ import io
 import unittest
 import urllib.error
 from email.message import Message
+from types import SimpleNamespace
 from unittest import mock
 
 from knowledge_base.providers import embeddings, provider_http, vision
@@ -208,8 +209,13 @@ class KnowledgeBaseRateLimitTests(unittest.TestCase):
                 "total_tokens": 3000,
             },
         }
+        prepared = SimpleNamespace(
+            media_type="image/png",
+            data="eA==",
+            data_url="data:image/png;base64,eA==",
+        )
         with mock.patch.object(vision, "_config", return_value=config), mock.patch.object(
-            vision, "_data_url", return_value="data:image/png;base64,eA=="
+            vision.multimodal, "prepare_image", return_value=prepared
         ), mock.patch.object(
             vision.provider_http, "chat_completions", return_value=response
         ) as request:

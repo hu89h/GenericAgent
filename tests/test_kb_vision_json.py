@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from PIL import Image
+
 from knowledge_base.providers import vision
 
 
@@ -33,7 +35,7 @@ class VisionJsonParsingTests(unittest.TestCase):
     def test_anthropic_vision_request_uses_native_image_source_blocks(self):
         with tempfile.TemporaryDirectory() as temp:
             image = Path(temp) / "probe.png"
-            image.write_bytes(b"fake-png")
+            Image.new("RGB", (4, 3), "red").save(image)
             cfg = {
                 "base_url": "https://api.anthropic.com",
                 "api_key": "sk-ant-test",

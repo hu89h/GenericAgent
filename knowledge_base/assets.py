@@ -525,6 +525,7 @@ class ImageAssetProcessor:
         self, kb_path: str, image_sha: str, analysis_meta, focus: str = "general", context_key: str = ""
     ) -> str:
         version = analysis_meta.get("prompt_version", 1)
+        preprocess_version = analysis_meta.get("preprocess_version", 1)
         protocol = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(analysis_meta.get("protocol") or "openai"))
         model = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(analysis_meta.get("model") or "image"))
         focus_part = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(focus or "general"))
@@ -532,7 +533,7 @@ class ImageAssetProcessor:
         ctx_part = f".c{ctx}" if ctx else ""
         return os.path.join(
             self.image_cache_dir(kb_path),
-            f"{image_sha}.v{version}.{protocol}.{model}.{focus_part}{ctx_part}.json",
+            f"{image_sha}.v{version}.p{preprocess_version}.{protocol}.{model}.{focus_part}{ctx_part}.json",
         )
 
     def load_cached_analysis(self, kb_path: str, image_sha: str, analysis_meta, focus: str = "general", context_key: str = ""):
