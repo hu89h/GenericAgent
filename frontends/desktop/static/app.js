@@ -1928,53 +1928,63 @@ function closeKnowledgeScopePicker() {
 
 async function openKnowledgeScopePicker() {
   closeKnowledgeScopePicker();
-  const anchor = document.getElementById('chat-plus-btn');
+  const anchor = document.getElementById('knowledge-scope-chip');
   if (!anchor) return;
   const picker = document.createElement('div');
   picker.id = 'knowledge-scope-picker';
   picker.className = 'ga-menu knowledge-scope-picker';
-  picker.innerHTML = `<div class="knowledge-scope-head">${escapeHtml(t('kb.choose'))}</div><div class="knowledge-scope-loading">${escapeHtml(t('kb.loading'))}</div>`;
   document.body.appendChild(picker);
-  document.getElementById('knowledge-scope-chip')?.setAttribute('aria-expanded', 'true');
+  anchor.setAttribute('aria-expanded', 'true');
   const rect = anchor.getBoundingClientRect();
-  picker.style.left = `${Math.max(8, Math.min(window.innerWidth - 328, rect.left))}px`;
+  const pickerWidth = Math.min(580, window.innerWidth - 16);
+  picker.style.left = `${Math.max(8, Math.min(window.innerWidth - pickerWidth - 8, rect.left))}px`;
   picker.style.bottom = `${Math.max(10, window.innerHeight - rect.top + 6)}px`;
   let scopeKbs = [];
+  let selectedKb = null;
+  let docState = { loading: false, documents: [], error: '' };
+  let docLoadSeq = 0;
 
   const currentScope = () => normalizeKnowledgeScope(
     activeSess()?.knowledgeScope || defaultChatKnowledgeScope(),
   );
-  const renderKbChoices = () => {
+
+  const renderPicker = () => {
     const current = currentScope();
-    picker.innerHTML = `<div class="knowledge-scope-head">${escapeHtml(t('kb.choose'))}</div>`
+    const kbItems = scopeKbs.length
+      ? scopeKbs.map(kb => {
+        const active = selectedKb?.id === kb.id;
+        return `<button type="button" class="ga-menu-item ${active ? 'active' : ''}" data-knowledge-scope-kb-id="${escapeHtml(kb.id)}" data-knowledge-scope-kb-name="${escapeHtml(kb.name || kb.id)}">${escapeHtml(kb.name || kb.id)}</button>`;
+      }).join('')
+      : `<div class="knowledge-scope-empty">${escapeHtml(t('kb.noReady'))}</div>`;
+    let docItems = `<div class="knowledge-scope-placeholder">${escapeHtml(t('kb.chooseDocument'))}</div>`;
+    if (selectedKb) {
+      const allActive = current.mode === 'kb' && current.kb_id === selectedKb.id;
+      const rows = docState.documents.map(doc => {
+        const title = doc.title || doc.file_name || doc.ref || doc.data_id || '';
+        const active = current.mode === 'document' && current.kb_id === selectedKb.id
+          && ((current.data_id && current.data_id === doc.data_id) || (current.ref && current.ref === doc.ref));
+        const payload = encodeURIComponent(JSON.stringify({
+          mode: 'document', origin: 'chat', kb_id: doc.kb_id || selectedKb.id,
+          kb_name: selectedKb.name || selectedKb.id, data_id: doc.data_id || '', file_name: doc.file_name || '',
+          ref: doc.ref || '', title,
+        }));
+        return `<button type="button" class="ga-menu-item knowledge-scope-doc ${active ? 'active' : ''}" data-knowledge-scope-doc="${payload}" title="${escapeHtml(doc.file_name || doc.ref || title)}">${escapeHtml(title)}</button>`;
+      }).join('');
+      const status = docState.loading
+        ? `<div class="knowledge-scope-loading">${escapeHtml(t('kb.loading'))}</div>`
+        : docState.error
+          ? `<div class="knowledge-scope-empty">${escapeHtml(docState.error)}</div>`
+          : rows || `<div class="knowledge-scope-empty">${escapeHtml(t('kb.noDocs'))}</div>`;
+      docItems = `<div class="knowledge-scope-pane"><div class="knowledge-scope-head">${escapeHtml(selectedKb.name || selectedKb.id)}</div><div class="knowledge-scope-list">`
+        + `<button type="button" class="ga-menu-item ${allActive ? 'active' : ''}" data-knowledge-scope-select-kb="1">${escapeHtml(t('kb.allInKb'))}</button>`
+        + status + `</div></div>`;
+    } else {
+      docItems = `<div class="knowledge-scope-pane"><div class="knowledge-scope-head">${escapeHtml(t('kb.chooseDocument'))}</div>${docItems}</div>`;
+    }
+    picker.innerHTML = `<div class="knowledge-scope-pane"><div class="knowledge-scope-head">${escapeHtml(t('kb.choose'))}</div><div class="knowledge-scope-list">`
       + `<button type="button" class="ga-menu-item ${current.mode === 'none' ? 'active' : ''}" data-knowledge-scope-kind="none">${escapeHtml(t('kb.disabled'))}</button>`
       + `<button type="button" class="ga-menu-item ${current.mode === 'all' ? 'active' : ''}" data-knowledge-scope-kind="all">${escapeHtml(t('kb.scopeAll'))}</button>`
-      + (scopeKbs.length
-        ? scopeKbs.map(kb => {
-          const active = ['kb', 'document'].includes(current.mode) && current.kb_id === kb.id;
-          return `<button type="button" class="ga-menu-item ${active ? 'active' : ''}" data-knowledge-scope-kb-id="${escapeHtml(kb.id)}" data-knowledge-scope-kb-name="${escapeHtml(kb.name || kb.id)}">${escapeHtml(kb.name || kb.id)}</button>`;
-        }).join('')
-        : `<div class="knowledge-scope-empty">${escapeHtml(t('kb.noReady'))}</div>`);
-  };
-
-  const renderDocChoices = (kb, docs) => {
-    const current = currentScope();
-    picker.innerHTML = `<button type="button" class="knowledge-scope-back" data-knowledge-scope-action="back">${escapeHtml(t('kb.backLibraries'))}</button>`
-      + `<div class="knowledge-scope-head">${escapeHtml(kb.name || kb.id)}</div>`
-      + `<button type="button" class="ga-menu-item ${current.mode === 'kb' && current.kb_id === kb.id ? 'active' : ''}" data-knowledge-scope-kb-id="${escapeHtml(kb.id)}" data-knowledge-scope-kb-name="${escapeHtml(kb.name || kb.id)}" data-knowledge-scope-select-kb="1">${escapeHtml(t('kb.allInKb'))}</button>`
-      + (docs.length
-        ? docs.map(doc => {
-          const title = doc.title || doc.file_name || doc.ref || doc.data_id || '';
-          const active = current.mode === 'document' && current.kb_id === kb.id
-            && ((current.data_id && current.data_id === doc.data_id) || (current.ref && current.ref === doc.ref));
-          const payload = encodeURIComponent(JSON.stringify({
-            mode: 'document', origin: 'chat', kb_id: doc.kb_id || kb.id,
-            kb_name: kb.name || kb.id, data_id: doc.data_id || '', file_name: doc.file_name || '',
-            ref: doc.ref || '', title,
-          }));
-          return `<button type="button" class="ga-menu-item knowledge-scope-doc ${active ? 'active' : ''}" data-knowledge-scope-doc="${payload}" title="${escapeHtml(doc.file_name || doc.ref || title)}">${escapeHtml(title)}</button>`;
-        }).join('')
-        : `<div class="knowledge-scope-empty">${escapeHtml(t('kb.noDocs'))}</div>`);
+      + kbItems + `</div></div>` + docItems;
   };
 
   const chooseScope = async (scope, { close = true } = {}) => {
@@ -2017,8 +2027,6 @@ async function openKnowledgeScopePicker() {
   };
 
   picker.addEventListener('click', async event => {
-    const back = event.target.closest('[data-knowledge-scope-action="back"]');
-    if (back) { event.preventDefault(); renderKbChoices(); return; }
     const none = event.target.closest('[data-knowledge-scope-kind="none"]');
     if (none) { event.preventDefault(); await chooseScopeSafely({ mode: 'none' }); return; }
     const all = event.target.closest('[data-knowledge-scope-kind="all"]');
@@ -2031,47 +2039,68 @@ async function openKnowledgeScopePicker() {
       return;
     }
     const kbItem = event.target.closest('[data-knowledge-scope-kb-id]');
+    const allDocs = event.target.closest('[data-knowledge-scope-select-kb="1"]');
+    if (allDocs && selectedKb) {
+      event.preventDefault();
+      await chooseScopeSafely({ mode: 'kb', kb_id: selectedKb.id, kb_name: selectedKb.name || selectedKb.id });
+      return;
+    }
     if (!kbItem) return;
     event.preventDefault();
     const kb = scopeKbs.find(item => item.id === kbItem.dataset.knowledgeScopeKbId)
       || { id: kbItem.dataset.knowledgeScopeKbId, name: kbItem.dataset.knowledgeScopeKbName || kbItem.dataset.knowledgeScopeKbId };
-    if (kbItem.dataset.knowledgeScopeSelectKb === '1') {
-      await chooseScopeSafely({ mode: 'kb', kb_id: kb.id, kb_name: kb.name || kb.id });
-      return;
-    }
-    try {
-      await chooseScope(
-        { mode: 'kb', kb_id: kb.id, kb_name: kb.name || kb.id },
-        { close: false },
-      );
-    } catch (error) {
-      closeKnowledgeScopePicker();
-      showError(error.message || t('err.kbLoad'));
-      return;
-    }
-    picker.innerHTML = `<div class="knowledge-scope-head">${escapeHtml(kb.name || kb.id)}</div><div class="knowledge-scope-loading">${escapeHtml(t('kb.loading'))}</div>`;
+    const selected = await chooseScopeSafely(
+      { mode: 'kb', kb_id: kb.id, kb_name: kb.name || kb.id },
+      { close: false },
+    );
+    if (!selected) return;
+    selectedKb = kb;
+    docState = { loading: true, documents: [], error: '' };
+    const loadSeq = ++docLoadSeq;
+    renderPicker();
     try {
       const data = await window.ga.kbDocs({ kbId: kb.id });
-      renderDocChoices(kb, Array.isArray(data?.documents) ? data.documents : (Array.isArray(data?.docs) ? data.docs : []));
+      if (loadSeq !== docLoadSeq || selectedKb?.id !== kb.id) return;
+      docState = {
+        loading: false,
+        documents: Array.isArray(data?.documents) ? data.documents : (Array.isArray(data?.docs) ? data.docs : []),
+        error: '',
+      };
     } catch (error) {
-      picker.innerHTML = `<button type="button" class="knowledge-scope-back" data-knowledge-scope-action="back">${escapeHtml(t('kb.backLibraries'))}</button><div class="knowledge-scope-empty">${escapeHtml(error.message || t('err.kbLoad'))}</div>`;
+      if (loadSeq !== docLoadSeq || selectedKb?.id !== kb.id) return;
+      docState = { loading: false, documents: [], error: error.message || t('err.kbLoad') };
     }
+    renderPicker();
   });
 
   try {
+    picker.innerHTML = `<div class="knowledge-scope-pane"><div class="knowledge-scope-loading">${escapeHtml(t('kb.loading'))}</div></div><div class="knowledge-scope-pane"></div>`;
     const data = await window.ga.kbStatus();
     const allKbs = Array.isArray(data?.knowledge_bases) ? data.knowledge_bases : kbStatusKbs();
     scopeKbs = allKbs.filter(kb => ['ready', 'ready_with_warnings'].includes(kb.state));
     const current = currentScope();
-    const currentKb = scopeKbs.find(kb => kb.id === current.kb_id);
-    if (currentKb && ['kb', 'document'].includes(current.mode)) {
-      const docs = await window.ga.kbDocs({ kbId: currentKb.id });
-      renderDocChoices(currentKb, Array.isArray(docs?.documents) ? docs.documents : (Array.isArray(docs?.docs) ? docs.docs : []));
-    } else {
-      renderKbChoices();
+    selectedKb = scopeKbs.find(kb => kb.id === current.kb_id) || null;
+    renderPicker();
+    if (selectedKb) {
+      docState = { loading: true, documents: [], error: '' };
+      const loadSeq = ++docLoadSeq;
+      renderPicker();
+      try {
+        const docs = await window.ga.kbDocs({ kbId: selectedKb.id });
+        if (loadSeq !== docLoadSeq) return;
+        docState = {
+          loading: false,
+          documents: Array.isArray(docs?.documents) ? docs.documents : (Array.isArray(docs?.docs) ? docs.docs : []),
+          error: '',
+        };
+      } catch (error) {
+        if (loadSeq !== docLoadSeq) return;
+        docState = { loading: false, documents: [], error: error.message || t('err.kbLoad') };
+      }
+      renderPicker();
     }
   } catch (error) {
-    picker.innerHTML = `<div class="knowledge-scope-empty">${escapeHtml(error.message || t('err.kbLoad'))}</div>`;
+    picker.innerHTML = `<div class="knowledge-scope-pane"><div class="knowledge-scope-empty">${escapeHtml(error.message || t('err.kbLoad'))}</div></div><div class="knowledge-scope-pane"></div>`;
   }
 }
 
@@ -3095,13 +3124,13 @@ function knowledgeScopeLabel(scope) {
 
 function updateKnowledgeScopeChip(sess = activeSess()) {
   const chip = document.getElementById('knowledge-scope-chip');
-  if (!chip) return;
+  const current = document.getElementById('knowledge-scope-current');
+  if (!chip || !current) return;
   const scope = normalizeKnowledgeScope(sess?.knowledgeScope || defaultChatKnowledgeScope());
   const label = knowledgeScopeLabel(scope);
-  const labelEl = chip.querySelector('.knowledge-scope-label');
-  if (labelEl) labelEl.textContent = label;
-  chip.dataset.scopeMode = scope.mode;
-  chip.title = label;
+  current.textContent = label;
+  current.dataset.scopeMode = scope.mode;
+  current.title = label;
 }
 
 function saveSessions() {}
@@ -7727,10 +7756,6 @@ function bindComposerInRoot(root, opts) {
     if (act === 'upload') {
       window.gaSetActiveFileComposer?.(ctx);
       fileInput?.click();
-      return;
-    }
-    if (act === 'knowledge-scope' && ctx === 'chat') {
-      window.gaOpenKnowledgeScopePicker?.();
       return;
     }
     if (act === 'preset') openModal('preset-modal');
