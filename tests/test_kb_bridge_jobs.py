@@ -147,7 +147,7 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
                     "text_chunks": 10,
                     "images_indexed": 2,
                     "images_total": 3,
-                    "failures": [{"error": "image timeout"}],
+                    "failures": [{"error": "当前模型不支持图片输入"}],
                 },
             ],
             "imageDocuments": [
@@ -158,7 +158,7 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
                     "source": "documents/internal-a.md:assets/internal.png",
                     "source_document": "books/alpha.pdf",
                     "stage": "image_analysis",
-                    "error": "image timeout",
+                    "error": "当前模型不支持图片输入",
                 },
             ],
         })
@@ -168,6 +168,7 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         self.assertEqual(snapshot["documents"][0]["name"], "alpha.pdf")
         self.assertEqual(snapshot["documents"][0]["status"], "succeeded_with_warnings")
         self.assertEqual(snapshot["documents"][0]["warningCount"], 1)
+        self.assertEqual(snapshot["documents"][0]["errorCodes"], ["vision_unsupported"])
         self.assertNotIn("source", snapshot["documents"][0])
         self.assertEqual(snapshot["imageDocuments"], [
             {"name": "alpha.pdf", "completed": 3, "total": 3},

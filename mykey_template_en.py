@@ -39,11 +39,12 @@
 # 'enabled': True turns on build-time image analysis: a vision model reads each
 # image and writes its caption/table/description into the index so retrieval can
 # match on it (off = images kept as placeholders only, not searchable text).
-# Leave apibase/apikey/model empty to reuse native_oai_config (that model must
-# accept image input); or point to a dedicated vision model. The env var
+# Leave apibase/apikey/model empty to reuse native_oai/native_claude (the model
+# must accept image input); or point to a dedicated vision model. The env var
 # GA_KB_IMAGE_ANALYSIS, when explicitly set, takes precedence over this flag.
 # kb_vision_config = {
 #     'enabled': True,
+#     # 'protocol': 'openai',  # or 'anthropic' for native Anthropic Messages
 #     # 'apibase': 'https://.../v1',
 #     # 'apikey': '<your-vision-api-key>',
 #     # 'model': '<vision-capable-model>',

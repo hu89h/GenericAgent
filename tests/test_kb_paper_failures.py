@@ -19,9 +19,10 @@ PAPER_SOURCE = Path(
 
 
 class _DeterministicAssets(ImageAssetProcessor):
-    def __init__(self, *, failed_images=0):
+    def __init__(self, *, failed_images=0, skip_vision=False):
         super().__init__(usage_tracker=UsageTracker())
         self.failed_images = failed_images
+        self.skip_vision = skip_vision
 
     def analyze_image_jobs(
         self,
@@ -36,6 +37,11 @@ class _DeterministicAssets(ImageAssetProcessor):
         for index, job in enumerate(jobs):
             if index < self.failed_images:
                 result = {"error": "injected image failure"}
+            elif self.skip_vision:
+                result = {
+                    "vision_skipped": True,
+                    "analysis_warning": "当前模型不支持图片输入，已保留基础图片引用",
+                }
             else:
                 result = {
                     "description": f"deterministic description for {job.title}",
@@ -110,8 +116,11 @@ class PaperPartialFailureTests(unittest.TestCase):
     def _copy_paper(self, target):
         shutil.copytree(PAPER_SOURCE, target, copy_function=shutil.copy2)
 
-    def _pipeline(self, failed_images=0):
-        assets = _DeterministicAssets(failed_images=failed_images)
+    def _pipeline(self, failed_images=0, skip_vision=False):
+        assets = _DeterministicAssets(
+            failed_images=failed_images,
+            skip_vision=skip_vision,
+        )
         index = _FakeIndex()
         return IngestPipeline(
             document_processor=DocumentProcessor(),
@@ -175,6 +184,24 @@ class PaperPartialFailureTests(unittest.TestCase):
                 )
                 self.assertTrue(Path(config.active_root(kb_id)).is_dir())
                 self.assertFalse(Path(config.staging_root(kb_id)).exists())
+
+    def test_text_only_model_keeps_all_basic_image_references(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "paper-text-only-model"
+            self._copy_paper(source)
+            with mock.patch.object(config, "DATA_ROOT", str(Path(temp) / "data")), mock.patch.object(
+                config, "CONFIG_PATH", str(Path(temp) / "kb.yaml")
+            ):
+                result = self._pipeline(skip_vision=True).import_kb(str(source))
+
+                self.assertEqual(result["state"], "ready_with_warnings")
+                self.assertEqual(result["summary"]["text_chunks"], 180)
+                self.assertEqual(result["summary"]["image_chunks"], 10)
+                self.assertEqual(len(result["failures"]), 2)
+                self.assertTrue(all(
+                    item["stage"] == "image_capability"
+                    for item in result["failures"]
+                ))
 
 
 if __name__ == "__main__":

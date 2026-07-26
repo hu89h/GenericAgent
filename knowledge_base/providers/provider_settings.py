@@ -61,6 +61,38 @@ def _preferred_llm_cfg(vars_: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+def _preferred_vision_cfg(vars_: Dict[str, Any], protocol: str = "") -> Dict[str, Any]:
+    """Choose a native model config for KB vision when no override is set."""
+    requested = str(protocol or "").strip().lower().replace("-", "_")
+    if requested not in {"anthropic", "messages", "anthropic_messages", "claude"}:
+        for name, cfg in vars_.items():
+            if "native_oai" in name and _is_model_cfg(name, cfg):
+                return {**dict(cfg), "protocol": "openai"}
+    if requested in {"", "anthropic", "messages", "anthropic_messages", "claude"}:
+        for name, cfg in vars_.items():
+            if "native_claude" in name and isinstance(cfg, dict):
+                if cfg.get("apikey") and cfg.get("apibase") and cfg.get("model"):
+                    return {**dict(cfg), "protocol": "anthropic"}
+    if requested in {"", "openai", "chat_completions", "oai"}:
+        for name, cfg in vars_.items():
+            if "native_oai" in name and _is_model_cfg(name, cfg):
+                return {**dict(cfg), "protocol": "openai"}
+    return {}
+
+
+def _vision_protocol(cfg: Dict[str, Any], fallback: Dict[str, Any]) -> str:
+    value = str(
+        cfg.get("protocol")
+        or cfg.get("provider")
+        or cfg.get("api_mode")
+        or fallback.get("protocol")
+        or "openai"
+    ).strip().lower().replace("-", "_")
+    if value in {"anthropic", "messages", "anthropic_messages", "claude"}:
+        return "anthropic"
+    return "openai"
+
+
 def _qwen_cfg(vars_: Dict[str, Any]) -> Dict[str, Any]:
     for name, cfg in vars_.items():
         if not isinstance(cfg, dict):
@@ -91,13 +123,16 @@ def vision_config() -> Dict[str, Any]:
     ``GA_KB_VISION_BASE_URL`` / ``GA_KB_VISION_API_KEY`` / ``GA_KB_VISION_MODEL``
     environment overrides — lets image understanding use a vision-capable
     model independent of the default chat model.  When none is present it
-    falls back to the regular ``native_oai_*`` config (:func:`llm_config`),
-    preserving the historical "reuse the first native_oai model" behaviour.
+    falls back to a configured ``native_oai_*`` or ``native_claude_*`` model,
+    preserving the historical "reuse the first native_oai model" behaviour
+    when both are present.
     """
     vars_ = _load_mykey_vars()
     raw = vars_.get("kb_vision_config")
     cfg = dict(raw) if isinstance(raw, dict) else {}
-    fallback = _preferred_llm_cfg(vars_)
+    fallback = _preferred_vision_cfg(vars_, cfg.get("protocol") or cfg.get("api_mode"))
+    if not fallback:
+        fallback = _preferred_llm_cfg(vars_)
 
     def pick(*keys, env: str = "", default: Any = "") -> Any:
         for key in keys:
@@ -117,6 +152,7 @@ def vision_config() -> Dict[str, Any]:
     apibase = str(pick("apibase", "base_url", env="GA_KB_VISION_BASE_URL")).strip().rstrip("/")
     apikey = str(pick("apikey", "api_key", env="GA_KB_VISION_API_KEY")).strip()
     model = str(pick("model", env="GA_KB_VISION_MODEL")).strip()
+    protocol = _vision_protocol(cfg, fallback)
     timeout = int(pick("read_timeout", "timeout", default=120) or 120)
     retries = int(pick("max_retries", default=4) or 4)
     max_tokens = int(
@@ -131,6 +167,7 @@ def vision_config() -> Dict[str, Any]:
         "apibase": apibase,
         "apikey": apikey,
         "model": model,
+        "protocol": protocol,
         "read_timeout": timeout,
         "max_retries": retries,
         "max_tokens": max(512, max_tokens),

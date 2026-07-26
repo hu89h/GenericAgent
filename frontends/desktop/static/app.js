@@ -1413,8 +1413,12 @@ function kbDocumentResultHtml(item) {
     images: item.imagesIndexed || 0,
     imageTotal: item.imagesTotal || 0,
   });
+  const warningReasons = Array.isArray(item.errorCodes)
+    ? [...new Set(item.errorCodes.filter(Boolean).map(kbErrorText))].join('；')
+    : '';
   const warnings = item.warningCount
     ? ` · ${kbFormat(t('kb.documentWarnings'), { count: item.warningCount })}`
+      + (warningReasons ? `：${warningReasons}` : '')
     : '';
   return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(detail + warnings)}</div>`;
 }

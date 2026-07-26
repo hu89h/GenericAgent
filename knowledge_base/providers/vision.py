@@ -11,6 +11,35 @@ from typing import Dict
 from . import provider_http, provider_settings, rate_limit
 
 
+_VISION_UNSUPPORTED_RE = re.compile(
+    r"(?:"
+    r"(?:does not support|doesn't support|not support(?:ed)?|unsupported|does not accept|cannot accept|only supports? text)"
+    r".{0,100}(?:image|image_url|vision|visual|multimodal)"
+    r"|"
+    r"(?:image|image_url|vision|visual|multimodal)"
+    r".{0,100}(?:does not support|doesn't support|not support(?:ed)?|unsupported|does not accept|cannot accept|only supports? text)"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def is_vision_unsupported_error(error: object) -> bool:
+    """Return true only for an explicit model/image capability rejection.
+
+    Transport errors such as timeouts, TLS EOFs and rate limits deliberately do
+    not match this classifier; those must continue through the normal retry
+    path instead of disabling image analysis for the whole import.
+    """
+    if isinstance(error, dict):
+        error = error.get("error") or error.get("message") or ""
+    text = str(error or "").strip()
+    if not text:
+        return False
+    if "不支持图片" in text or "不支持视觉" in text or "仅支持文本" in text:
+        return True
+    return bool(_VISION_UNSUPPORTED_RE.search(text))
+
+
 def _config() -> Dict[str, object]:
     """Resolve vision endpoint/model/timeouts fresh on every call.
 
@@ -24,6 +53,7 @@ def _config() -> Dict[str, object]:
         "base_url": str(cfg.get("apibase") or cfg.get("base_url") or "").rstrip("/"),
         "api_key": cfg.get("apikey") or "",
         "model": cfg.get("model") or "",
+        "protocol": str(cfg.get("protocol") or "openai").strip().lower(),
         "timeout": int(cfg.get("read_timeout") or cfg.get("timeout") or 120),
         "retries": int(cfg.get("max_retries") or 4),
         "max_tokens": int(cfg.get("max_tokens") or 8192),
@@ -91,6 +121,7 @@ def build_analysis_meta() -> Dict[str, object]:
         "enabled": enabled(),
         "base_url": cfg["base_url"],
         "model": cfg["model"],
+        "protocol": cfg["protocol"],
         "prompt_version": prompt_version(),
     }
 
@@ -243,7 +274,7 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
     analyze_image and answer_image_question previously duplicated."""
     cfg = _config()
     if not (cfg["api_key"] and cfg["base_url"] and cfg["model"]):
-        raise RuntimeError("mykey.py 需要配置支持视觉输入的模型（kb_vision_config 或 native_oai_*）")
+        raise RuntimeError("mykey.py 需要配置支持视觉输入的模型（kb_vision_config、native_oai_* 或 native_claude_*）")
     limiter = rate_limit.get_limiter(
         "kb_vlm",
         rpm=cfg["rpm_limit"],
@@ -264,31 +295,73 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
             or 0
         ) or None
 
-    body = provider_http.chat_completions(
-        model=cfg["model"],
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": _data_url(path)}},
-                ],
-            }
-        ],
-        base=cfg["base_url"],
-        key=cfg["api_key"],
-        timeout=cfg["timeout"],
-        retries=cfg["retries"],
-        extra={"temperature": 0, "max_tokens": cfg["max_tokens"]},
-        rate_limiter=limiter,
-        estimated_tokens=cfg["token_reserve"],
-        usage_tokens=usage_tokens,
-    )
-    choice = body["choices"][0]
-    content = choice["message"]["content"]
+    data_url = _data_url(path)
+    protocol = str(cfg.get("protocol") or "openai").strip().lower()
+    if protocol == "anthropic":
+        header, image_data = data_url.split(",", 1)
+        media_type = header[5:].split(";", 1)[0] or "image/jpeg"
+        body = provider_http.anthropic_messages(
+            model=cfg["model"],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": image_data,
+                            },
+                        },
+                    ],
+                }
+            ],
+            base=cfg["base_url"],
+            key=cfg["api_key"],
+            timeout=cfg["timeout"],
+            retries=cfg["retries"],
+            max_tokens=cfg["max_tokens"],
+            extra={"temperature": 0},
+            auth_mode="x-api-key" if str(cfg["api_key"]).startswith("sk-ant-") else "bearer",
+            rate_limiter=limiter,
+            estimated_tokens=cfg["token_reserve"],
+            usage_tokens=usage_tokens,
+        )
+        content = "".join(
+            str(block.get("text") or "")
+            for block in (body.get("content") or [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+        finish_reason = body.get("stop_reason")
+    else:
+        body = provider_http.chat_completions(
+            model=cfg["model"],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+            base=cfg["base_url"],
+            key=cfg["api_key"],
+            timeout=cfg["timeout"],
+            retries=cfg["retries"],
+            extra={"temperature": 0, "max_tokens": cfg["max_tokens"]},
+            rate_limiter=limiter,
+            estimated_tokens=cfg["token_reserve"],
+            usage_tokens=usage_tokens,
+        )
+        choice = body["choices"][0]
+        content = choice["message"]["content"]
+        finish_reason = choice.get("finish_reason")
     result = _extract_json(content)
-    if result.get("error") and choice.get("finish_reason"):
-        result["finish_reason"] = str(choice.get("finish_reason"))
+    if result.get("error") and finish_reason:
+        result["finish_reason"] = str(finish_reason)
     result["model"] = cfg["model"]
     result["prompt_version"] = prompt_version()
     if isinstance(body.get("usage"), dict):

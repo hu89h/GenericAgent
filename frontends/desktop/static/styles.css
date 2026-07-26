@@ -485,6 +485,7 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; f
 .kb-config-row{ display:grid; grid-template-columns:minmax(0,1fr) minmax(100px,.45fr); gap:8px; }
 .kb-config-link{ color:var(--accent); font-size:11px; line-height:1.35; text-decoration:none; }
 .kb-config-link:hover{ text-decoration:underline; }
+.kb-vision-hint{ margin:8px 0 0; color:var(--muted); font-size:11px; line-height:1.45; }
 .kb-config-foot{ display:flex; align-items:center; gap:8px; margin-top:2px; }
 .kb-config-foot .set-btn{ margin-left:auto; min-width:82px; justify-content:center; }
 .kb-config-status{ min-height:18px; color:var(--muted); font-size:11px; line-height:1.35; }

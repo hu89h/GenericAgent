@@ -57,6 +57,7 @@ class RecordBuilder:
         image_records: list[dict] = []
         image_jobs = {}
         image_indexes = {}
+        image_capability_warnings: set[str] = set()
         docs_with_chunks = 0
 
         for position, (rel, absolute_path, _mtime, _size) in enumerate(scanned, 1):
@@ -147,6 +148,18 @@ class RecordBuilder:
             check_cancelled(cancelled)
             analysis = image_results.get(record.get("image_id"))
             self.assets.apply_image_analysis(record, analysis)
+            capability_warning = str(record.get("analysis_warning") or "").strip()
+            if capability_warning:
+                document = str(record.get("file_name") or "")
+                if document and document not in image_capability_warnings:
+                    image_capability_warnings.add(document)
+                    failures.append({
+                        "source": document,
+                        "document": document,
+                        "stage": "image_capability",
+                        "error_type": "VisionUnsupported",
+                        "error": capability_warning,
+                    })
             if record.get("analysis_error"):
                 failures.append({
                     "source": (

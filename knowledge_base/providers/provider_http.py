@@ -84,6 +84,8 @@ def post_json(
     rate_limiter=None,
     estimated_tokens: int = 1,
     usage_tokens=None,
+    auth_mode: str = "bearer",
+    extra_headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     base = (base or base_url()).rstrip("/")
     key = key if key is not None else api_key()
@@ -92,7 +94,13 @@ def post_json(
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"accept": "application/json", "content-type": "application/json"}
     if key:
-        headers["authorization"] = f"Bearer {key}"
+        if str(auth_mode or "bearer").strip().lower() in {"x-api-key", "x_api_key", "anthropic"}:
+            headers["x-api-key"] = key
+        else:
+            headers["authorization"] = f"Bearer {key}"
+    for name, value in (extra_headers or {}).items():
+        if value is not None and str(value) != "":
+            headers[str(name)] = str(value)
     req = urllib.request.Request(endpoint_url(base, path), data=data, headers=headers, method="POST")
     last_error = None
     retry_after = None
@@ -177,6 +185,44 @@ def chat_completions(
         timeout=timeout,
         retries=retries,
         error_prefix="chat completion endpoint",
+        rate_limiter=rate_limiter,
+        estimated_tokens=estimated_tokens,
+        usage_tokens=usage_tokens,
+    )
+
+
+def anthropic_messages(
+    *,
+    model: str,
+    messages: list,
+    base: Optional[str] = None,
+    key: Optional[str] = None,
+    timeout: int = 120,
+    retries: int = 2,
+    max_tokens: int = 8192,
+    extra: Optional[Dict[str, Any]] = None,
+    auth_mode: str = "bearer",
+    rate_limiter=None,
+    estimated_tokens: int = 1,
+    usage_tokens=None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": int(max_tokens),
+    }
+    if extra:
+        payload.update(extra)
+    return post_json(
+        "/messages",
+        payload,
+        base=base,
+        key=key,
+        timeout=timeout,
+        retries=retries,
+        error_prefix="anthropic messages endpoint",
+        auth_mode=auth_mode,
+        extra_headers={"anthropic-version": "2023-06-01"},
         rate_limiter=rate_limiter,
         estimated_tokens=estimated_tokens,
         usage_tokens=usage_tokens,

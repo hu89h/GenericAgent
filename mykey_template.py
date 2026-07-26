@@ -50,7 +50,7 @@
 #     'model': 'text-embedding-v4',
 #     'dimension': 1024,
 #     'batch_size': 10,
-#     'concurrency': 10,
+#     'concurrency': 32,
 #     'max_retries': 4,
 # }
 # 默认按 RPM=1800、TPM=1200000 的 80% 预算限流；可通过
@@ -71,17 +71,18 @@
 # ── 知识库图片理解（视觉模型，可选）───────────────────────────────────────────
 # 'enabled': True 持久开启构建期图片分析：用视觉模型读图，把图注/表格/描述写进
 # 索引供检索命中（关闭时仍保留图题和上下文记录，但没有 VLM 描述）。
-# apibase/apikey/model 留空时复用 native_oai_config（该模型需支持视觉输入）；
+# apibase/apikey/model 留空时按协议复用 native_oai/native_claude 配置（模型需支持视觉输入）；
 # 也可单独指定视觉专用模型。环境变量 GA_KB_IMAGE_ANALYSIS 若显式设置则优先。
 # kb_vision_config = {
 #     'enabled': True,
+#     # 'protocol': 'openai',  # or 'anthropic' for native Anthropic Messages
 #     # 'apibase': 'https://.../v1',
 #     # 'apikey': '<your-vision-api-key>',
 #     # 'model': '<vision-capable-model>',
 #     # 'max_tokens': 8192,  # 复杂图表描述的最大输出长度
 #     # 'max_retries': 4,
 # }
-# 构建期图片分析默认并发 8，并按 RPM=30000、TPM=5000000 的 80% 预算限流；
+# 构建期图片分析默认并发 64，并按 RPM=30000、TPM=5000000 的 80% 预算限流；
 # 可通过 GA_KB_IMAGE_CONCURRENCY、GA_KB_VLM_* 环境变量调整。
 
 # ══════════════════════════════════════════════════════════════════════════════

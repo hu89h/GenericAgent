@@ -525,13 +525,14 @@ class ImageAssetProcessor:
         self, kb_path: str, image_sha: str, analysis_meta, focus: str = "general", context_key: str = ""
     ) -> str:
         version = analysis_meta.get("prompt_version", 1)
+        protocol = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(analysis_meta.get("protocol") or "openai"))
         model = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(analysis_meta.get("model") or "image"))
         focus_part = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(focus or "general"))
         ctx = re.sub(r"[^A-Za-z0-9]+", "", str(context_key or ""))[:12]
         ctx_part = f".c{ctx}" if ctx else ""
         return os.path.join(
             self.image_cache_dir(kb_path),
-            f"{image_sha}.v{version}.{model}.{focus_part}{ctx_part}.json",
+            f"{image_sha}.v{version}.{protocol}.{model}.{focus_part}{ctx_part}.json",
         )
 
     def load_cached_analysis(self, kb_path: str, image_sha: str, analysis_meta, focus: str = "general", context_key: str = ""):
@@ -823,7 +824,13 @@ class ImageAssetProcessor:
         asset["description"] = analysis.get("description", "")
         asset["table_markdown"] = analysis.get("table_markdown", "")
         asset["uncertain"] = analysis.get("uncertain", [])
-        asset["analysis_error"] = analysis.get("error", "")
+        # A model that explicitly rejects image input is a configuration
+        # warning, not a failed image.  Keep the canonical image record with
+        # its caption/context/source fields so text-only models still provide
+        # useful image references.  Ordinary per-image errors remain failures
+        # and are handled by RecordBuilder as before.
+        asset["analysis_warning"] = analysis.get("analysis_warning", "")
+        asset["analysis_error"] = "" if analysis.get("vision_skipped") else analysis.get("error", "")
         if asset["analysis_error"] and analysis.get("finish_reason"):
             asset["analysis_error"] += (
                 f" (finish_reason={analysis.get('finish_reason')})"
@@ -908,8 +915,55 @@ class ImageAssetProcessor:
             emit_progress(None, 0)
         results = {}
         done = 0
-        if workers <= 1:
+
+        # Use the first image as a capability probe before opening the worker
+        # pool.  A text-only model must not receive dozens of doomed image
+        # requests when one explicit rejection is enough to establish the
+        # capability.  This is intentionally based on the provider's error
+        # classification, never on a model-name heuristic.
+        first_job = jobs[0]
+        check_cancelled(cancelled)
+        first_analysis, first_delta = self.analyze_image_job(kb["path"], first_job)
+        check_cancelled(cancelled)
+        self._usage_tracker.merge_image_analysis(first_delta)
+        first_analysis = first_analysis or {}
+        try:
+            from .providers import vision as vision_provider
+            unsupported = vision_provider.is_vision_unsupported_error(first_analysis)
+        except Exception:
+            unsupported = False
+        if unsupported:
+            warning = (
+                "当前模型不支持图片输入，已跳过图片 VLM 分析；"
+                "图片的图号、图注和来源仍已保留。"
+            )
+            fallback = {
+                "vision_skipped": True,
+                "analysis_warning": warning,
+                "uncertain": [warning],
+            }
+            log(
+                "  [warn] 当前模型不支持图片输入，已跳过剩余 "
+                f"{len(jobs)} 个图片分析请求，保留基础图片引用。"
+            )
             for job in jobs:
+                check_cancelled(cancelled)
+                results[job.image_sha] = dict(fallback)
+                done += 1
+                mark_document_progress(job)
+                emit_progress(job, done)
+            return results
+
+        results[first_job.image_sha] = first_analysis
+        done = 1
+        mark_document_progress(first_job)
+        emit_progress(first_job, done)
+        remaining_jobs = jobs[1:]
+        if not remaining_jobs:
+            return results
+
+        if workers <= 1:
+            for job in remaining_jobs:
                 check_cancelled(cancelled)
                 analysis, delta = self.analyze_image_job(kb["path"], job)
                 check_cancelled(cancelled)
@@ -924,7 +978,10 @@ class ImageAssetProcessor:
         executor = ThreadPoolExecutor(max_workers=workers)
         futures = {}
         try:
-            futures = {executor.submit(self.analyze_image_job, kb["path"], job): job for job in jobs}
+            futures = {
+                executor.submit(self.analyze_image_job, kb["path"], job): job
+                for job in remaining_jobs
+            }
             for future in as_completed(futures):
                 check_cancelled(cancelled)
                 job = futures[future]
