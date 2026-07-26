@@ -46,6 +46,19 @@ def format_tool_result(data):
         return json.dumps(data, indent=2, ensure_ascii=False, default=json_default)
     return str(data)
 
+
+def has_tool_payload(chunks):
+    """Return true when a tool already streamed substantive result content."""
+    text = "".join(str(chunk) for chunk in chunks if chunk is not None)
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.match(r"^\[(?:Action|Status|Info|Debug|Warn|Warning)\]", stripped):
+            continue
+        return True
+    return False
+
 def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                       max_turns=40, verbose=True, initial_user_content=None, yield_info=False):
     messages = [
@@ -86,18 +99,32 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
                 else: yield f"🛠️ {tool_name}({_compact_tool_args(tool_name, args)})\n"
             handler.current_turn = turn
             gen = handler.dispatch(tool_name, args, response, index=ii, tool_num=len(tool_calls))
+            streamed_tool_chunks = []
+            result_fence_open = False
             try:
                 v = next(gen)
-                def proxy(): yield v; return (yield from gen)
-                if verbose: yield '`````\n'
+                def proxy():
+                    streamed_tool_chunks.append(v)
+                    yield v
+                    while True:
+                        try: chunk = next(gen)
+                        except StopIteration as stopped: return stopped.value
+                        streamed_tool_chunks.append(chunk)
+                        yield chunk
+                if verbose and tool_name != 'no_tool':
+                    yield '`````\n'
+                    result_fence_open = True
                 outcome = (yield from proxy()) if verbose else exhaust(proxy())
             except StopIteration as e: outcome = e.value
 
             if verbose and tool_name != 'no_tool' and outcome.data is not None:
                 rendered_result = format_tool_result(outcome.data)
-                if rendered_result:
+                if rendered_result and not has_tool_payload(streamed_tool_chunks):
+                    if not result_fence_open:
+                        yield '`````\n'
+                        result_fence_open = True
                     yield rendered_result + '\n'
-            if verbose: yield '`````\n'
+            if verbose and result_fence_open: yield '`````\n'
             
             if outcome.should_exit: 
                 exit_reason = {'result': 'EXITED', 'data': outcome.data}; break

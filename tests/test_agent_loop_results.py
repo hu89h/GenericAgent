@@ -16,6 +16,21 @@ class _ToolHandler(BaseHandler):
         return StepOutcome({"answer": "real tool payload", "count": 2}, next_prompt=None)
 
 
+class _StreamingToolHandler(_ToolHandler):
+    def do_demo(self, args, response):
+        yield "real streamed payload\n"
+        return StepOutcome("real streamed payload", next_prompt=None)
+
+
+class _NoToolClient:
+    last_tools = ""
+
+    def chat(self, messages, tools):
+        response = SimpleNamespace(content="answer", thinking="", tool_calls=[])
+        yield "answer"
+        return response
+
+
 class _Client:
     last_tools = ""
 
@@ -48,6 +63,24 @@ class AgentLoopResultTests(unittest.TestCase):
         text = "".join(chunk for chunk in chunks if isinstance(chunk, str))
         self.assertIn('"answer": "real tool payload"', text)
         self.assertIn('"count": 2', text)
+
+    def test_streamed_tool_payload_is_not_appended_twice(self):
+        chunks = list(agent_runner_loop(
+            _Client(), "system", "question", _StreamingToolHandler(), [],
+            max_turns=1, verbose=True,
+        ))
+
+        text = "".join(chunk for chunk in chunks if isinstance(chunk, str))
+        self.assertEqual(text.count("real streamed payload"), 1)
+
+    def test_final_answer_has_no_orphan_tool_result_fence(self):
+        chunks = list(agent_runner_loop(
+            _NoToolClient(), "system", "question", _ToolHandler(), [],
+            max_turns=1, verbose=True,
+        ))
+
+        text = "".join(chunk for chunk in chunks if isinstance(chunk, str))
+        self.assertEqual(text.count("`````"), 0)
 
 
 if __name__ == "__main__":
