@@ -130,7 +130,7 @@ class KnowledgeBaseToolsMixin:
         raw = getattr(self.parent, "knowledge_scope", None)
         scope = dict(raw) if isinstance(raw, dict) else {}
         mode = str(scope.get("mode") or scope.get("kind") or "all").strip().lower()
-        if mode not in {"all", "kb", "document"}:
+        if mode not in {"none", "all", "kb", "document"}:
             mode = "all"
         scope["mode"] = mode
         return scope
@@ -141,6 +141,8 @@ class KnowledgeBaseToolsMixin:
 
     def _scope_allows_target(self, data_id=None, ref=None, file_name=None, kb_id=None):
         scope = self._knowledge_scope()
+        if scope["mode"] == "none":
+            return False
         if scope["mode"] == "all":
             return True
 
@@ -162,6 +164,8 @@ class KnowledgeBaseToolsMixin:
 
     def _scope_search_kwargs(self):
         scope = self._knowledge_scope()
+        if scope["mode"] == "none":
+            return {"kb_id": "__knowledge_disabled__"}
         if scope["mode"] == "all":
             return {}
         out = {"kb_id": self._scope_kb_id()}
@@ -277,6 +281,8 @@ class KnowledgeBaseToolsMixin:
         )
 
     def do_kb_search(self, args, response):
+        if self._knowledge_scope()["mode"] == "none":
+            return self._anchor_outcome(args, "[Error] 当前对话未启用知识库。")
         query = str(args.get("query") or "").strip()
         if not query:
             return self._anchor_outcome(args, "[Error] kb_search 需要 query 参数。")
@@ -304,6 +310,8 @@ class KnowledgeBaseToolsMixin:
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
     def do_kb_read(self, args, response):
+        if self._knowledge_scope()["mode"] == "none":
+            return self._anchor_outcome(args, "[Error] 当前对话未启用知识库。")
         data_id = str(args.get("data_id") or "").strip() or None
         ref = str(args.get("ref") or "").strip() or None
         if not data_id and not ref:
@@ -346,6 +354,8 @@ class KnowledgeBaseToolsMixin:
         return self._anchor_outcome(args, "\n\n".join(parts) or "[kb_read] 未读到内容。")
 
     def do_kb_list(self, args, response):
+        if self._knowledge_scope()["mode"] == "none":
+            return self._anchor_outcome(args, "[Error] 当前对话未启用知识库。")
         data_id = str(args.get("data_id") or "").strip() or None
         ref = str(args.get("ref") or "").strip() or None
         if data_id or ref:
@@ -402,6 +412,8 @@ class KnowledgeBaseToolsMixin:
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
     def _read_image_asset(self, args):
+        if self._knowledge_scope()["mode"] == "none":
+            return None, "[Error] 当前对话未启用知识库。"
         lookup = {
             key: str(args.get(key) or "").strip() or None
             for key in ("data_id", "ref_key")

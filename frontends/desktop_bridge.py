@@ -188,7 +188,7 @@ def normalize_knowledge_scope(value: Any) -> dict:
     """Normalize the scope carried by a Desktop chat session."""
     raw = value if isinstance(value, dict) else {}
     mode = str(raw.get("mode") or raw.get("kind") or raw.get("type") or "all").strip().lower()
-    if mode not in {"all", "kb", "document"}:
+    if mode not in {"none", "all", "kb", "document"}:
         mode = "all"
     origin = str(raw.get("origin") or raw.get("source") or "").strip().lower()
     if origin not in {"chat", "knowledge"}:
@@ -1990,6 +1990,7 @@ _UI_KEYS = (
     "fontSize",
     "expandThinking",
     "expandTools",
+    "defaultKbEnabled",
 )
 
 
