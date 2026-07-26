@@ -65,7 +65,7 @@ def _runtime_config() -> dict:
         "timeout": int(raw.get("timeout") or 60),
         "retries": int(raw.get("max_retries") or 4),
         "batch_size": int(raw.get("batch_size") or 10),
-        "concurrency": max(1, int(raw.get("concurrency") or 10)),
+        "concurrency": max(1, int(raw.get("concurrency") or 32)),
         "request_interval": max(0.0, float(raw.get("request_interval") or 0)),
         "rpm_limit": max(1, int(os.environ.get("GA_KB_EMBED_RPM", "1800"))),
         "tpm_limit": max(1, int(os.environ.get("GA_KB_EMBED_TPM", "1200000"))),

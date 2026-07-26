@@ -158,6 +158,16 @@ class KnowledgeBaseRateLimitTests(unittest.TestCase):
         self.assertEqual(kwargs["rate_limiter"].rpm, 1440)
         self.assertEqual(kwargs["rate_limiter"].tpm, 960_000)
 
+    def test_embedding_default_concurrency_is_thirty_two(self):
+        with mock.patch.object(
+            embeddings.provider_settings,
+            "embedding_config",
+            return_value={"apikey": "secret", "apibase": "https://example.test", "model": "text-embedding-v4"},
+        ):
+            config = embeddings._runtime_config()
+
+        self.assertEqual(config["concurrency"], 32)
+
     def test_embedding_batches_are_split_below_derived_tps(self):
         config = {
             "max_tokens": 8192,
