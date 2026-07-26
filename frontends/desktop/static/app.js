@@ -2027,6 +2027,10 @@ async function openKnowledgeScopePicker() {
   };
 
   picker.addEventListener('click', async event => {
+    // renderPicker() replaces the clicked row before this async handler ends.
+    // Stop propagation first so the detached target is not mistaken for an
+    // outside click by the document-level menu closer.
+    event.stopPropagation();
     const none = event.target.closest('[data-knowledge-scope-kind="none"]');
     if (none) { event.preventDefault(); await chooseScopeSafely({ mode: 'none' }); return; }
     const all = event.target.closest('[data-knowledge-scope-kind="all"]');
@@ -2049,11 +2053,8 @@ async function openKnowledgeScopePicker() {
     event.preventDefault();
     const kb = scopeKbs.find(item => item.id === kbItem.dataset.knowledgeScopeKbId)
       || { id: kbItem.dataset.knowledgeScopeKbId, name: kbItem.dataset.knowledgeScopeKbName || kbItem.dataset.knowledgeScopeKbId };
-    const selected = await chooseScopeSafely(
-      { mode: 'kb', kb_id: kb.id, kb_name: kb.name || kb.id },
-      { close: false },
-    );
-    if (!selected) return;
+    // A knowledge-base row only navigates the picker. The scope is committed
+    // from the document pane via "all documents" or a concrete document.
     selectedKb = kb;
     docState = { loading: true, documents: [], error: '' };
     const loadSeq = ++docLoadSeq;
