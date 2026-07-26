@@ -23,7 +23,14 @@ class _DeterministicAssets(ImageAssetProcessor):
         super().__init__(usage_tracker=UsageTracker())
         self.failed_images = failed_images
 
-    def analyze_image_jobs(self, kb, image_jobs, log, progress=None):
+    def analyze_image_jobs(
+        self,
+        kb,
+        image_jobs,
+        log,
+        progress=None,
+        cancelled=None,
+    ):
         results = {}
         jobs = list(image_jobs.values())
         for index, job in enumerate(jobs):
@@ -70,7 +77,16 @@ class _FakeIndexBuilder:
     def begin_build(self):
         return None
 
-    def build(self, kb, *, records, sources, progress=None, logfn=None):
+    def build(
+        self,
+        kb,
+        *,
+        records,
+        sources,
+        progress=None,
+        logfn=None,
+        cancelled=None,
+    ):
         os.makedirs(self.index.path(kb["path"]), exist_ok=True)
         kinds = [record.get("kind") for record in records]
         stats = {
@@ -130,6 +146,10 @@ class PaperPartialFailureTests(unittest.TestCase):
                 self.assertEqual(result["summary"]["n_docs"], 1)
                 self.assertGreater(result["summary"]["text_chunks"], 0)
                 self.assertEqual(result["failures"][0]["stage"], "markdown")
+                self.assertEqual(
+                    sorted(item["status"] for item in result["documents"]),
+                    ["failed", "succeeded"],
+                )
                 self.assertTrue(active.is_dir())
                 self.assertFalse(Path(config.staging_root(kb_id)).exists())
 
@@ -149,6 +169,10 @@ class PaperPartialFailureTests(unittest.TestCase):
                 self.assertEqual(result["summary"]["image_chunks"], 9)
                 self.assertEqual(len(result["failures"]), 1)
                 self.assertEqual(result["failures"][0]["stage"], "image_analysis")
+                self.assertEqual(
+                    sorted(item["status"] for item in result["documents"]),
+                    ["succeeded", "succeeded_with_warnings"],
+                )
                 self.assertTrue(Path(config.active_root(kb_id)).is_dir())
                 self.assertFalse(Path(config.staging_root(kb_id)).exists())
 

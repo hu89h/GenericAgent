@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from knowledge_base import config
+from knowledge_base.cancellation import KnowledgeBaseCancelled
 from knowledge_base.locking import KnowledgeBaseLockedError, KnowledgeBaseMutationLock
 from knowledge_base.pipeline import IngestPipeline, Publisher
 
@@ -17,7 +18,16 @@ class _ProbeIndex:
 
 
 class _PreparedDocuments:
-    def prepare(self, source_dir, *, stage_root, kb_id, name="", progress=None):
+    def prepare(
+        self,
+        source_dir,
+        *,
+        stage_root,
+        kb_id,
+        name="",
+        progress=None,
+        cancelled=None,
+    ):
         processed = os.path.join(stage_root, "processed")
         os.makedirs(processed)
         return {
@@ -31,7 +41,15 @@ class _PreparedDocuments:
 
 
 class _OneRecord:
-    def build(self, kb, manifest, *, progress=None, logfn=None):
+    def build(
+        self,
+        kb,
+        manifest,
+        *,
+        progress=None,
+        logfn=None,
+        cancelled=None,
+    ):
         return SimpleNamespace(
             records=[{
                 "data_id": f"{kb['id']}::doc.md",
@@ -66,6 +84,16 @@ class _FailingIndexBuilder:
 
     def build(self, *args, **kwargs):
         raise RuntimeError(self.message)
+
+
+class _CancellingDocuments(_PreparedDocuments):
+    def __init__(self, cancel_event):
+        self.cancel_event = cancel_event
+
+    def prepare(self, *args, **kwargs):
+        result = super().prepare(*args, **kwargs)
+        self.cancel_event.set()
+        return result
 
 
 class PublisherTests(unittest.TestCase):
@@ -125,6 +153,96 @@ class IngestRollbackTests(unittest.TestCase):
                     self.assertTrue(os.path.isfile(sentinel))
                     self.assertFalse(os.path.exists(config.staging_root(kb_id)))
                     self.assertFalse(os.path.exists(os.path.join(config.kb_root(kb_id), "rollback")))
+
+    def test_cancellation_cleans_staging_and_preserves_old_active(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = os.path.join(temp, "source")
+            os.makedirs(source)
+            data_root = os.path.join(temp, "kbs")
+            config_path = os.path.join(temp, "kb.yaml")
+            cancel_event = threading.Event()
+            with mock.patch.object(config, "DATA_ROOT", data_root), mock.patch.object(
+                config, "CONFIG_PATH", config_path
+            ):
+                kb_id = config.kb_id_for_source(source)
+                active = config.active_root(kb_id)
+                os.makedirs(os.path.join(active, "processed"))
+                sentinel = os.path.join(active, "old-active.txt")
+                with open(sentinel, "w", encoding="utf-8") as handle:
+                    handle.write("old")
+                config.upsert_kb(kb_id, name="old", source_path=source)
+                pipeline = IngestPipeline(
+                    document_processor=_CancellingDocuments(cancel_event),
+                    record_builder=_OneRecord(),
+                    index_builder=_FailingIndexBuilder("must not build"),
+                    publisher=Publisher(),
+                    index=_ProbeIndex(),
+                )
+
+                with self.assertRaises(KnowledgeBaseCancelled):
+                    pipeline.import_kb(
+                        source,
+                        name="new",
+                        cancelled=cancel_event.is_set,
+                    )
+
+                self.assertTrue(os.path.isfile(sentinel))
+                self.assertFalse(os.path.exists(config.staging_root(kb_id)))
+
+
+class DocumentResultTests(unittest.TestCase):
+    def test_results_are_based_on_published_records_and_original_documents(self):
+        manifest = {
+            "files": [
+                {
+                    "kind": "document",
+                    "source": "books/alpha.pdf",
+                    "name": "alpha.pdf",
+                    "status": "ready",
+                    "processed": ["documents/a-alpha.md"],
+                },
+                {
+                    "kind": "document",
+                    "source": "books/beta.pdf",
+                    "name": "beta.pdf",
+                    "status": "failed",
+                    "processed": [],
+                },
+            ],
+        }
+        records = [
+            {"kind": "text", "file_name": "documents/a-alpha.md"},
+            {"kind": "text", "file_name": "documents/a-alpha.md"},
+            {"kind": "image", "file_name": "documents/a-alpha.md"},
+        ]
+        results, failures = IngestPipeline._document_results(
+            manifest,
+            records,
+            [
+                {
+                    "source": "documents/a-alpha.md:assets/figure.png",
+                    "document": "documents/a-alpha.md",
+                    "stage": "image_analysis",
+                    "error_type": "ImageAnalysisError",
+                    "error": "image failed",
+                },
+                {
+                    "source": "books/beta.pdf",
+                    "stage": "mineru",
+                    "error_type": "MinerUError",
+                    "error": "parse failed",
+                },
+            ],
+        )
+
+        self.assertEqual(results[0]["name"], "alpha.pdf")
+        self.assertEqual(results[0]["status"], "succeeded_with_warnings")
+        self.assertEqual(results[0]["text_chunks"], 2)
+        self.assertEqual(results[0]["images_indexed"], 1)
+        self.assertEqual(results[0]["images_total"], 2)
+        self.assertEqual(results[1]["status"], "failed")
+        self.assertEqual(failures[0]["source_document"], "books/alpha.pdf")
+        self.assertEqual(failures[1]["source_document"], "books/beta.pdf")
 
 
 class MutationLockTests(unittest.TestCase):

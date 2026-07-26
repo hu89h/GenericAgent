@@ -19,6 +19,18 @@ try:
     from . import provider_settings
 except ImportError:  # pragma: no cover - supports direct CLI execution
     import provider_settings
+try:
+    from ..cancellation import (
+        KnowledgeBaseCancelled,
+        check_cancelled,
+        wait_with_cancellation,
+    )
+except ImportError:  # pragma: no cover - supports direct CLI execution
+    from knowledge_base.cancellation import (
+        KnowledgeBaseCancelled,
+        check_cancelled,
+        wait_with_cancellation,
+    )
 
 
 SUPPORTED_EXTS = {
@@ -79,9 +91,16 @@ def _headers(config: dict[str, str]) -> dict[str, str]:
     }
 
 
-def _retry(label: str, operation: Callable[[], Any], attempts: int = 3) -> Any:
+def _retry(
+    label: str,
+    operation: Callable[[], Any],
+    attempts: int = 3,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> Any:
     last_error: Exception | None = None
     for attempt in range(max(1, int(attempts))):
+        check_cancelled(cancelled)
         try:
             return operation()
         except _RetryableMinerUError as error:
@@ -89,7 +108,7 @@ def _retry(label: str, operation: Callable[[], Any], attempts: int = 3) -> Any:
         except requests.RequestException as error:
             last_error = error
         if attempt + 1 < max(1, int(attempts)):
-            time.sleep(min(2 ** attempt, 8))
+            wait_with_cancellation(min(2 ** attempt, 8), cancelled)
     raise MinerUError(f"{label}失败：{last_error}") from last_error
 
 
@@ -116,6 +135,7 @@ def _request_json(
     headers: dict[str, str],
     context: str,
     json_body: dict[str, Any] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     def operation() -> dict[str, Any]:
         with requests.request(
@@ -130,10 +150,16 @@ def _request_json(
     return _retry(
         context,
         operation,
+        cancelled=cancelled,
     )
 
 
-def _request_upload_urls(config: dict[str, str], files: list[MinerUFile]) -> str:
+def _request_upload_urls(
+    config: dict[str, str],
+    files: list[MinerUFile],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> str:
     payload = {
         "files": [
             {"name": item.relative_path, "data_id": item.data_id}
@@ -147,6 +173,7 @@ def _request_upload_urls(config: dict[str, str], files: list[MinerUFile]) -> str
         headers=_headers(config),
         context="申请 MinerU 上传地址",
         json_body=payload,
+        cancelled=cancelled,
     )
     data = result.get("data") or {}
     batch_id = str(data.get("batch_id") or "")
@@ -164,7 +191,10 @@ def _request_upload_urls(config: dict[str, str], files: list[MinerUFile]) -> str
     return batch_id
 
 
-def _upload(item: MinerUFile) -> MinerUFile:
+def _upload(
+    item: MinerUFile,
+    cancelled: Callable[[], bool] | None = None,
+) -> MinerUFile:
     def operation() -> MinerUFile:
         try:
             with item.source_path.open("rb") as handle, requests.put(
@@ -181,7 +211,11 @@ def _upload(item: MinerUFile) -> MinerUFile:
             raise MinerUError(f"上传 {item.relative_path} 失败（HTTP {status}）")
         return item
 
-    return _retry(f"上传 {item.relative_path}", operation)
+    return _retry(
+        f"上传 {item.relative_path}",
+        operation,
+        cancelled=cancelled,
+    )
 
 
 def _poll_batch(
@@ -189,15 +223,18 @@ def _poll_batch(
     batch_id: str,
     files: list[MinerUFile],
     on_update: Callable[[MinerUFile], None],
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     deadline = time.monotonic() + 60 * 60
     url = f"{config['base_url']}/extract-results/batch/{batch_id}"
     while time.monotonic() < deadline:
+        check_cancelled(cancelled)
         result = _request_json(
             "GET",
             url,
             headers=_headers(config),
             context="查询 MinerU 解析状态",
+            cancelled=cancelled,
         )
         rows = (result.get("data") or {}).get("extract_result") or []
         by_data_id = {
@@ -233,7 +270,7 @@ def _poll_batch(
             on_update(item)
         if complete and all(item.state in {"done", "failed"} for item in files):
             return
-        time.sleep(2)
+        wait_with_cancellation(2, cancelled)
     for item in files:
         if item.state not in {"done", "failed"}:
             item.state = "failed"
@@ -241,7 +278,11 @@ def _poll_batch(
             on_update(item)
 
 
-def _download(url: str, target: Path) -> None:
+def _download(
+    url: str,
+    target: Path,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     def operation() -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -263,7 +304,11 @@ def _download(url: str, target: Path) -> None:
         finally:
             response.close()
 
-    _retry("下载 MinerU 解析结果", operation)
+    _retry(
+        "下载 MinerU 解析结果",
+        operation,
+        cancelled=cancelled,
+    )
 
 
 def process_batches(
@@ -271,11 +316,13 @@ def process_batches(
     download_dir: Path,
     *,
     on_update: Callable[[MinerUFile], None],
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[MinerUFile]:
     """Upload, poll, and download all supplied files in MinerU batches."""
     config = load_config()
     jobs = []
     for path, relative_path in files:
+        check_cancelled(cancelled)
         path = Path(path).resolve()
         if not path.is_file():
             raise MinerUError(f"待处理文件不存在：{path}")
@@ -288,32 +335,59 @@ def process_batches(
     download_dir.mkdir(parents=True, exist_ok=True)
 
     for first in range(0, len(jobs), MAX_BATCH_FILES):
+        check_cancelled(cancelled)
         batch = jobs[first:first + MAX_BATCH_FILES]
-        batch_id = _request_upload_urls(config, batch)
+        batch_id = _request_upload_urls(config, batch, cancelled=cancelled)
         for item in batch:
             item.state = "uploading"
             on_update(item)
-        with ThreadPoolExecutor(max_workers=min(4, len(batch))) as pool:
-            futures = {pool.submit(_upload, item): item for item in batch}
+        pool = ThreadPoolExecutor(max_workers=min(4, len(batch)))
+        futures = {}
+        try:
+            futures = {
+                pool.submit(_upload, item, cancelled): item
+                for item in batch
+            }
             for future in as_completed(futures):
+                check_cancelled(cancelled)
                 item = futures[future]
                 try:
                     future.result()
                     item.state = "processing"
+                except KnowledgeBaseCancelled:
+                    raise
                 except Exception as error:
                     item.state = "failed"
                     item.error = str(error)
                 on_update(item)
+        except KnowledgeBaseCancelled:
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
         pending = [item for item in batch if item.state != "failed"]
         if pending:
-            _poll_batch(config, batch_id, pending, on_update)
+            _poll_batch(
+                config,
+                batch_id,
+                pending,
+                on_update,
+                cancelled=cancelled,
+            )
         for item in batch:
+            check_cancelled(cancelled)
             if item.state != "done":
                 continue
             item.state = "downloading"
             on_update(item)
             try:
-                _download(item.zip_url, download_dir / f"{item.data_id}.zip")
+                _download(
+                    item.zip_url,
+                    download_dir / f"{item.data_id}.zip",
+                    cancelled=cancelled,
+                )
                 item.state = "downloaded"
             except Exception as error:
                 item.state = "failed"

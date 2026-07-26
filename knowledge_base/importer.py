@@ -21,9 +21,11 @@ from typing import Any, Callable
 from urllib.parse import quote, unquote
 
 try:
+    from .cancellation import KnowledgeBaseCancelled, check_cancelled
     from .documents import read_textfile
     from .providers import mineru
 except ImportError:  # pragma: no cover - supports direct CLI execution
+    from cancellation import KnowledgeBaseCancelled, check_cancelled
     from documents import read_textfile
     from providers import mineru
 
@@ -229,7 +231,17 @@ def _pdf_page_count(path: Path) -> int:
 
 def _emit(progress: Callable[[dict], None] | None, phase: str, counts: dict[str, int], **extra: Any) -> None:
     if callable(progress):
-        progress({"phase": phase, **counts, **extra})
+        progress({
+            "phase": phase,
+            **counts,
+            "document_progress": {
+                "completed": max(0, int(counts.get("completed") or 0)),
+                "total": max(0, int(counts.get("total") or 0)),
+                "failed": max(0, int(counts.get("failed") or 0)),
+                "ready": max(0, int(counts.get("ready") or 0)),
+            },
+            **extra,
+        })
 
 
 class DocumentProcessor:
@@ -252,7 +264,9 @@ class DocumentProcessor:
         kb_id: str,
         name: str = "",
         progress: Callable[[dict], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        check_cancelled(cancelled)
         source_root = Path(os.path.realpath(os.path.expanduser(str(source_dir or ""))))
         if not source_root.is_dir():
             raise ValueError(f"sourceDir is not a directory: {source_root}")
@@ -274,6 +288,19 @@ class DocumentProcessor:
             "assets": 0,
         }
 
+        def refresh_document_counts() -> None:
+            documents = [item for item in entries if item["kind"] == "document"]
+            counts.update({
+                "total": len(documents),
+                "ready": sum(item["status"] == "ready" for item in documents),
+                "failed": sum(item["status"] == "failed" for item in documents),
+                "assets": sum(item["kind"] == "asset" for item in entries),
+                "ignored": sum(item["kind"] == "ignored" for item in entries),
+            })
+            counts["skipped"] = counts["ignored"]
+            counts["succeeded"] = counts["ready"]
+            counts["completed"] = counts["ready"] + counts["failed"]
+
         def output_rel_for(source_rel: str) -> str:
             digest = hashlib.sha256(source_rel.encode("utf-8")).hexdigest()[:12]
             stem = _safe_component(Path(source_rel).stem, 48)
@@ -292,6 +319,7 @@ class DocumentProcessor:
             has_markdown = any(path.suffix.lower() in MARKDOWN_EXTS for path, _rel in files)
             referenced_images: set[str] = set()
             for path, rel in files:
+                check_cancelled(cancelled)
                 if path.suffix.lower() not in MARKDOWN_EXTS:
                     continue
                 try:
@@ -312,6 +340,7 @@ class DocumentProcessor:
 
             conversion_specs: list[dict[str, Any]] = []
             for path, rel in files:
+                check_cancelled(cancelled)
                 ext = path.suffix.lower()
                 entry = {
                     "source": rel,
@@ -354,11 +383,13 @@ class DocumentProcessor:
                 conversion_specs.append({"source": rel, "path": path, "entry": entry})
                 counts["converting"] += 1
 
-            counts["total"] = counts["markdown"] + counts["converting"]
+            document_entries = [item for item in entries if item["kind"] == "document"]
+            refresh_document_counts()
             _emit(progress, "scanned", counts)
 
             upload_specs: list[dict[str, Any]] = []
             for spec in conversion_specs:
+                check_cancelled(cancelled)
                 source = spec["source"]
                 path = spec["path"]
                 entry = spec["entry"]
@@ -367,6 +398,7 @@ class DocumentProcessor:
                         _pdf_page_count(path)
                     except Exception as error:
                         self._mark_failure(entry, error, "pdf_validation")
+                        refresh_document_counts()
                         _emit(
                             progress, "processing", counts,
                             source=source, name=path.name, current=source,
@@ -385,6 +417,7 @@ class DocumentProcessor:
                         return
                     entry = entry_by_source[spec["source"]]
                     entry.update(status=job.state, error=job.error)
+                    refresh_document_counts()
                     _emit(
                         progress, "processing", counts,
                         source=spec["source"], name=Path(spec["source"]).name,
@@ -400,7 +433,10 @@ class DocumentProcessor:
                         [(spec["path"], spec["relative_path"]) for spec in upload_specs],
                         downloads_root,
                         on_update=on_mineru_update,
+                        cancelled=cancelled,
                     )
+                except KnowledgeBaseCancelled:
+                    raise
                 except Exception as error:
                     jobs = []
                     for spec in upload_specs:
@@ -412,12 +448,14 @@ class DocumentProcessor:
                         jobs_by_relative[job.relative_path]["job"] = job
 
                 for spec in upload_specs:
+                    check_cancelled(cancelled)
                     source = spec["source"]
                     entry = entry_by_source[source]
                     job = jobs_by_relative.get(spec["relative_path"], {}).get("job")
                     if not job or job.state != "downloaded":
                         error = getattr(job, "error", "") or entry.get("error") or "MinerU 处理失败"
                         self._mark_failure(entry, error, "mineru")
+                        refresh_document_counts()
                         _emit(
                             progress, "processing", counts,
                             source=source, name=Path(source).name, current=source,
@@ -449,31 +487,26 @@ class DocumentProcessor:
                             status="ready", error="", processed=[target_rel],
                             stage="", error_type="",
                         )
+                        refresh_document_counts()
                         _emit(
                             progress, "processing", counts,
                             source=source, name=Path(source).name, current=source,
                             file_status="ready",
                         )
+                    except KnowledgeBaseCancelled:
+                        raise
                     except Exception as error:
                         self._mark_failure(entry, error, "mineru_result")
                         shutil.rmtree(target.parent / asset_root, ignore_errors=True)
+                        refresh_document_counts()
                         _emit(
                             progress, "processing", counts,
                             source=source, name=Path(source).name, current=source,
                             file_status="failed", error=str(error),
                         )
 
-            document_entries = [item for item in entries if item["kind"] == "document"]
-            counts.update({
-                "ready": sum(item["status"] == "ready" for item in document_entries),
-                "assets": sum(item["kind"] == "asset" for item in entries),
-                "ignored": sum(item["kind"] == "ignored" for item in entries),
-                "failed": sum(item["status"] == "failed" for item in document_entries),
-                "total": len(document_entries),
-            })
-            counts["skipped"] = counts["ignored"]
-            counts["succeeded"] = counts["ready"]
-            counts["completed"] = counts["ready"] + counts["failed"]
+            refresh_document_counts()
+            check_cancelled(cancelled)
             if not counts["ready"]:
                 raise RuntimeError("没有成功处理的知识库文档")
 

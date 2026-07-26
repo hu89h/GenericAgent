@@ -11,6 +11,7 @@ from typing import Callable
 
 from . import config
 from .build import IndexBuilder, RecordBuilder
+from .cancellation import check_cancelled
 from .importer import DocumentProcessor
 from .locking import mutation_lock
 
@@ -107,6 +108,87 @@ class IngestPipeline:
         if os.path.isdir(active_cache):
             shutil.copytree(active_cache, stage_cache, dirs_exist_ok=True)
 
+    @staticmethod
+    def _relative_key(value) -> str:
+        return str(value or "").replace("\\", "/").lstrip("/")
+
+    @classmethod
+    def _document_results(
+        cls,
+        manifest: dict,
+        records: list[dict],
+        failures: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        """Resolve preprocessing/build outcomes back to original source documents."""
+        entries = [
+            item for item in (manifest.get("files") or [])
+            if isinstance(item, dict) and item.get("kind") == "document"
+        ]
+        by_processed: dict[str, dict] = {}
+        by_source: dict[str, dict] = {}
+        for entry in entries:
+            source = cls._relative_key(entry.get("source"))
+            if source:
+                by_source[source] = entry
+            for processed in entry.get("processed") or []:
+                key = cls._relative_key(processed)
+                if key:
+                    by_processed[key] = entry
+
+        decorated_failures: list[dict] = []
+        for raw in failures:
+            failure = dict(raw or {})
+            failure_source = cls._relative_key(failure.get("source"))
+            document_key = cls._relative_key(failure.get("document"))
+            owner = by_processed.get(document_key) or by_source.get(document_key)
+            if owner is None:
+                owner = by_source.get(failure_source)
+            if owner is None:
+                for processed, entry in by_processed.items():
+                    if failure_source == processed or failure_source.startswith(f"{processed}:"):
+                        owner = entry
+                        break
+            if owner is not None:
+                failure["source_document"] = cls._relative_key(owner.get("source"))
+            decorated_failures.append(failure)
+
+        document_results: list[dict] = []
+        for entry in entries:
+            source = cls._relative_key(entry.get("source"))
+            processed = {
+                cls._relative_key(value)
+                for value in (entry.get("processed") or [])
+                if cls._relative_key(value)
+            }
+            owned_failures = [
+                failure for failure in decorated_failures
+                if cls._relative_key(failure.get("source_document")) == source
+            ]
+            owned_records = [
+                record for record in records
+                if cls._relative_key(record.get("file_name")) in processed
+            ]
+            text_chunks = sum(record.get("kind") != "image" for record in owned_records)
+            images_indexed = sum(record.get("kind") == "image" for record in owned_records)
+            image_failures = sum(
+                failure.get("stage") in {"image_resolve", "image_analysis"}
+                for failure in owned_failures
+            )
+            if text_chunks:
+                status = "succeeded_with_warnings" if owned_failures else "succeeded"
+            else:
+                status = "failed"
+            document_results.append({
+                "source": source,
+                "name": os.path.basename(source) or str(entry.get("name") or ""),
+                "status": status,
+                "text_chunks": text_chunks,
+                "images_indexed": images_indexed,
+                "images_total": images_indexed + image_failures,
+                "failures": owned_failures,
+            })
+        return document_results, decorated_failures
+
     def cleanup_orphans(self) -> None:
         """Remove crash leftovers only while no KB mutation is running."""
         with mutation_lock:
@@ -153,26 +235,32 @@ class IngestPipeline:
         name: str = "",
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> dict:
         source_path = config.canonical_source_path(source_dir)
         kb_id = config.kb_id_for_source(source_path)
         root = config.kb_root(kb_id)
         stage = config.staging_root(kb_id)
         with mutation_lock:
+            check_cancelled(cancelled)
             os.makedirs(root, exist_ok=True)
             shutil.rmtree(stage, ignore_errors=True)
             shutil.rmtree(os.path.join(root, "rollback"), ignore_errors=True)
             try:
                 self.index_builder.begin_build()
+                check_cancelled(cancelled)
                 prepared = self.documents.prepare(
                     source_path,
                     stage_root=stage,
                     kb_id=kb_id,
                     name=name,
                     progress=progress,
+                    cancelled=cancelled,
                 )
+                check_cancelled(cancelled)
                 stage_processed = prepared["processed_path"]
                 self._copy_image_cache(kb_id, stage_processed)
+                check_cancelled(cancelled)
                 stage_kb = {
                     "id": kb_id,
                     "name": prepared["name"],
@@ -185,9 +273,12 @@ class IngestPipeline:
                     prepared["manifest"],
                     progress=progress,
                     logfn=logfn,
+                    cancelled=cancelled,
                 )
+                check_cancelled(cancelled)
                 records_file = os.path.join(stage, "records.jsonl")
                 self.records.write_records(records_file, built.records, kb_id=kb_id)
+                check_cancelled(cancelled)
                 sources = {
                     **built.sources,
                     "records_sha256": self.records.records_sha256(records_file),
@@ -198,10 +289,28 @@ class IngestPipeline:
                     sources=sources,
                     progress=progress,
                     logfn=logfn,
+                    cancelled=cancelled,
                 )
+                check_cancelled(cancelled)
 
-                failures = list(prepared["failures"]) + list(built.failures)
+                document_results, failures = self._document_results(
+                    prepared["manifest"],
+                    built.records,
+                    list(prepared["failures"]) + list(built.failures),
+                )
                 manifest = dict(prepared["manifest"])
+                documents_succeeded = sum(
+                    item["status"] in {"succeeded", "succeeded_with_warnings"}
+                    for item in document_results
+                )
+                documents_with_warnings = sum(
+                    item["status"] == "succeeded_with_warnings"
+                    for item in document_results
+                )
+                documents_failed = sum(
+                    item["status"] == "failed"
+                    for item in document_results
+                )
                 summary = {
                     **prepared["summary"],
                     **{
@@ -211,13 +320,22 @@ class IngestPipeline:
                             "image_chunks", "image_assets",
                         )
                     },
-                    "failed": len(failures),
+                    "total": len(document_results),
+                    "completed": len(document_results),
+                    "succeeded": documents_succeeded,
+                    "failed": documents_failed,
+                    "documents_total": len(document_results),
+                    "documents_succeeded": documents_succeeded,
+                    "documents_with_warnings": documents_with_warnings,
+                    "documents_failed": documents_failed,
+                    "failure_items": len(failures),
                 }
                 manifest.update({
                     "state": "ready_with_warnings" if failures else "ready",
                     "published_at": int(time.time()),
                     "failures": failures,
                     "summary": summary,
+                    "document_results": document_results,
                     "index_sources": sources,
                     "index_stats": index_stats,
                 })
@@ -229,12 +347,17 @@ class IngestPipeline:
                 ):
                     raise RuntimeError("staging 索引发布前校验失败")
 
+                check_cancelled(cancelled)
                 self._emit(
                     progress,
                     phase="publishing",
                     current=prepared["name"],
                     **summary,
                 )
+                # Once publishing starts, the Bridge rejects new cancellation
+                # requests. This second check closes the race with a request
+                # accepted immediately before the publishing phase was emitted.
+                check_cancelled(cancelled)
                 kb = self.publisher.publish(
                     kb_id=kb_id,
                     name=prepared["name"],
@@ -246,13 +369,13 @@ class IngestPipeline:
                     "kb": kb,
                     "summary": summary,
                     "failures": failures,
-                    "files": prepared["files"],
+                    "documents": document_results,
                 }
                 self._emit(
                     progress,
                     phase="completed_with_failures" if failures else "completed",
                     current="",
-                    files=prepared["files"],
+                    documents=document_results,
                     result=result,
                     **summary,
                 )

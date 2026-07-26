@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict
 from urllib.parse import unquote
 
+from .cancellation import KnowledgeBaseCancelled, check_cancelled
+
 
 _MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
@@ -57,6 +59,7 @@ class ImageContent:
     analysis_meta: dict[str, Any]
     focus_rank: int = 0
     contexts: list[str] = field(default_factory=list)
+    origins: list[dict[str, str]] = field(default_factory=list)
 
 
 class DocumentImageIndex:
@@ -658,6 +661,7 @@ class ImageAssetProcessor:
                     near_text=occurrence.near_text,
                     ref_candidates=list(occurrence.ref_candidates),
                     analysis_meta=analysis_meta,
+                    origins=[{"key": rel, "name": title}],
                 )
                 existing = local_jobs.get(image_sha)
                 if existing is None:
@@ -683,6 +687,8 @@ class ImageAssetProcessor:
                     if occurrence.near_text and occurrence.near_text not in contexts and len(contexts) < 3:
                         contexts.append(occurrence.near_text)
                         existing.near_text = "\n".join(contexts)[:1200]
+                    if not any(origin.get("key") == rel for origin in existing.origins):
+                        existing.origins.append({"key": rel, "name": title})
             ref_sig = f"occ{occurrence.occurrence_id:06d}"
             # Occurrence-level data_id layered on the document-level id (see
             # build.py). The "::image::" marker lets callers tell the two
@@ -843,7 +849,9 @@ class ImageAssetProcessor:
         image_jobs: dict[str, ImageContent],
         log,
         progress: Callable[[dict], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ):
+        check_cancelled(cancelled)
         if not image_jobs:
             return {}
         jobs = list(image_jobs.values())
@@ -857,50 +865,90 @@ class ImageAssetProcessor:
         workers = max(1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY", str(self._concurrency))))
         workers = min(workers, len(jobs))
         log(f"  图片分析任务 {len(jobs)} 个，并发 {workers}...")
-        if callable(progress):
+        document_progress: dict[str, dict[str, Any]] = {}
+        for job in jobs:
+            for origin in job.origins:
+                key = str(origin.get("key") or "")
+                if not key:
+                    continue
+                item = document_progress.setdefault(key, {
+                    "key": key,
+                    "name": str(origin.get("name") or os.path.basename(key)),
+                    "completed": 0,
+                    "total": 0,
+                })
+                item["total"] += 1
+
+        def progress_snapshot() -> list[dict[str, Any]]:
+            return [dict(item) for item in document_progress.values()]
+
+        def mark_document_progress(job: ImageContent) -> None:
+            for origin in job.origins:
+                item = document_progress.get(str(origin.get("key") or ""))
+                if item is not None:
+                    item["completed"] += 1
+
+        def emit_progress(job: ImageContent | None, completed: int) -> None:
+            if not callable(progress):
+                return
+            names = [
+                str(origin.get("name") or "")
+                for origin in (job.origins if job is not None else [])
+                if origin.get("name")
+            ]
             progress({
                 "phase": "image_analysis",
-                "analysis_completed": 0,
+                "current": names[0] if names else "",
+                "analysis_completed": completed,
                 "analysis_total": len(jobs),
+                "image_documents": progress_snapshot(),
             })
+
+        if callable(progress):
+            emit_progress(None, 0)
         results = {}
         done = 0
         if workers <= 1:
             for job in jobs:
+                check_cancelled(cancelled)
                 analysis, delta = self.analyze_image_job(kb["path"], job)
+                check_cancelled(cancelled)
                 self._usage_tracker.merge_image_analysis(delta)
                 results[job.image_sha] = analysis
                 done += 1
-                if callable(progress):
-                    progress({
-                        "phase": "image_analysis",
-                        "current": job.image_path,
-                        "analysis_completed": done,
-                        "analysis_total": len(jobs),
-                    })
+                mark_document_progress(job)
+                emit_progress(job, done)
                 if done % 50 == 0 or done == len(jobs):
                     log(f"  图片分析进度 {done}/{len(jobs)}")
             return results
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=workers)
+        futures = {}
+        try:
             futures = {executor.submit(self.analyze_image_job, kb["path"], job): job for job in jobs}
             for future in as_completed(futures):
+                check_cancelled(cancelled)
                 job = futures[future]
                 try:
                     analysis, delta = future.result()
+                except KnowledgeBaseCancelled:
+                    raise
                 except Exception as exc:
                     analysis, delta = {"error": str(exc), "uncertain": [str(exc)]}, {"failed": 1}
+                check_cancelled(cancelled)
                 self._usage_tracker.merge_image_analysis(delta)
                 results[job.image_sha] = analysis
                 done += 1
-                if callable(progress):
-                    progress({
-                        "phase": "image_analysis",
-                        "current": job.image_path,
-                        "analysis_completed": done,
-                        "analysis_total": len(jobs),
-                    })
+                mark_document_progress(job)
+                emit_progress(job, done)
                 if analysis.get("error"):
                     log(f"  [warn] 图片分析失败 {job.image_path}: {analysis.get('error')}")
                 if done % 50 == 0 or done == len(jobs):
                     log(f"  图片分析进度 {done}/{len(jobs)}")
+        except KnowledgeBaseCancelled:
+            for future in futures:
+                future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
         return results

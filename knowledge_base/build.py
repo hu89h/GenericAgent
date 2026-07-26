@@ -10,6 +10,7 @@ from typing import Callable
 
 from . import documents
 from .assets import ImageAssetProcessor
+from .cancellation import KnowledgeBaseCancelled, check_cancelled
 from .providers import vision
 from .schema import normalize_record
 
@@ -46,6 +47,7 @@ class RecordBuilder:
         *,
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> RecordBuildResult:
         log = logfn or (lambda _message: None)
         scanned = documents.scan_documents(kb["path"])
@@ -58,15 +60,17 @@ class RecordBuilder:
         docs_with_chunks = 0
 
         for position, (rel, absolute_path, _mtime, _size) in enumerate(scanned, 1):
+            check_cancelled(cancelled)
+            title = titles.get(rel, os.path.basename(rel))
             if callable(progress):
                 progress({
                     "phase": "chunking",
-                    "current": rel,
+                    "current": title,
+                    "document": rel,
                     "processed": position - 1,
                     "total": len(scanned),
                 })
             ext = os.path.splitext(rel)[1].lower().lstrip(".")
-            title = titles.get(rel, os.path.basename(rel))
             data_id = f"{kb['id']}::{rel}"
             try:
                 text = documents.extract_text(absolute_path)
@@ -113,13 +117,18 @@ class RecordBuilder:
                     for missing in image_result.get("missing") or []:
                         failures.append({
                             "source": f"{rel}:{missing.get('path') or ''}",
+                            "document": rel,
                             "stage": "image_resolve",
                             "error_type": "ImageNotFound",
                             "error": "Markdown 图片引用无法解析",
                         })
+                check_cancelled(cancelled)
+            except KnowledgeBaseCancelled:
+                raise
             except Exception as error:
                 failures.append({
                     "source": rel,
+                    "document": rel,
                     "stage": "chunking",
                     "error_type": type(error).__name__,
                     "error": str(error),
@@ -131,13 +140,20 @@ class RecordBuilder:
             image_jobs,
             log,
             progress=progress,
+            cancelled=cancelled,
         )
+        check_cancelled(cancelled)
         for record in image_records:
+            check_cancelled(cancelled)
             analysis = image_results.get(record.get("image_id"))
             self.assets.apply_image_analysis(record, analysis)
             if record.get("analysis_error"):
                 failures.append({
-                    "source": record.get("image_path") or record.get("file_name") or "",
+                    "source": (
+                        f"{record.get('file_name') or ''}:"
+                        f"{record.get('image_path') or ''}"
+                    ).strip(":"),
+                    "document": record.get("file_name") or "",
                     "stage": "image_analysis",
                     "error_type": "ImageAnalysisError",
                     "error": record.get("analysis_error") or "图片分析失败",
@@ -261,14 +277,18 @@ class IndexBuilder:
         sources: dict,
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> dict:
+        check_cancelled(cancelled)
         if callable(progress):
             progress({"phase": "indexing", "processed": 0, "total": len(records)})
         stats = self.index.build(kb, records, sources, logfn=logfn)
+        check_cancelled(cancelled)
         usage = self.usage.current()
         usage["stats"] = dict(stats)
         self.usage.write(kb["path"], usage)
         probe = self.index.probe(kb["path"])
+        check_cancelled(cancelled)
         if not (
             probe["present"]
             and probe["openable"]

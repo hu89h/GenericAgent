@@ -131,7 +131,13 @@ def _is_processing(kb_id: str) -> bool:
         return kb_id in _processing_kbs
 
 
-def import_kb(source_dir: str, *, name: str = "", progress=None) -> dict:
+def import_kb(
+    source_dir: str,
+    *,
+    name: str = "",
+    progress=None,
+    cancelled=None,
+) -> dict:
     source = config.canonical_source_path(source_dir)
     kb_id = config.kb_id_for_source(source)
     _mark_processing(kb_id, True)
@@ -140,6 +146,7 @@ def import_kb(source_dir: str, *, name: str = "", progress=None) -> dict:
             source,
             name=name,
             progress=progress,
+            cancelled=cancelled,
         )
     finally:
         _mark_processing(kb_id, False)

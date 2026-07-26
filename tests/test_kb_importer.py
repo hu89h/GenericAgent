@@ -21,16 +21,27 @@ class DocumentProcessorTests(unittest.TestCase):
                     raise OSError("injected markdown failure")
                 return original(path, *args, **kwargs)
 
+            events = []
             with mock.patch.object(importer, "_write_markdown", side_effect=selective_failure):
                 result = importer.DocumentProcessor().prepare(
                     str(source),
                     stage_root=str(stage),
                     kb_id="kb-test",
+                    progress=events.append,
                 )
 
             self.assertEqual(result["summary"]["ready"], 1)
             self.assertEqual(result["summary"]["failed"], 1)
             self.assertEqual(result["failures"][0]["stage"], "markdown")
+            self.assertEqual(events[-1]["phase"], "prepared")
+            self.assertEqual(events[-1]["completed"], 2)
+            self.assertEqual(events[-1]["total"], 2)
+            self.assertEqual(events[-1]["document_progress"], {
+                "completed": 2,
+                "total": 2,
+                "failed": 1,
+                "ready": 1,
+            })
             self.assertTrue((stage / "manifest.json").is_file())
             self.assertTrue(any((stage / "processed").rglob("*.md")))
 
