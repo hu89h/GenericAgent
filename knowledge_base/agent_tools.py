@@ -72,32 +72,17 @@ KB_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "kb_image_read",
-            "description": "读取知识库定位图片的图题、VLM 描述、表格 Markdown、关联正文和引用信息，不发送原图。只能使用 kb_search 返回的完整 image_id/data_id，或在当前文档范围内提供图1-1等图表编号。",
+            "description": "读取知识库定位图片的图题、VLM 描述、表格 Markdown、关联正文和引用信息；attach_image=true 时同时把原图加入下一轮多模态模型输入用于核对图片细节，不能读取任意本地路径。只能使用 kb_search 返回的完整 data_id，或在当前文档范围内提供图1-1、表8-1等图表编号。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "image_id": {"type": "string"},
                     "data_id": {"type": "string"},
-                    "ref": {"type": "string"},
                     "ref_key": {"type": "string", "description": "图1-1、表8-1等知识库返回的图表编号"},
-                    "query": {"type": "string", "description": "包含图表编号的定位查询"},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "kb_image_view",
-            "description": "查看已由知识库定位的原图，并将其加入下一轮多模态模型输入；不能读取任意本地路径。只能使用 kb_search 返回的完整 image_id/data_id，或在当前文档范围内提供图1-1等图表编号。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "image_id": {"type": "string"},
-                    "data_id": {"type": "string"},
-                    "ref": {"type": "string"},
-                    "ref_key": {"type": "string", "description": "图1-1、表8-1等知识库返回的图表编号"},
-                    "query": {"type": "string", "description": "包含图表编号的定位查询"},
+                    "attach_image": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "为 true 时把原图注入下一轮多模态模型输入用于核对细节",
+                    },
                 },
             },
         },
@@ -193,9 +178,9 @@ class KnowledgeBaseToolsMixin:
     @staticmethod
     def _clean_hit(hit):
         keep = (
-            "score", "score_type", "occurrence_id",
+            "score", "score_type",
             "header_path", "snippet", "body", "description", "table_markdown",
-            "related_text", "related_text_refs", "near_text", "uncertain", "caption",
+            "related_text", "near_text", "uncertain", "caption",
             "display_label",
         )
         result = public_reference(hit, kind=hit.get("kind"))
@@ -281,8 +266,8 @@ class KnowledgeBaseToolsMixin:
             "hits": [self._clean_hit(hit) for hit in hits],
         }
         # Search results are candidates.  An image becomes a citation only
-        # after kb_image_read/view successfully resolves it, so unrelated
-        # vector hits cannot leak into the final answer's citation list.
+        # after kb_image_read successfully resolves it, so unrelated vector
+        # hits cannot leak into the final answer's citation list.
         self._record_knowledge_citations(
             [hit for hit in hits if hit.get("kind") != "image"]
         )
@@ -367,16 +352,14 @@ class KnowledgeBaseToolsMixin:
     def _read_image_asset(self, args):
         lookup = {
             key: str(args.get(key) or "").strip() or None
-            for key in ("image_id", "data_id", "ref", "ref_key", "query")
+            for key in ("data_id", "ref_key")
         }
         if not any(lookup.values()):
-            return None, "[Error] 需要 kb_search 返回的 image_id/data_id，或图1-1等图表编号。"
-        # image_id alone does not carry the owning document.  In a
-        # restricted scope the backend query is first constrained by kb_id;
-        # the returned asset is then checked against the document scope below.
-        if (lookup["data_id"] or lookup["ref"]) and not self._scope_allows_target(
-            data_id=lookup["data_id"], ref=lookup["ref"]
-        ):
+            return None, "[Error] 需要 kb_search 返回的 data_id，或图1-1等图表编号。"
+        # A figure-number-only lookup carries no document, so the pre-check runs
+        # only when a data_id is given; the resolved asset is always re-checked
+        # against the session scope below (authoritative).
+        if lookup["data_id"] and not self._scope_allows_target(data_id=lookup["data_id"]):
             return None, "[Error] 图片目标不在当前会话的知识库范围内。"
         try:
             info = self._kb_backend().read_image(kb_id=self._scope_kb_id(), **lookup)
@@ -397,7 +380,7 @@ class KnowledgeBaseToolsMixin:
     def _public_image(info):
         result = public_reference(info, kind="image")
         for key in (
-            "description", "table_markdown", "related_text", "related_text_refs",
+            "description", "table_markdown", "related_text",
             "near_text", "uncertain", "analysis_error", "caption", "display_label",
         ):
             if key in info:
@@ -409,8 +392,17 @@ class KnowledgeBaseToolsMixin:
         if error:
             return self._anchor_outcome(args, error)
         self._record_knowledge_citations(info)
+        result = self._public_image(info)
+        # Q4: one tool, one switch.  attach_image=true additionally injects the
+        # original image into the next multimodal turn.  A failed/­capped attach
+        # never discards the read payload — it degrades to a status note so the
+        # model can still answer from the description/table.
+        if bool(args.get("attach_image")):
+            attach_error = self._queue_image_view(info)
+            result["attach_status"] = "unavailable" if attach_error else "attached"
+            result["attach_message"] = attach_error or "原图已加入下一轮模型输入。"
         yield "[Info] kb_image_read done.\n"
-        return self._anchor_outcome(args, json.dumps(self._public_image(info), ensure_ascii=False, indent=2))
+        return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
     @staticmethod
     def _image_data_url(path):
@@ -428,24 +420,24 @@ class KnowledgeBaseToolsMixin:
         # ever changes.
         injected = sum(1 for block in pending if block.get("type") == "image_url")
         if injected >= _MAX_INLINE_IMAGES:
-            return f"[kb_image_view] 本轮最多查看 {_MAX_INLINE_IMAGES} 张图片。"
+            return f"[attach_image] 本轮最多查看 {_MAX_INLINE_IMAGES} 张图片。"
         path = str(info.get("image_abspath") or "")
         if not os.path.isfile(path):
-            return "[kb_image_view] 图片文件不存在，无法注入原图；可使用已返回的图片描述回答。"
+            return "[attach_image] 图片文件不存在，无法注入原图；可使用已返回的图片描述回答。"
         try:
             size = os.path.getsize(path)
             if size > _MAX_INLINE_IMAGE_BYTES:
-                return "[kb_image_view] 图片文件过大，无法安全注入当前模型上下文；可使用图片描述回答。"
+                return "[attach_image] 图片文件过大，无法安全注入当前模型上下文；可使用图片描述回答。"
             data_url = self._image_data_url(path)
         except OSError as error:
-            return f"[kb_image_view] 图片读取失败: {error}"
+            return f"[attach_image] 图片读取失败: {error}"
         pending.extend(
             [
                 {
                     "type": "text",
                     "text": (
                         "[知识库图片原图]\n"
-                        f"图题: {info.get('display_label') or info.get('title') or info.get('alt_text') or ''}\n"
+                        f"图题: {info.get('display_label') or info.get('title') or ''}\n"
                         f"来源: {info.get('source_file_name') or ''}\n"
                         f"引用: {info.get('citation_label') or info.get('title') or '图片'}\n"
                         "请直接查看紧随其后的原图，并结合工具结果回答用户问题。"
@@ -456,21 +448,3 @@ class KnowledgeBaseToolsMixin:
         )
         return None
 
-    def do_kb_image_view(self, args, response):
-        info, error = self._read_image_asset(args)
-        if error:
-            return self._anchor_outcome(args, error)
-        error = self._queue_image_view(info)
-        if error:
-            return self._anchor_outcome(args, error)
-        self._record_knowledge_citations(info)
-        result = public_reference(info, kind="image")
-        result.update({
-            "status": "attached",
-            "message": "原图已加入下一轮模型输入。",
-            "description": info.get("description", ""),
-            "table_markdown": info.get("table_markdown", ""),
-            "related_text": info.get("related_text", ""),
-        })
-        yield "[Info] kb_image_view done.\n"
-        return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))

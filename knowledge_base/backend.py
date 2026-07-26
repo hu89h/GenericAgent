@@ -98,12 +98,14 @@ DEFAULT_KB_ID = "default_kb"
 INDEX_SUBDIR = ".kb_index"          # 放在每个知识库路径下
 ZVEC_SUBDIR = "zvec"                # 向量索引目录：.kb_index/zvec/
 IMAGE_CACHE_SUBDIR = "image_cache"
-IMAGE_ASSETS_FILE = "image_assets.json"
 DOCUMENT_IMAGE_EXTS = frozenset({
     ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp", ".tif", ".tiff",
 })
 BUILD_USAGE_FILE = "build_usage.json"
-ZVEC_SCHEMA_VERSION = 9
+# v10: widened image-asset columns (image_id/ref_key/display_label/caption/
+# description/table_markdown/source_file_name/uncertain/analysis_error) so
+# read_image resolves images from zvec directly, retiring the catalog join.
+ZVEC_SCHEMA_VERSION = 10
 _SNIPPET = 220
 ZVEC_DIM = int(os.environ.get("GA_KB_ZVEC_DIM", os.environ.get("GA_KB_EMBED_DIM", "1024")))
 ZVEC_BATCH = int(os.environ.get("GA_KB_ZVEC_BATCH", "256"))
@@ -257,10 +259,6 @@ def _image_cache_dir(kb_path):
     return os.path.join(_index_dir(kb_path), IMAGE_CACHE_SUBDIR)
 
 
-def _image_assets_path(kb_path):
-    return os.path.join(_index_dir(kb_path), IMAGE_ASSETS_FILE)
-
-
 def _build_usage_path(kb_path):
     return os.path.join(_index_dir(kb_path), BUILD_USAGE_FILE)
 
@@ -401,8 +399,6 @@ def _image_assets():
             image_client_fn=_load_image_client,
             image_meta_fn=_image_analysis_meta,
             image_cache_dir_fn=_image_cache_dir,
-            image_assets_path_fn=_image_assets_path,
-            index_dir_fn=_index_dir,
             merge_usage_fn=_merge_image_analysis_usage,
             concurrency=IMAGE_ANALYSIS_CONCURRENCY,
         )
@@ -419,36 +415,6 @@ def _build_document_index(text):
 
 def _asset_body(asset):
     return _image_assets().asset_body(asset)
-
-
-def _write_image_assets(kb_path, assets, validation=None, pending=False):
-    _image_assets().write_assets(kb_path, assets, validation=validation, pending=pending)
-    # A pending write does not change the final file the retriever reads,
-    # so only invalidate the retrieval asset cache on a direct/final write.
-    if not pending and _retrieval_instance is not None:
-        _retrieval_instance.clear_asset_cache(kb_path)
-
-
-def _commit_pending_image_assets(kb_path):
-    committed = _image_assets().commit_pending_assets(kb_path)
-    if committed and _retrieval_instance is not None:
-        _retrieval_instance.clear_asset_cache(kb_path)
-    return committed
-
-
-def _discard_pending_image_assets(kb_path):
-    _image_assets().discard_pending_assets(kb_path)
-
-
-def _load_image_assets(kb_path):
-    return _image_assets().load_assets(kb_path)
-
-
-def _load_image_assets_build(kb_path):
-    # Build/index-time count reads the not-yet-committed pending assets so
-    # meta stats reflect the assets that will be published together with
-    # this index generation.  Retrieval keeps using the final-only loader.
-    return _image_assets().load_assets(kb_path, prefer_pending=True)
 
 
 def _image_source_fingerprint(kb_path, scanned, image_indexes=None):
@@ -489,10 +455,6 @@ def _build_coordinator():
                     image_records_for_document=_image_records_for_document,
                     analyze_image_jobs=_analyze_image_jobs,
                     apply_image_analysis=_apply_image_analysis,
-                    write_image_assets=_write_image_assets,
-                    load_image_assets=_load_image_assets,
-                    commit_pending_image_assets=_commit_pending_image_assets,
-                    discard_pending_image_assets=_discard_pending_image_assets,
                 ),
                 index=_IndexServices(
                     zvec_path=_zvec_path,
@@ -588,7 +550,6 @@ def _zvec_store():
                 chunking_meta_fn=_chunking_meta,
                 image_analysis_meta_fn=_image_build_fingerprint_meta,
                 usage_fn=_usage,
-                load_assets_fn=_load_image_assets_build,
                 document_fingerprint_fn=_fingerprint,
                 embedding_usage_drain_fn=_drain_embedding_usage,
             )
@@ -701,9 +662,15 @@ def _append_zvec_image_index(kb, records, sources, force=False, logfn=None):
     return _zvec_store().append_images(kb, records, sources, force=force, logfn=logfn)
 
 
+# Must stay in sync with retrieval._DEFAULT_OUTPUT_FIELDS — includes the
+# widened image-asset columns so fetch()/search() return image metadata
+# straight from the zvec row (no image_assets.json catalog join).
 _ZVEC_OUTPUT_FIELDS = [
     "data_id", "chunk_index", "kb_id", "file_name", "title", "kind",
     "image_path", "source_data_id", "source_chunk_index", "header_path", "body",
+    "image_id", "ref_key", "display_label", "caption", "description",
+    "table_markdown", "source_file_name", "uncertain", "analysis_error",
+    "related_text", "near_text",
 ]
 
 
@@ -779,9 +746,9 @@ def kb_status(kb):
         info["embedding"] = index_meta.get("embedding")
         info["sparse_embedding"] = index_meta.get("sparse_embedding")
         info["zvec_chunks"] = st.get("n_chunks", 0)
-        info["image_assets"] = st.get("image_assets", info["image_assets"])
-        if info["image_assets"] is None:
-            info["image_assets"] = len(_load_image_assets(kb["path"]))
+        # Route 甲: image_assets comes from the zvec build stats (indexed image
+        # rows); no image_assets.json fallback remains.
+        info["image_assets"] = st.get("image_assets") or 0
         info["zvec_bytes"] = st.get("zvec_bytes", 0)
         bu = _load_build_usage(kb["path"])
         if bu:
@@ -881,9 +848,7 @@ def _retrieval():
             require_zvec=_require_zvec,
             embed_texts=_embed_texts,
             embed_sparse_texts=_embed_sparse_texts,
-            load_image_assets=_load_image_assets,
             local_ref_key=_local_ref_key,
-            asset_body=_asset_body,
             record_search_error=_record_search_error,
             imported_document_titles=_imported_document_titles,
             imported_document_entries=_imported_document_entries,
@@ -928,11 +893,8 @@ def list_chunks(data_id=None, kb_id=None, ref=None, preview_chars=80, limit=400)
     )
 
 
-def read_image(image_id=None, image_path=None, data_id=None, ref=None, kb_id=None, ref_key=None, query=None):
-    return _retrieval().read_image(
-        image_id=image_id, image_path=image_path, data_id=data_id, ref=ref,
-        kb_id=kb_id, ref_key=ref_key, query=query,
-    )
+def read_image(data_id=None, ref_key=None, kb_id=None):
+    return _retrieval().read_image(data_id=data_id, ref_key=ref_key, kb_id=kb_id)
 
 
 def resolve_file(cited):
@@ -1043,16 +1005,19 @@ def build(kb_id=None, force=False, mode="full", logfn=None):
 
 
 def resolve_open_target(kb_id="", data_id="", image_id="", image_path="", ref="", ref_key=""):
-    """Resolve Desktop /kb/open to an original document or indexed image."""
+    """Resolve Desktop /kb/open to an original document or indexed image.
+
+    ``image_id``/``image_path`` are still accepted from the Desktop bridge for
+    backward compatibility and image-target detection, but路线甲 anchors image
+    identity on occurrence, so the actual lookup uses ``data_id`` (occurrence
+    ``::image::`` id) + ``ref_key`` only.
+    """
     is_image_target = bool(image_id or image_path or "::image::" in str(data_id or ""))
     if is_image_target:
         asset = read_image(
-            image_id=image_id,
-            image_path=image_path,
             data_id=data_id,
-            ref=ref,
-            kb_id=kb_id,
             ref_key=ref_key,
+            kb_id=kb_id,
         )
         if not asset.get("error"):
             path = asset.get("image_abspath") or ""

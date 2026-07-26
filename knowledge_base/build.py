@@ -30,10 +30,6 @@ class ImageServices:
     image_records_for_document: Callable[..., dict]
     analyze_image_jobs: Callable[..., dict]
     apply_image_analysis: Callable[..., None]
-    write_image_assets: Callable[..., None]
-    load_image_assets: Callable[..., list]
-    commit_pending_image_assets: Callable[..., bool]
-    discard_pending_image_assets: Callable[..., None]
 
 
 @dataclass(frozen=True)
@@ -100,6 +96,12 @@ class BuildCoordinator:
 
         for i, (rel, ap, _mt, _sz) in enumerate(scanned, 1):
             ext = os.path.splitext(rel)[1].lower().lstrip(".")
+            # data_id is a LAYERED key on the shared zvec primary-key column:
+            #   text record  -> document level: "{kb_id}::{rel}"
+            #   image record -> occurrence level: "{that}::image::{sha}::occ{N}"
+            # (see assets.py). The "::image::" marker disambiguates the two
+            # layers everywhere, so source_data_id on an image row is exactly
+            # this document-level id. Same column, two granularities by design.
             data_id = f"{kb_id}::{rel}"
             title = os.path.basename(source_titles.get(rel) or os.path.basename(rel))
             cached = (text_cache or {}).get(rel)
@@ -193,45 +195,31 @@ class BuildCoordinator:
                         record, image_results.get(record.get("image_id"))
                     )
 
-        stored_assets = [
-            {
-                key: value
-                for key, value in record.items()
-                if not key.startswith("_") and key not in {"body", "image_abspath"}
-            }
-            for record in image_records
-            if record.get("kind") == "image"
-        ]
-        # S3: write to the pending sidecar; build_kb promotes it only after
-        # the Zvec index publishes successfully, keeping asset file and index
-        # consistent even if indexing fails/rolls back.
-        images.write_image_assets(
-            kb["path"],
-            stored_assets,
-            validation={
-                "referenced": image_referenced,
-                "indexed": len(stored_assets),
-                "missing": image_missing,
-            },
-            pending=True,
-        )
+        # 路线甲：图片记录随文本记录一起进 zvec 索引（下方 yield），
+        # 不再另写 image_assets.json 双轨目录。缺失引用的诊断改为直接落日志。
         log(
             f"  抽取完成：{n_files} 文件，有效 {n_ok}，无正文 {n_empty}，"
             f"图片引用 {image_referenced}，已登记 {image_count}"
         )
         if image_missing:
-            log(f"  [warn] {len(image_missing)} 个图片引用未登记，详见 image_assets.json.validation.missing")
+            log(f"  [warn] {len(image_missing)} 个图片引用未登记（文件缺失或越界）：")
+            for item in image_missing[:20]:
+                log(
+                    f"    - {item.get('file_name', '?')} → {item.get('path', '?')}"
+                    f"（图注：{item.get('caption') or item.get('alt_text') or '无'}）"
+                )
+            if len(image_missing) > 20:
+                log(f"    …… 其余 {len(image_missing) - 20} 条略")
         yield from image_records
 
     def _finalize_build_result(self, kb, scanned, z_status, z_stats, log):
         """Persist the common build report and publish the final build state."""
         services = self._services
-        images = services.images
         usage_service = services.usage
         z_stats = dict(z_stats or {})
-        n_images = z_stats.get("image_assets")
-        if n_images is None:
-            n_images = len(images.load_image_assets(kb["path"]))
+        # Route 甲: the zvec build reports image_assets as its indexed image-row
+        # count; there is no image_assets.json to fall back on.
+        n_images = int(z_stats.get("image_assets") or 0)
 
         stats = dict(z_stats)
         stats["zvec"] = dict(z_stats)
@@ -376,26 +364,16 @@ class BuildCoordinator:
             processed=0,
             total=len(scanned),
         )
-        try:
-            if mode == "images":
-                z_status, z_stats = index.append_zvec_image_index(
-                    kb, records, sources, force=force, logfn=log
-                )
-            else:
-                z_status, z_stats = index.build_zvec_index(
-                    kb, records, sources, force=force, logfn=log
-                )
-        except Exception:
-            # S3: index build blew up — drop the pending asset file so the
-            # committed asset/index pair stays consistent.
-            services.images.discard_pending_image_assets(kb["path"])
-            raise
-        # S3: promote pending assets only when the index actually published;
-        # on any non-built status the old asset file is kept intact.
-        if z_status == "built":
-            services.images.commit_pending_image_assets(kb["path"])
+        # 路线甲：图片资产已并入 zvec 记录，索引即单一事实源。
+        # zvec 自带原子发布/回滚，无需再对旁挂的 image_assets.json 做两阶段提交。
+        if mode == "images":
+            z_status, z_stats = index.append_zvec_image_index(
+                kb, records, sources, force=force, logfn=log
+            )
         else:
-            services.images.discard_pending_image_assets(kb["path"])
+            z_status, z_stats = index.build_zvec_index(
+                kb, records, sources, force=force, logfn=log
+            )
         return self._finalize_build_result(kb, scanned, z_status, z_stats, log)
 
     @staticmethod

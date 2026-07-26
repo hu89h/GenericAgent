@@ -112,7 +112,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
                 content = (
                     next_prompt
                     + "\n\n[SYSTEM] 当前模型客户端不支持原图 content block，"
-                    "无法查看 kb_image_view 登记的图片；请使用已返回的图片描述和表格内容回答。"
+                    "无法查看 kb_image_read(attach_image=true) 登记的图片；请使用已返回的图片描述和表格内容回答。"
                 )
         messages = [{"role": "user", "content": content, "tool_results": tool_results}]   # just new message, history is kept in *Session
     if exit_reason: handler.turn_end_callback(response, tool_calls, tool_results, turn, '', exit_reason)

@@ -35,7 +35,6 @@ class ZvecIndex:
         chunking_meta_fn: Callable[[], Dict[str, Any]],
         image_analysis_meta_fn: Callable[[], Dict[str, Any]],
         usage_fn: Callable[[], Dict[str, Any]],
-        load_assets_fn: Callable[[str], list],
         document_fingerprint_fn: Callable[[list], Dict[str, Any]],
         embedding_usage_drain_fn: Callable[[], Dict[str, int]],
     ) -> None:
@@ -51,7 +50,6 @@ class ZvecIndex:
         self._chunking_meta_fn = chunking_meta_fn
         self._image_analysis_meta_fn = image_analysis_meta_fn
         self._usage_fn = usage_fn
-        self._load_assets_fn = load_assets_fn
         self._document_fingerprint_fn = document_fingerprint_fn
         self._embedding_usage_drain_fn = embedding_usage_drain_fn
         self._local = threading.local()
@@ -93,6 +91,26 @@ class ZvecIndex:
                     zvec.FieldSchema("source_chunk_index", zvec.DataType.INT64),
                     zvec.FieldSchema("header_path", zvec.DataType.STRING),
                     zvec.FieldSchema("body", zvec.DataType.STRING),
+                    # Image-asset columns: widen the schema so read_image can
+                    # resolve/return images straight from zvec, retiring the
+                    # separate image_assets.json catalog + manual join.  Text
+                    # records leave these empty.  ``uncertain`` is a JSON list
+                    # serialized to a string (zvec fields are STRING/INT64).
+                    zvec.FieldSchema("image_id", zvec.DataType.STRING),
+                    zvec.FieldSchema("ref_key", zvec.DataType.STRING),
+                    zvec.FieldSchema("display_label", zvec.DataType.STRING),
+                    zvec.FieldSchema("caption", zvec.DataType.STRING),
+                    zvec.FieldSchema("description", zvec.DataType.STRING),
+                    zvec.FieldSchema("table_markdown", zvec.DataType.STRING),
+                    zvec.FieldSchema("source_file_name", zvec.DataType.STRING),
+                    zvec.FieldSchema("uncertain", zvec.DataType.STRING),
+                    zvec.FieldSchema("analysis_error", zvec.DataType.STRING),
+                    # related_text / near_text are also carried as columns (not
+                    # just inside body) because kb_image_read returns
+                    # related_text and kb_search forwards near_text as discrete
+                    # fields — read_image must resolve them from zvec too.
+                    zvec.FieldSchema("related_text", zvec.DataType.STRING),
+                    zvec.FieldSchema("near_text", zvec.DataType.STRING),
                 ],
                 vectors=[
                     zvec.VectorSchema(
@@ -285,6 +303,17 @@ class ZvecIndex:
                         "source_chunk_index": int(item.get("source_chunk_index", -1)),
                         "header_path": item.get("header_path", ""),
                         "body": item["body"],
+                        "image_id": item.get("image_id", ""),
+                        "ref_key": item.get("ref_key", ""),
+                        "display_label": item.get("display_label", ""),
+                        "caption": item.get("caption", ""),
+                        "description": item.get("description", ""),
+                        "table_markdown": item.get("table_markdown", ""),
+                        "source_file_name": item.get("source_file_name", ""),
+                        "uncertain": item.get("uncertain", ""),
+                        "analysis_error": item.get("analysis_error", ""),
+                        "related_text": item.get("related_text", ""),
+                        "near_text": item.get("near_text", ""),
                     },
                 ))
             writer = collection.upsert if operation == "upsert" else collection.insert
@@ -306,6 +335,9 @@ class ZvecIndex:
             else:
                 n_text_chunks += 1
                 docs_seen.add(data_id)
+            uncertain = record.get("uncertain") or ""
+            if isinstance(uncertain, (list, dict)):
+                uncertain = json.dumps(uncertain, ensure_ascii=False) if uncertain else ""
             batch.append({
                 "data_id": data_id,
                 "chunk_index": chunk_index,
@@ -317,6 +349,17 @@ class ZvecIndex:
                 "source_chunk_index": int(record.get("source_chunk_index", -1)),
                 "header_path": record.get("header_path", "") or "",
                 "body": body,
+                "image_id": record.get("image_id", "") or "",
+                "ref_key": record.get("ref_key", "") or "",
+                "display_label": record.get("display_label", "") or "",
+                "caption": record.get("caption", "") or "",
+                "description": record.get("description", "") or "",
+                "table_markdown": record.get("table_markdown", "") or "",
+                "source_file_name": record.get("source_file_name", "") or "",
+                "uncertain": uncertain,
+                "analysis_error": record.get("analysis_error", "") or "",
+                "related_text": record.get("related_text", "") or "",
+                "near_text": record.get("near_text", "") or "",
             })
             n_chunks += 1
             if len(batch) >= self.batch_size:
@@ -393,7 +436,10 @@ class ZvecIndex:
 
             stats = {
                 **stats,
-                "image_assets": sum(1 for _asset in self._load_assets_fn(kb["path"])),
+                # Route 甲: image assets are exactly the indexed image rows
+                # (one per occurrence, chunk_index=0) — count them from the
+                # insert stats instead of re-reading image_assets.json.
+                "image_assets": int(stats.get("image_chunks") or 0),
                 "zvec_bytes": self.dir_size(temp_path),
                 "build_seconds": round(time.time() - started, 1),
             }
@@ -524,7 +570,8 @@ class ZvecIndex:
             "n_chunks": text_chunks + int(stats.get("image_chunks") or 0),
             "text_chunks": text_chunks,
             "image_chunks": int(stats.get("image_chunks") or 0),
-            "image_assets": sum(1 for _asset in self._load_assets_fn(kb["path"])),
+            # Route 甲: image asset count == indexed image-row count.
+            "image_assets": int(stats.get("image_chunks") or 0),
             "zvec_bytes": self.dir_size(path),
             "build_seconds": round(time.time() - started, 1),
         }

@@ -12,7 +12,6 @@ import json
 import os
 import re
 import threading
-import time
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -315,16 +314,12 @@ class ImageAssetProcessor:
         image_client_fn: Callable[[], Any],
         image_meta_fn: Callable[[], Dict[str, Any]],
         image_cache_dir_fn: Callable[[str], str],
-        image_assets_path_fn: Callable[[str], str],
-        index_dir_fn: Callable[[str], str],
         merge_usage_fn: Callable[[Dict[str, Any]], None],
         concurrency: int = 1,
     ) -> None:
         self._image_client_fn = image_client_fn
         self._image_meta_fn = image_meta_fn
         self._image_cache_dir_fn = image_cache_dir_fn
-        self._image_assets_path_fn = image_assets_path_fn
-        self._index_dir_fn = index_dir_fn
         self._merge_usage_fn = merge_usage_fn
         self._concurrency = max(1, int(concurrency))
 
@@ -555,112 +550,6 @@ class ImageAssetProcessor:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         os.replace(temp, path)
 
-    def _pending_assets_path(self, kb_path: str) -> str:
-        return self._image_assets_path_fn(kb_path) + ".pending"
-
-    def write_assets(self, kb_path: str, assets, validation=None, pending: bool = False) -> None:
-        """Serialise image assets.
-
-        When ``pending`` is true the payload is written to a
-        ``image_assets.json.pending`` sidecar instead of the final path.
-        The build coordinator promotes it with :meth:`commit_pending_assets`
-        only after the Zvec index has published successfully, so a failed /
-        rolled-back index build never leaves the final asset file
-        overwritten out of sync with the index (bug S3).
-        """
-        os.makedirs(self._index_dir_fn(kb_path), exist_ok=True)
-        content_fields = ("description", "table_markdown", "uncertain", "analysis_error")
-        contents = []
-        content_by_id = {}
-        occurrences = []
-        for raw_asset in assets or []:
-            asset = dict(raw_asset or {})
-            image_id = str(asset.get("image_id") or "")
-            if image_id and image_id not in content_by_id:
-                content = {"image_id": image_id}
-                for key in content_fields:
-                    content[key] = asset.get(key, "" if key != "uncertain" else [])
-                content_by_id[image_id] = content
-                contents.append(content)
-            for key in content_fields:
-                asset.pop(key, None)
-            occurrences.append(asset)
-        payload = {
-            "schema_version": 6,
-            "built_at": int(time.time()),
-            "analysis": self._image_meta_fn(),
-            "n_assets": len(occurrences),
-            "n_contents": len(contents),
-            "validation": validation if isinstance(validation, dict) else {},
-            "contents": contents,
-            "assets": occurrences,
-        }
-        path = self._pending_assets_path(kb_path) if pending else self._image_assets_path_fn(kb_path)
-        temp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
-        try:
-            with open(temp, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-            os.replace(temp, path)
-        finally:
-            try:
-                os.remove(temp)
-            except OSError:
-                pass
-
-    def commit_pending_assets(self, kb_path: str) -> bool:
-        """Atomically promote a pending asset file to the final path.
-
-        Returns True if a pending file existed and was promoted, False if
-        there was nothing to commit (e.g. an up-to-date build that never
-        regenerated assets)."""
-        pending = self._pending_assets_path(kb_path)
-        if not os.path.exists(pending):
-            return False
-        os.replace(pending, self._image_assets_path_fn(kb_path))
-        return True
-
-    def discard_pending_assets(self, kb_path: str) -> None:
-        """Drop a pending asset file left by a failed index build."""
-        pending = self._pending_assets_path(kb_path)
-        try:
-            os.remove(pending)
-        except OSError:
-            pass
-
-    def load_assets(self, kb_path: str, prefer_pending: bool = False):
-        path = self._image_assets_path_fn(kb_path)
-        if prefer_pending:
-            pending = self._pending_assets_path(kb_path)
-            if os.path.exists(pending):
-                path = pending
-        try:
-            with open(path, encoding="utf-8") as handle:
-                payload = json.load(handle)
-            assets = payload.get("assets") if isinstance(payload, dict) else None
-            if not isinstance(assets, list):
-                raise RuntimeError(f"图片资产文件格式无效：{path}")
-            contents = payload.get("contents") if isinstance(payload, dict) else None
-            if not isinstance(contents, list):
-                return assets
-            content_by_id = {
-                str(content.get("image_id") or ""): content
-                for content in contents
-                if isinstance(content, dict) and content.get("image_id")
-            }
-            expanded = []
-            for asset in assets:
-                item = dict(asset or {})
-                content = content_by_id.get(str(item.get("image_id") or ""))
-                if content:
-                    for key in ("description", "table_markdown", "uncertain", "analysis_error"):
-                        item[key] = content.get(key, "" if key != "uncertain" else [])
-                expanded.append(item)
-            return expanded
-        except FileNotFoundError:
-            return []
-        except (OSError, ValueError) as error:
-            raise RuntimeError(f"读取图片资产失败：{path}: {error}") from error
-
     def image_source_fingerprint(self, kb_path: str, scanned, image_indexes=None):
         if image_indexes is None:
             raise ValueError("image source fingerprint requires prebuilt document image indexes")
@@ -702,7 +591,11 @@ class ImageAssetProcessor:
         ref_key = str(ref_key or "").strip()
         if ref_key:
             return ref_key
-        return str(title or "图片").strip() or "图片"
+        # title 常常是 HTML alt 属性，无图注时会是占位符 "image"——不能当标签用
+        title = str(title or "").strip()
+        if title and title.lower() != "image":
+            return title
+        return "图片"
 
     def image_records_for_document(
         self, kb, rel, data_id, body, title, log,
@@ -795,32 +688,41 @@ class ImageAssetProcessor:
                         contexts.append(occurrence.near_text)
                         existing.near_text = "\n".join(contexts)[:1200]
             ref_sig = f"occ{occurrence.occurrence_id:06d}"
+            # Occurrence-level data_id layered on the document-level id (see
+            # build.py). The "::image::" marker lets callers tell the two
+            # layers apart on the shared zvec primary-key column; the plain
+            # document-level id is kept as source_data_id below.
             image_data_id = f"{data_id}::image::{image_sha[:16]}::{ref_sig}"
             ref_key = occurrence.ref_key
-            display_label = self._display_label(ref_key, occurrence.title, title)
+            # Sanitize the caption once (drop the literal "image" alt-text) and
+            # reuse it for display_label — otherwise, when VLM analysis is
+            # disabled, apply_image_analysis never re-derives display_label and
+            # the raw "image" alt-text leaks through as the label.
+            caption = occurrence.title if occurrence.title.lower() != "image" else ""
+            display_label = self._display_label(ref_key, caption, title)
+            # occurrence_id / source_ref 曾用于旧 image_assets.json 目录；
+            # 路线甲下它们既非 zvec 列、也无读者（occ 序号已编入 data_id，
+            # 引用 ref 由 {kb_id}/{file_name} 现算），故不再写入记录。
             asset = {
                 "kind": "image",
                 "image_id": image_sha,
-                "occurrence_id": occurrence.occurrence_id,
                 "data_id": image_data_id,
                 "chunk_index": 0,
                 "source_data_id": data_id,
                 "source_chunk_index": int(occurrence.chunk_index),
                 "title": occurrence.title,
-                "caption": occurrence.title if occurrence.title.lower() != "image" else "",
+                "caption": caption,
                 "display_label": display_label,
                 "source_file_name": title,
-                "source_ref": f"{kb['id']}/{rel}",
                 "file_name": rel,
                 "image_path": image_rel,
                 "image_abspath": image_abs,
-                "alt_text": occurrence.alt,
+                # ``section`` is not a zvec column; it survives only long enough
+                # to feed asset_body() → body → the embedding, below.
                 "section": occurrence.section,
-                "understanding_focus": focus,
                 "ref_key": ref_key,
                 "near_text": occurrence.near_text,
                 "related_text": occurrence.related_text,
-                "related_text_refs": occurrence.related_text_refs,
                 "description": "",
                 "table_markdown": "",
                 "uncertain": [],
