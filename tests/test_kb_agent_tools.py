@@ -1,7 +1,6 @@
 import unittest
 from types import SimpleNamespace
 
-from agent_loop import exhaust
 from knowledge_base.agent_tools import (
     KB_RESPONSE_SOURCE_INSTRUCTIONS,
     KB_TOOL_SCHEMAS,
@@ -10,6 +9,10 @@ from knowledge_base.agent_tools import (
 
 
 class _Backend:
+    @staticmethod
+    def search(query, **_kwargs):
+        return {"mode": "vector", "results": []}
+
     @staticmethod
     def read_chunk(**_kwargs):
         return "# 原始文档：source.pdf\n章节：方法\n正文"
@@ -76,12 +79,20 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertNotIn("attach_image", schema["parameters"]["properties"])
 
         handler = _Handler()
-        outcome = exhaust(handler.do_kb_image_read(
+        outcome = handler.do_kb_image_read(
             {"data_id": "kb-test::doc.md::image::1"}, None,
-        ))
+        )
 
         self.assertEqual(handler.queued_image, __file__)
         self.assertIn('"attach_status": "attached"', outcome.data)
+
+    def test_search_returns_payload_without_info_status_line(self):
+        outcome = _Handler().do_kb_search(
+            {"query": "SkillOpt", "mode": "vector"}, None,
+        )
+
+        self.assertNotIn("[Info] kb_search done.", outcome.data)
+        self.assertIn('"mode": "vector"', outcome.data)
 
     def test_text_references_are_not_desktop_citations(self):
         handler = _Handler()
@@ -129,14 +140,14 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertEqual(hint, "《original.pdf》：“图1 技能更新流程”")
 
     def test_read_exposes_safe_source_hint_and_answer_rule(self):
-        outcome = exhaust(_Handler().do_kb_read(
+        outcome = _Handler().do_kb_read(
             {
                 "data_id": "kb-test::documents/hash-doc.md",
                 "chunk_index": 0,
                 "span": 1,
             },
             None,
-        ))
+        )
 
         self.assertIn("《source.pdf》：“方法”", outcome.data)
         self.assertIn(KB_RESPONSE_SOURCE_INSTRUCTIONS, outcome.next_prompt)

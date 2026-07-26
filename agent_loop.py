@@ -39,6 +39,13 @@ def get_pretty_json(data):
         data = data.copy(); data["script"] = data["script"].replace("; ", ";\n  ")
     return json.dumps(data, indent=2, ensure_ascii=False).replace('\\n', '\n')
 
+
+def format_tool_result(data):
+    """Render the returned tool payload for the human-facing tool fold."""
+    if isinstance(data, (dict, list)):
+        return json.dumps(data, indent=2, ensure_ascii=False, default=json_default)
+    return str(data)
+
 def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                       max_turns=40, verbose=True, initial_user_content=None, yield_info=False):
     messages = [
@@ -81,10 +88,16 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
             gen = handler.dispatch(tool_name, args, response, index=ii, tool_num=len(tool_calls))
             try:
                 v = next(gen)
-                if verbose: yield '`````\n' + v
-                outcome = (yield from gen) if verbose else exhaust(gen)
+                def proxy(): yield v; return (yield from gen)
                 if verbose: yield '`````\n'
+                outcome = (yield from proxy()) if verbose else exhaust(proxy())
             except StopIteration as e: outcome = e.value
+
+            if verbose and tool_name != 'no_tool' and outcome.data is not None:
+                rendered_result = format_tool_result(outcome.data)
+                if rendered_result:
+                    yield rendered_result + '\n'
+            if verbose: yield '`````\n'
             
             if outcome.should_exit: 
                 exit_reason = {'result': 'EXITED', 'data': outcome.data}; break

@@ -301,7 +301,6 @@ class KnowledgeBaseToolsMixin:
             "hits": [self._clean_hit(hit) for hit in hits],
             "diagnostics": search_result.get("diagnostics") or [],
         }
-        yield "[Info] kb_search done.\n"
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
     def do_kb_read(self, args, response):
@@ -344,7 +343,6 @@ class KnowledgeBaseToolsMixin:
             source_note = "\n".join(f"- {hint}" for hint in source_hints)
             if source_note:
                 parts.insert(0, f"[可公开使用的原始来源口径]\n{source_note}")
-        yield "[Info] kb_read done.\n"
         return self._anchor_outcome(args, "\n\n".join(parts) or "[kb_read] 未读到内容。")
 
     def do_kb_list(self, args, response):
@@ -401,7 +399,6 @@ class KnowledgeBaseToolsMixin:
                     for document in documents
                 ]
             }
-        yield "[Info] kb_list done.\n"
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
     def _read_image_asset(self, args):
@@ -454,7 +451,6 @@ class KnowledgeBaseToolsMixin:
         result = self._public_image(info)
         result["attach_status"] = "attached"
         result["attach_message"] = "原图已加入下一轮模型输入。"
-        yield "[Info] kb_image_read done.\n"
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
     def _queue_image_view(self, info):
