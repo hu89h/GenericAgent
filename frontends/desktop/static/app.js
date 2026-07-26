@@ -1048,6 +1048,7 @@ async function kbOpenDocument(doc, { session = null } = {}) {
       kbPageEls.source.innerHTML = html;
       kbPageEls.source.classList.add('kb-original-source');
       postRenderEnhance(kbPageEls.source);
+      kbBindOriginalPreviewFit(kbPageEls.source);
     };
     if (cachedHtml) {
       mountHtml(cachedHtml);
@@ -1058,7 +1059,7 @@ async function kbOpenDocument(doc, { session = null } = {}) {
     const textTypes = new Set(['md', 'markdown', 'txt', 'text', 'csv', 'tsv', 'json', 'yaml', 'yml', 'xml', 'html', 'htm']);
     let html;
     if (sourceType === 'pdf') {
-      html = `<iframe class="kb-original-frame" src="${escapeHtml(sourceUrl)}" title="${escapeHtml(kbDocumentName(doc))}"></iframe>`;
+      html = `<iframe class="kb-original-frame" data-source-url="${escapeHtml(sourceUrl)}" src="${escapeHtml(kbPdfPreviewUrl(sourceUrl))}" title="${escapeHtml(kbDocumentName(doc))}"></iframe>`;
     } else if (imageTypes.has(sourceType)) {
       html = `<div class="kb-original-image-wrap"><img class="kb-original-image" src="${escapeHtml(sourceUrl)}" alt="${escapeHtml(kbDocumentName(doc))}"></div>`;
     } else if (textTypes.has(sourceType)) {
@@ -1080,6 +1081,38 @@ async function kbOpenDocument(doc, { session = null } = {}) {
     }
     showError(`${t('err.kbLoad')}: ${error.message || error}`);
   }
+}
+
+let kbOriginalPreviewObserver = null;
+let kbOriginalPreviewFitTimer = null;
+
+function kbPdfPreviewUrl(sourceUrl, fitWidth = 0) {
+  const url = new URL(sourceUrl, window.location.href);
+  if (fitWidth > 0) url.searchParams.set('_ga_fit_width', String(Math.round(fitWidth)));
+  url.hash = 'zoom=page-width';
+  return url.toString();
+}
+
+function kbBindOriginalPreviewFit(sourceRoot) {
+  if (kbOriginalPreviewObserver) kbOriginalPreviewObserver.disconnect();
+  kbOriginalPreviewObserver = null;
+  clearTimeout(kbOriginalPreviewFitTimer);
+
+  const frame = sourceRoot?.querySelector('.kb-original-frame[data-source-url]');
+  if (!frame || typeof ResizeObserver === 'undefined') return;
+  let previousWidth = Math.round(sourceRoot.getBoundingClientRect().width || 0);
+  kbOriginalPreviewObserver = new ResizeObserver(entries => {
+    const width = Math.round(entries[0]?.contentRect?.width || 0);
+    const grew = width > previousWidth + 24;
+    previousWidth = width;
+    if (!grew) return;
+    clearTimeout(kbOriginalPreviewFitTimer);
+    kbOriginalPreviewFitTimer = setTimeout(() => {
+      if (!frame.isConnected || width <= 0) return;
+      frame.src = kbPdfPreviewUrl(frame.dataset.sourceUrl || frame.src, width);
+    }, 220);
+  });
+  kbOriginalPreviewObserver.observe(sourceRoot);
 }
 
 async function kbOpenSessionScope(sess) {
