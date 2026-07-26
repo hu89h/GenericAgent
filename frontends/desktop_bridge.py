@@ -14,7 +14,9 @@ HTTP API:
   GET    /model-profiles  (+ POST / PUT / DELETE by id)
   GET    /kb
   POST   /kb/import
+  GET    /kb/jobs
   GET    /kb/jobs/{job_id}
+  POST   /kb/jobs/{job_id}/cancel
   GET    /kb/{kb_id}/status
   GET    /kb/{kb_id}/source
   GET    /kb/{kb_id}/source/asset
@@ -218,6 +220,12 @@ _kb_jobs: Dict[str, dict] = {}
 _kb_jobs_lock = threading.Lock()
 _KB_JOB_RETENTION_SECONDS = 24 * 60 * 60
 _KB_JOB_MAX_COMPLETED = 100
+_KB_TERMINAL_JOB_STATES = {
+    "completed",
+    "completed_with_failures",
+    "failed",
+    "cancelled",
+}
 
 
 def _desktop_parent_pid() -> Optional[int]:
@@ -1995,11 +2003,92 @@ def _kb_public_job_item(item: dict) -> dict:
     return public
 
 
+def _kb_public_document_result(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return {}
+    failures = item.get("failures") or []
+    error_codes = []
+    for failure in failures:
+        code = _kb_error_code((failure or {}).get("error"))
+        if code and code not in error_codes:
+            error_codes.append(code)
+    return {
+        "name": str(item.get("name") or _kb_display_name(item.get("source"))),
+        "status": str(item.get("status") or ""),
+        "textChunks": max(0, int(item.get("text_chunks") or 0)),
+        "imagesIndexed": max(0, int(item.get("images_indexed") or 0)),
+        "imagesTotal": max(0, int(item.get("images_total") or 0)),
+        "warningCount": len(failures),
+        "errorCodes": error_codes,
+    }
+
+
+def _kb_public_image_document(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return {}
+    return {
+        "name": str(item.get("name") or _kb_display_name(item.get("key"))),
+        "completed": max(0, int(item.get("completed") or 0)),
+        "total": max(0, int(item.get("total") or 0)),
+    }
+
+
+def _kb_progress_from_event(event: dict) -> dict:
+    phase = str(event.get("phase") or "")
+    if isinstance(event.get("progress"), dict):
+        raw = event["progress"]
+        completed = raw.get("completed")
+        total = raw.get("total")
+        unit = raw.get("unit")
+        indeterminate = bool(raw.get("indeterminate"))
+    elif "analysis_total" in event:
+        completed = event.get("analysis_completed")
+        total = event.get("analysis_total")
+        unit = "images"
+        indeterminate = False
+    elif "processed" in event:
+        completed = event.get("processed")
+        total = event.get("total")
+        unit = "records" if phase in {"indexing", "validated"} else "documents"
+        indeterminate = phase == "indexing"
+    elif "completed" in event or "total" in event:
+        completed = event.get("completed")
+        total = event.get("total")
+        unit = "documents"
+        indeterminate = False
+    else:
+        completed = 0
+        total = 0
+        unit = ""
+        indeterminate = True
+    try:
+        completed = max(0, int(completed or 0))
+    except (TypeError, ValueError):
+        completed = 0
+    try:
+        total = max(0, int(total or 0))
+    except (TypeError, ValueError):
+        total = 0
+    if phase in {"scanning", "publishing", "cancelling"}:
+        indeterminate = True
+    if phase in {"completed", "completed_with_failures", "failed", "cancelled"}:
+        indeterminate = False
+    return {
+        "completed": completed,
+        "total": total,
+        "unit": str(unit or ""),
+        "indeterminate": bool(indeterminate),
+    }
+
+
 def _kb_public_failure(item: dict) -> dict:
     if not isinstance(item, dict):
         return {}
     return {
-        "source": str(item.get("source") or ""),
+        "source": str(
+            item.get("source_document")
+            or _kb_display_name(item.get("source"))
+        ),
         "stage": str(item.get("stage") or ""),
         "error_type": str(item.get("error_type") or ""),
         "error": str(item.get("error") or ""),
@@ -2010,6 +2099,7 @@ def _kb_job_snapshot(job: dict) -> dict:
     """Expose only stable, user-facing task state to the desktop page."""
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
     failures = job.get("failures") or result.get("failures") or []
+    documents = job.get("documents") or result.get("documents") or []
     snapshot = {
         "ok": bool(job.get("ok", True)),
         "jobId": str(job.get("jobId") or ""),
@@ -2021,7 +2111,22 @@ def _kb_job_snapshot(job: dict) -> dict:
         "done": int(job.get("done") or 0),
         "total": int(job.get("total") or 0),
         "counts": dict(job.get("counts") or {}),
+        "documentProgress": dict(job.get("documentProgress") or {}),
         "summary": dict(job.get("summary") or {}),
+        "progress": dict(job.get("progress") or {}),
+        "documents": [
+            public
+            for public in (_kb_public_document_result(item) for item in documents)
+            if public.get("name")
+        ],
+        "imageDocuments": [
+            public
+            for public in (
+                _kb_public_image_document(item)
+                for item in (job.get("imageDocuments") or [])
+            )
+            if public.get("name")
+        ],
         "files": [
             public
             for public in (_kb_public_job_item(item) for item in (job.get("files") or []))
@@ -2039,6 +2144,12 @@ def _kb_job_snapshot(job: dict) -> dict:
         ],
         "startedAt": job.get("startedAt"),
         "updatedAt": job.get("updatedAt"),
+        "cancelRequested": bool(job.get("cancelRequested")),
+        "cancellable": (
+            isinstance(job.get("cancelEvent"), threading.Event)
+            and job.get("state") not in _KB_TERMINAL_JOB_STATES
+            and job.get("phase") != "publishing"
+        ),
     }
     error_code = _kb_error_code(job.get("error"))
     if error_code:
@@ -2049,10 +2160,9 @@ def _kb_job_snapshot(job: dict) -> dict:
 
 def _kb_prune_jobs_locked(now: int | None = None) -> None:
     now = int(now or time.time())
-    terminal = {"completed", "completed_with_failures", "failed"}
     for job_id, job in list(_kb_jobs.items()):
         if (
-            job.get("state") in terminal
+            job.get("state") in _KB_TERMINAL_JOB_STATES
             and now - int(job.get("updatedAt") or job.get("startedAt") or now)
             > _KB_JOB_RETENTION_SECONDS
         ):
@@ -2061,12 +2171,25 @@ def _kb_prune_jobs_locked(now: int | None = None) -> None:
         (
             (int(job.get("updatedAt") or 0), job_id)
             for job_id, job in _kb_jobs.items()
-            if job.get("state") in terminal
+            if job.get("state") in _KB_TERMINAL_JOB_STATES
         ),
         reverse=True,
     )
     for _updated, job_id in completed[_KB_JOB_MAX_COMPLETED:]:
         _kb_jobs.pop(job_id, None)
+
+
+async def kb_jobs_handler(request):
+    with _kb_jobs_lock:
+        _kb_prune_jobs_locked()
+        jobs = sorted(
+            (_kb_job_snapshot(job) for job in _kb_jobs.values()),
+            key=lambda job: (
+                job.get("state") in _KB_TERMINAL_JOB_STATES,
+                -int(job.get("updatedAt") or 0),
+            ),
+        )
+    return json_ok({"ok": True, "jobs": jobs})
 
 
 async def kb_list_handler(request):
@@ -2173,6 +2296,7 @@ async def kb_import_handler(request):
         "jobId": job_id,
         "state": "queued",
         "phase": "queued",
+        "mode": "import",
         "sourceDir": source_dir,
         "kbId": backend.kb_id_for_source(source_dir),
         "counts": {
@@ -2190,10 +2314,25 @@ async def kb_import_handler(request):
             "analysis_completed": 0,
             "analysis_total": 0,
         },
+        "documentProgress": {
+            "completed": 0,
+            "total": 0,
+            "failed": 0,
+            "ready": 0,
+        },
         "files": [],
+        "documents": [],
+        "imageDocuments": [],
+        "progress": {
+            "completed": 0,
+            "total": 0,
+            "unit": "",
+            "indeterminate": True,
+        },
         "current": "",
         "result": None,
         "error": "",
+        "cancelRequested": False,
         "startedAt": int(time.time()),
         "updatedAt": int(time.time()),
     }
@@ -2208,60 +2347,129 @@ async def kb_import_handler(request):
             current = _kb_jobs.get(job_id)
             if current is None:
                 return
-            current["phase"] = str(event.get("phase") or current.get("phase") or "running")
+            cancel_event = current.get("cancelEvent")
+            cancelling = bool(cancel_event and cancel_event.is_set())
+            if cancelling:
+                current.update(
+                    state="cancelling",
+                    phase="cancelling",
+                    cancelRequested=True,
+                )
+            else:
+                current["phase"] = str(event.get("phase") or current.get("phase") or "running")
             if event.get("current") is not None:
                 current["current"] = str(
                     event.get("name") or _kb_display_name(event.get("current"))
                 )
-            for key in current["counts"]:
+            elif current["phase"] in {
+                "scanning", "scanned", "prepared", "records_ready",
+                "indexing", "validated",
+            }:
+                current["current"] = ""
+            current["progress"] = _kb_progress_from_event(event)
+            if isinstance(event.get("image_documents"), list):
+                current["imageDocuments"] = [
+                    dict(item)
+                    for item in event["image_documents"]
+                    if isinstance(item, dict)
+                ]
+            document_progress = event.get("document_progress")
+            if isinstance(document_progress, dict):
+                for key in ("completed", "total", "failed", "ready"):
+                    if key not in document_progress:
+                        continue
+                    try:
+                        current["documentProgress"][key] = max(
+                            0, int(document_progress[key])
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                current["counts"]["completed"] = current["documentProgress"]["completed"]
+                current["counts"]["total"] = current["documentProgress"]["total"]
+            for key in (
+                "scanned", "markdown", "converting", "ready", "succeeded",
+                "failed", "ignored", "skipped", "assets",
+                "analysis_completed", "analysis_total",
+            ):
                 if key not in event:
                     continue
                 try:
                     current["counts"][key] = max(0, int(event[key]))
                 except (TypeError, ValueError):
                     continue
-            source = str(event.get("source") or "").strip()
-            if source:
+            def merge_file(raw: dict) -> None:
+                source = str(raw.get("source") or "").strip()
+                if not source:
+                    return
                 rows = current.setdefault("files", [])
                 row = next((item for item in rows if item.get("source") == source), None)
                 if row is None:
                     row = {
                         "source": source,
-                        "name": str(event.get("name") or _kb_display_name(source)),
+                        "name": str(raw.get("name") or _kb_display_name(source)),
                         "status": "queued",
                         "error": "",
                     }
                     rows.append(row)
-                if event.get("file_status"):
-                    row["status"] = str(event["file_status"])
-                if event.get("error") is not None:
-                    row["error"] = str(event.get("error") or "")
-                if event.get("current"):
-                    row["current"] = _kb_display_name(event["current"])
+                status = raw.get("file_status") or raw.get("status")
+                if status:
+                    row["status"] = str(status)
+                if raw.get("error") is not None:
+                    row["error"] = str(raw.get("error") or "")
+                if raw.get("current"):
+                    row["current"] = _kb_display_name(raw["current"])
+
+            source = str(event.get("source") or "").strip()
+            if source:
+                merge_file(event)
+            if isinstance(event.get("files"), list):
+                for item in event["files"]:
+                    if isinstance(item, dict) and item.get("kind") == "document":
+                        merge_file(item)
             current["updatedAt"] = int(time.time())
 
     def run_import():
         with _kb_jobs_lock:
             current = _kb_jobs[job_id]
-            current.update(state="running", phase="scanning", updatedAt=int(time.time()))
+            cancelling = current["cancelEvent"].is_set()
+            current.update(
+                state="cancelling" if cancelling else "running",
+                phase="cancelling" if cancelling else "scanning",
+                updatedAt=int(time.time()),
+            )
         try:
             result = backend.import_kb(
                 source_dir,
                 name=str(data.get("name") or ""),
                 progress=update_progress,
+                cancelled=job["cancelEvent"].is_set,
             )
             summary = result.get("summary") or {}
             failures = result.get("failures") or []
+            state = "completed_with_failures" if failures else "completed"
             with _kb_jobs_lock:
                 current = _kb_jobs[job_id]
                 current.update(
-                    state="completed_with_failures" if failures else "completed",
-                    phase="completed",
+                    state=state,
+                    phase=state,
                     result=result,
                     summary=summary,
                     updatedAt=int(time.time()),
                     current="",
-                    files=result.get("files") or [],
+                    files=[],
+                    documents=result.get("documents") or [],
+                    documentProgress={
+                        "completed": int(summary.get("documents_total") or 0),
+                        "total": int(summary.get("documents_total") or 0),
+                        "failed": int(summary.get("documents_failed") or 0),
+                        "ready": int(summary.get("documents_succeeded") or 0),
+                    },
+                    progress={
+                        "completed": int(summary.get("documents_total") or 0),
+                        "total": int(summary.get("documents_total") or 0),
+                        "unit": "documents",
+                        "indeterminate": False,
+                    },
                 )
                 current["counts"].update({
                     key: int(value)
@@ -2269,11 +2477,25 @@ async def kb_import_handler(request):
                     if key in current["counts"] and isinstance(value, (int, float))
                 })
         except Exception as error:
+            if getattr(error, "code", "") == "kb_operation_cancelled":
+                with _kb_jobs_lock:
+                    current = _kb_jobs[job_id]
+                    current.update(
+                        ok=True,
+                        state="cancelled",
+                        phase="cancelled",
+                        error="",
+                        updatedAt=int(time.time()),
+                        current="",
+                        cancelRequested=True,
+                    )
+                    current["progress"] = {
+                        **dict(current.get("progress") or {}),
+                        "indeterminate": False,
+                    }
+                return
             with _kb_jobs_lock:
                 current = _kb_jobs[job_id]
-                files = current.get("files") or []
-                if not files:
-                    files = [{"source": source_dir, "status": "failed", "error": str(error)}]
                 current.update(
                     ok=False,
                     state="failed",
@@ -2281,7 +2503,13 @@ async def kb_import_handler(request):
                     error=str(error),
                     updatedAt=int(time.time()),
                     current=_kb_display_name(source_dir),
-                    files=files,
+                    documents=[],
+                    progress={
+                        "completed": 0,
+                        "total": 0,
+                        "unit": "",
+                        "indeterminate": False,
+                    },
                 )
                 current["counts"].update(
                     completed=int(current["counts"].get("completed") or 0),
@@ -2300,6 +2528,33 @@ async def kb_job_status_handler(request):
         if job is None:
             return json_ok({"ok": False, "error": "kb_job_not_found"}, status=404)
         return json_ok(_kb_job_snapshot(job))
+
+
+async def kb_job_cancel_handler(request):
+    job_id = str(request.match_info.get("job_id") or "")
+    with _kb_jobs_lock:
+        _kb_prune_jobs_locked()
+        job = _kb_jobs.get(job_id)
+        if job is None:
+            return json_ok({"ok": False, "error": "kb_job_not_found"}, status=404)
+        if job.get("state") in _KB_TERMINAL_JOB_STATES:
+            return json_ok(_kb_job_snapshot(job))
+        if job.get("phase") == "publishing":
+            return json_ok(
+                {"ok": False, "error": "kb_cancel_too_late"},
+                status=409,
+            )
+        cancel_event = job.get("cancelEvent")
+        if not isinstance(cancel_event, threading.Event):
+            return json_ok({"ok": False, "error": "kb_job_not_cancellable"}, status=409)
+        cancel_event.set()
+        job.update(
+            state="cancelling",
+            phase="cancelling",
+            cancelRequested=True,
+            updatedAt=int(time.time()),
+        )
+        return json_ok(_kb_job_snapshot(job), status=202)
 
 
 async def kb_delete_handler(request):
@@ -2343,9 +2598,17 @@ async def kb_reindex_handler(request):
         "currentKb": "",
         "current": "",
         "files": [],
+        "progress": {
+            "completed": 0,
+            "total": 0,
+            "unit": "records",
+            "indeterminate": True,
+        },
         "logs": [],
         "result": None,
         "error": "",
+        "cancelEvent": threading.Event(),
+        "cancelRequested": False,
         "startedAt": now,
         "updatedAt": now,
     }
@@ -2360,7 +2623,15 @@ async def kb_reindex_handler(request):
             current = _kb_jobs[job_id]
             current["logs"] = (current["logs"] + [text])[-100:]
             current["updatedAt"] = int(time.time())
-            current["phase"] = "indexing"
+            cancel_event = current.get("cancelEvent")
+            if cancel_event and cancel_event.is_set():
+                current.update(
+                    state="cancelling",
+                    phase="cancelling",
+                    cancelRequested=True,
+                )
+            else:
+                current["phase"] = "indexing"
             match = re.search(r"\[kb:([^\]]+)\]", text)
             if match:
                 current_id = match.group(1)
@@ -2381,14 +2652,27 @@ async def kb_reindex_handler(request):
             current = _kb_jobs.get(job_id)
             if current is None:
                 return
-            current["phase"] = str(event.get("phase") or current["phase"])
+            cancel_event = current.get("cancelEvent")
+            cancelling = bool(cancel_event and cancel_event.is_set())
+            if cancelling:
+                current.update(
+                    state="cancelling",
+                    phase="cancelling",
+                    cancelRequested=True,
+                )
+            else:
+                current["phase"] = str(event.get("phase") or current["phase"])
             current["done"] = int(event.get("processed") or current.get("done") or 0)
+            current["progress"] = _kb_progress_from_event(event)
             current["updatedAt"] = int(time.time())
 
     def run_reindex():
         with _kb_jobs_lock:
-            _kb_jobs[job_id].update(
-                state="running", phase="indexing", updatedAt=int(time.time())
+            current = _kb_jobs[job_id]
+            current.update(
+                state="running",
+                phase="indexing",
+                updatedAt=int(time.time()),
             )
         try:
             result = backend.reindex(
@@ -2407,6 +2691,12 @@ async def kb_reindex_handler(request):
                     current="",
                     files=[{"name": detail[0].get("name") or kb_id, "status": "built"}],
                     summary={"total": 1, "succeeded": 1, "failed": 0},
+                    progress={
+                        "completed": 1,
+                        "total": 1,
+                        "unit": "knowledge_bases",
+                        "indeterminate": False,
+                    },
                 )
         except Exception as error:
             with _kb_jobs_lock:
@@ -2416,6 +2706,12 @@ async def kb_reindex_handler(request):
                     phase="failed",
                     error=str(error),
                     updatedAt=int(time.time()),
+                    progress={
+                        "completed": 0,
+                        "total": 0,
+                        "unit": "",
+                        "indeterminate": False,
+                    },
                 )
 
     threading.Thread(target=run_reindex, name=job_id, daemon=True).start()
@@ -2980,7 +3276,9 @@ def create_app():
     app.router.add_post("/session/{sid}/model", session_model_handler)
     app.router.add_get("/kb", kb_list_handler)
     app.router.add_post("/kb/import", kb_import_handler)
+    app.router.add_get("/kb/jobs", kb_jobs_handler)
     app.router.add_get("/kb/jobs/{job_id}", kb_job_status_handler)
+    app.router.add_post("/kb/jobs/{job_id}/cancel", kb_job_cancel_handler)
     app.router.add_get("/kb/{kb_id}/status", kb_detail_status_handler)
     app.router.add_get("/kb/{kb_id}/source/asset", kb_source_asset_handler)
     app.router.add_get("/kb/{kb_id}/source", kb_source_handler)
