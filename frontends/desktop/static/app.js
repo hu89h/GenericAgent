@@ -2533,6 +2533,12 @@ function stripTurnMarker(body) {
     .replace(/^\s*\**LLM Running \(Turn \d+\) \.\.\.\**\s*/i, '');
 }
 
+function stripThinkingBlocks(body) {
+  return String(body || '')
+    .replace(/<(thinking|think)>[\s\S]*?<\/\1>\s*/gi, '')
+    .replace(/<(thinking|think)>[\s\S]*$/gi, '');
+}
+
 function renderTurnBody(body, options = {}) {
   // 自包含：每次调用独立的占位栈，渲染完立即还原，无跨调用共享状态
   const folds = [];
@@ -2543,7 +2549,15 @@ function renderTurnBody(body, options = {}) {
   };
   const stashAsk = (data) => { asks.push(data); return `\n\n§§ASK:${asks.length - 1}§§\n\n`; };
   let s = stripTurnMarker(body);
-  s = s.replace(/<thinking>[\s\S]*?<\/thinking>/gi, m => stash(t('fold.thinking'), m.replace(/<\/?thinking>/gi, ''), 'fold-thinking'));
+  s = s.replace(/<(thinking|think)>([\s\S]*?)(<\/\1>|$)/gi, (_m, _tag, inner, close) => {
+    const live = !close;
+    return stash(
+      `${t('fold.thinking')}${live ? ' …' : ''}`,
+      inner,
+      live ? 'fold-thinking fold-thinking-live' : 'fold-thinking',
+      { open: live },
+    );
+  });
   s = foldAgentProtocolBlocks(s, {
     onTool(name, json, meta) {
       if (name === 'ask_user' && !meta?.inFlight) {
@@ -3725,7 +3739,9 @@ function assistantCopyText(msg) {
   if (segs.length) {
     // 复制保持旧行为：只复制当前/最后可见 turn，不复制已折叠历史 turn。
     const turn = resolveVisibleTurnIndex(segs, msg?.curr_turn);
-    return stripTurnMarker(segs[turn] || '').replace(/<summary>[\s\S]*?<\/summary>\s*/i, '').trim();
+    return stripThinkingBlocks(stripTurnMarker(segs[turn] || ''))
+      .replace(/<summary>[\s\S]*?<\/summary>\s*/i, '')
+      .trim();
   }
   return '';
 }
