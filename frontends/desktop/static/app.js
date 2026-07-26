@@ -219,6 +219,8 @@ let bridgeUiOffline = false;
         return http(`/session/${encodeURIComponent(sid)}/cancel`, { method: 'POST', body: params || {} });
       }
       case 'kb/status': return http('/kb');
+      case 'kb/config/get': return http('/kb/config');
+      case 'kb/config/save': return http('/kb/config', { method: 'POST', body: params || {} });
       case 'kb/docs': {
         const id = params.kbId || params.id || '';
         if (!id) throw new Error('kb/docs missing kbId');
@@ -343,6 +345,8 @@ let bridgeUiOffline = false;
       ? (title = '') => tauriInvoke('pick_directory', { title })
       : null,
     kbStatus: () => rpc('kb/status', {}),
+    kbConfig: () => rpc('kb/config/get', {}),
+    saveKbConfig: (params = {}) => rpc('kb/config/save', params),
     kbDocs: (params = {}) => rpc('kb/docs', params),
     kbSourceUrl: (params = {}, assetPath = '') => {
       const id = params.kbId || params.kb_id || '';
@@ -1734,7 +1738,13 @@ async function kbPickAndImport() {
 }
 
 async function kbDeleteLibrary(kb) {
-  if (!window.confirm(t('kb.deleteConfirm'))) return;
+  const confirmed = await showConfirmDialog({
+    title: t('kb.delete'),
+    message: t('kb.deleteConfirm'),
+    okText: t('kb.delete'),
+    okKind: 'danger',
+  });
+  if (!confirmed) return;
   try {
     await window.ga.kbDelete(kb.id, { deleteData: true });
     kbState.documentLists.delete(kb.id);
@@ -2904,11 +2914,10 @@ async function loadSessions() {
         knowledgeScope: normalizeKnowledgeScope(s.knowledgeScope)
       });
     }
-    // 刷新后固定恢复「上次正在看的会话」（前端持久化的 ga_active），而不是 bridge 的
-    // activeSessionId（=最近更新的会话，会随后台会话变动而跳来跳去）。没有有效的已存
-    // 会话则置空 → 显示「新会话」空态，由用户自己点选。
-    const savedActive = localStorage.getItem('ga_active');
-    state.activeId = (savedActive && state.sessions.has(savedActive)) ? savedActive : null;
+    // 历史会话只进入会话列表，不在应用启动时自动打开。用户显式点击历史项后再 hydrate；
+    // 空态首次发送沿用现有懒创建逻辑生成一个新会话。
+    state.activeId = null;
+    localStorage.removeItem('ga_active');
   } catch (_) {}
 }
 
@@ -4172,7 +4181,6 @@ async function ensureBridgeSession(sess) {
     }
     if (state.activeId === oldId) {
       state.activeId = sid;
-      localStorage.setItem('ga_active', sid);
     }
   }
   return sid;
@@ -4217,7 +4225,6 @@ function discardEmptyDraftSessions() {
     state.runtime.delete(id);
     if (state.activeId === id) {
       state.activeId = null;
-      localStorage.removeItem('ga_active');
     }
   }
 }
@@ -4259,7 +4266,6 @@ function runSessionHydrate(sess) {
 function setActiveSession(id) {
   setSessionLoading(false);
   state.activeId = id;
-  if (id) localStorage.setItem('ga_active', id);  // 持久化当前会话，刷新后固定恢复它
   const sess = state.sessions.get(id);
   if (!sess) return;
   sess.knowledgeScope = normalizeKnowledgeScope(sess.knowledgeScope);
@@ -4306,7 +4312,6 @@ async function closeSession(id) {
     }
     else {
       state.activeId = null;
-      localStorage.removeItem('ga_active');
       if (msgsEl) msgsEl.innerHTML = '';
       refreshEmptyState(null);
       refreshStatusLabel();
@@ -4817,7 +4822,6 @@ async function sendPrompt(text) {
         sess.id = sess.bridgeSessionId;
         state.sessions.set(sess.id, sess);
         state.activeId = sess.id;
-        localStorage.setItem('ga_active', sess.id);  // 会话 id 因 bridge 重建而变更，同步持久化
       }
     }
     const res = await window.ga.rpc('session/prompt', { sessionId: sid, prompt: composedPrompt, display: text,
@@ -5428,6 +5432,102 @@ function renderSettingsModels() {
   applyI18n();
 }
 
+let kbConfigLoading = null;
+
+function setKbConfigBusy(form, busy) {
+  if (!form) return;
+  form.classList.toggle('is-loading', !!busy);
+  form.querySelectorAll('input, button').forEach(el => { el.disabled = !!busy; });
+}
+
+function setKbConfigStatus(form, configured, { error = false, message = '' } = {}) {
+  const status = form?.querySelector('.kb-config-status');
+  if (!status) return;
+  status.classList.toggle('is-ok', !!configured && !error);
+  status.classList.toggle('is-error', !!error);
+  status.textContent = error
+    ? (message || t('set.kbConfigLoadFailed'))
+    : (configured ? t('set.kbKeyConfigured') : t('set.kbKeyMissing'));
+}
+
+function setKbConfigForm(kind, values) {
+  const form = document.getElementById(kind === 'embedding'
+    ? 'kb-embedding-config-form'
+    : 'mineru-config-form');
+  if (!form || !values) return;
+  const baseUrl = form.elements.namedItem('baseUrl');
+  const model = form.elements.namedItem(kind === 'embedding' ? 'model' : 'modelVersion');
+  const dimension = form.elements.namedItem('dimension');
+  if (baseUrl) baseUrl.value = values.baseUrl || '';
+  if (model) model.value = kind === 'embedding'
+    ? (values.model || '')
+    : (values.modelVersion || '');
+  if (dimension) dimension.value = values.dimension || '';
+  const secret = form.elements.namedItem('apiKey');
+  if (secret) secret.value = '';
+  setKbConfigStatus(form, !!values.apiKeyConfigured);
+}
+
+async function loadKbServiceConfigs() {
+  if (kbConfigLoading) return kbConfigLoading;
+  const forms = [
+    document.getElementById('kb-embedding-config-form'),
+    document.getElementById('mineru-config-form'),
+  ].filter(Boolean);
+  if (!forms.length) return;
+  kbConfigLoading = (async () => {
+    forms.forEach(form => setKbConfigBusy(form, true));
+    try {
+      const result = await window.ga.kbConfig();
+      setKbConfigForm('embedding', result.embedding);
+      setKbConfigForm('mineru', result.mineru);
+    } catch (_) {
+      forms.forEach(form => setKbConfigStatus(form, false, { error: true }));
+    } finally {
+      forms.forEach(form => setKbConfigBusy(form, false));
+      kbConfigLoading = null;
+    }
+  })();
+  return kbConfigLoading;
+}
+
+async function saveKbServiceConfig(kind, form) {
+  setKbConfigBusy(form, true);
+  try {
+    const payload = Object.fromEntries(new FormData(form).entries());
+    const result = await window.ga.saveKbConfig({ [kind]: payload });
+    setKbConfigForm(kind, result[kind]);
+    if (Array.isArray(result.profiles)) {
+      state.modelProfiles = normalizeProfiles(result.profiles);
+      renderSettingsModels();
+    }
+    showChanToast(t('set.kbConfigSaved'), '', 'ok');
+  } catch (error) {
+    setKbConfigStatus(form, false, {
+      error: true,
+      message: t('set.kbConfigSaveFailed'),
+    });
+    showChanToast(
+      t('set.kbConfigSaveFailed'),
+      error.message || String(error),
+      'err',
+    );
+  } finally {
+    setKbConfigBusy(form, false);
+  }
+}
+
+for (const [kind, id] of [
+  ['embedding', 'kb-embedding-config-form'],
+  ['mineru', 'mineru-config-form'],
+]) {
+  const form = document.getElementById(id);
+  if (form) form.addEventListener('submit', event => {
+    event.preventDefault();
+    void saveKbServiceConfig(kind, form);
+  });
+}
+
 function openSettings() {
   openModal('settings-modal');
   renderSettingsModels();
@@ -5435,6 +5535,7 @@ function openSettings() {
   applyTheme(theme, { persist: false });
   applyAppearance(appearance, plainUi, { persist: false });
   applyChatFontSize(chatFontSize, { persist: false });
+  void loadKbServiceConfigs();
 }
 async function loadModelProfiles() {
   try {
@@ -6012,10 +6113,8 @@ window.ga.onBridgeReady(async () => {
   if (sess && sessionNeedsHydrate(sess)) {
     await runSessionHydrate(sess);
   } else if (sess) planPoll(sess);
-  delete document.documentElement.dataset.bootHasSessions;
   if (sess) refreshEmptyState(sess);
 });
-setTimeout(() => { delete document.documentElement.dataset.bootHasSessions; }, 3000);
 window.ga.onBridgeNotification((msg) => {
   if (msg && msg.type === 'session-state') {
     for (const sess of state.sessions.values()) {

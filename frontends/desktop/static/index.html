@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>GenericAgent</title>
 <link rel="stylesheet" href="assets/fonts/fonts.css?v=2">
-  <link rel="stylesheet" href="styles.css?v=192">
+  <link rel="stylesheet" href="styles.css?v=193">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
@@ -40,7 +40,6 @@
   document.documentElement.style.setProperty('--chat-font',cfp+'px');
   var hljs=document.getElementById('hljs-theme');
   if(hljs&&app==='dark') hljs.href='https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css';
-  try{ var sraw=localStorage.getItem('ga_sessions'); if(sraw && JSON.parse(sraw).length) document.documentElement.dataset.bootHasSessions='1'; }catch(_){}
 })();
 </script>
 </head>
@@ -765,6 +764,55 @@
           </button>
         </div>
         <div class="set-block">
+          <div class="set-sec-t" data-i18n="set.kbEmbedding"></div>
+          <form class="kb-config-form" id="kb-embedding-config-form">
+            <label class="kb-config-field">
+              <span data-i18n="model.apikey"></span>
+              <input name="apiKey" type="password" autocomplete="new-password" data-i18n-placeholder="model.apikeyKeep">
+            </label>
+            <label class="kb-config-field">
+              <span data-i18n="model.apibase"></span>
+              <input name="baseUrl" type="url" autocomplete="off" required>
+            </label>
+            <div class="kb-config-row">
+              <label class="kb-config-field">
+                <span data-i18n="model.model"></span>
+                <input name="model" autocomplete="off" required>
+              </label>
+              <label class="kb-config-field">
+                <span data-i18n="set.kbDimension"></span>
+                <input name="dimension" type="number" min="1" step="1" required>
+              </label>
+            </div>
+            <div class="kb-config-foot">
+              <span class="kb-config-status" id="kb-embedding-config-status"></span>
+              <button class="set-btn primary" type="submit" data-i18n="common.save"></button>
+            </div>
+          </form>
+        </div>
+        <div class="set-block">
+          <div class="set-sec-t" data-i18n="set.kbMineru"></div>
+          <form class="kb-config-form" id="mineru-config-form">
+            <label class="kb-config-field">
+              <span data-i18n="model.apikey"></span>
+              <input name="apiKey" type="password" autocomplete="new-password" data-i18n-placeholder="model.apikeyKeep">
+            </label>
+            <label class="kb-config-field">
+              <span data-i18n="model.apibase"></span>
+              <input name="baseUrl" type="url" autocomplete="off" required>
+            </label>
+            <label class="kb-config-field">
+              <span data-i18n="set.kbParserModel"></span>
+              <input name="modelVersion" autocomplete="off" required>
+            </label>
+            <a class="kb-config-link" href="https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&amp;source=minerU" target="_blank" rel="noopener noreferrer" data-i18n="set.kbMineruRegister"></a>
+            <div class="kb-config-foot">
+              <span class="kb-config-status" id="mineru-config-status"></span>
+              <button class="set-btn primary" type="submit" data-i18n="common.save"></button>
+            </div>
+          </form>
+        </div>
+        <div class="set-block">
           <div class="set-sec-t" data-i18n="set.features"></div>
           <button class="set-btn" id="import-mykey-btn" type="button" data-i18n-title="set.importMykeyTip">
             <span data-ga-icon="fileText"></span>
@@ -813,7 +861,7 @@
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
 <script src="phosphor-icons.js?v=2"></script>
-<script src="i18n.js?v=4"></script>
-  <script src="app.js?v=226"></script>
+<script src="i18n.js?v=5"></script>
+  <script src="app.js?v=227"></script>
 </body>
 </html>

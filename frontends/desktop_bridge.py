@@ -13,6 +13,8 @@ HTTP API:
   POST   /config
   GET    /model-profiles  (+ POST / PUT / DELETE by id)
   GET    /kb
+  GET    /kb/config
+  POST   /kb/config
   POST   /kb/import
   GET    /kb/jobs
   GET    /kb/jobs/{job_id}
@@ -53,6 +55,7 @@ import threading, time, traceback, uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+from urllib.parse import urlparse
 from aiohttp import web, WSMsgType
 
 APP_DIR = Path(__file__).resolve().parent
@@ -631,6 +634,181 @@ class AgentManager:
         self._invalidate_mykey_cache()
         self._reload_live_agents()
         return self.list_model_profiles()
+
+    def _kb_provider_settings(self):
+        self.ensure_ga_import_path()
+        from knowledge_base.providers import provider_settings
+        return provider_settings
+
+    @staticmethod
+    def _kb_url(value: Any, field: str) -> str:
+        value = str(value or "").strip().rstrip("/")
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"{field} must be an http(s) URL")
+        return value
+
+    @staticmethod
+    def _kb_positive_int(value: Any, field: str) -> int:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            raise ValueError(f"{field} must be a positive integer") from None
+        if number <= 0:
+            raise ValueError(f"{field} must be a positive integer")
+        return number
+
+    def get_kb_service_configs(self) -> dict:
+        provider_settings = self._kb_provider_settings()
+        embedding = provider_settings.embedding_config()
+        mineru = provider_settings.mineru_config()
+        return {
+            "embedding": {
+                "apiKeyConfigured": bool(
+                    str(embedding.get("apikey") or embedding.get("api_key") or "").strip()
+                ),
+                "baseUrl": str(
+                    embedding.get("apibase")
+                    or embedding.get("base_url")
+                    or provider_settings.EMBEDDING_BASE_URL
+                ).strip().rstrip("/"),
+                "model": str(
+                    embedding.get("model") or provider_settings.EMBEDDING_MODEL
+                ).strip(),
+                "dimension": self._kb_positive_int(
+                    embedding.get("dimension") or provider_settings.EMBEDDING_DIMENSION,
+                    "embedding dimension",
+                ),
+            },
+            "mineru": {
+                "apiKeyConfigured": bool(str(mineru.get("api_key") or "").strip()),
+                "baseUrl": str(
+                    mineru.get("base_url") or provider_settings.MINERU_BASE_URL
+                ).strip().rstrip("/"),
+                "modelVersion": str(
+                    mineru.get("model_version")
+                    or provider_settings.MINERU_MODEL_VERSION
+                ).strip(),
+            },
+        }
+
+    def save_kb_service_configs(self, data: dict) -> dict:
+        if not isinstance(data, dict):
+            raise ValueError("knowledge-base configuration must be an object")
+        provider_settings = self._kb_provider_settings()
+        self._mykey_file()
+        self.ensure_ga_import_path()
+        from llmcore import reload_mykeys
+        raw = reload_mykeys()[0]
+        old_embedding = raw.get("kb_embedding_config")
+        old_embedding = dict(old_embedding) if isinstance(old_embedding, dict) else {}
+        old_mineru = raw.get("mineru_config")
+        old_mineru = dict(old_mineru) if isinstance(old_mineru, dict) else {}
+        current_embedding = provider_settings.embedding_config()
+        current_mineru = provider_settings.mineru_config()
+        text = self._mykey_file().read_text(encoding="utf-8")
+        updates = {}
+
+        if "embedding" in data:
+            incoming = data.get("embedding")
+            if not isinstance(incoming, dict):
+                raise ValueError("embedding configuration must be an object")
+            base_url = self._kb_url(
+                incoming.get(
+                    "baseUrl",
+                    old_embedding.get("apibase")
+                    or old_embedding.get("base_url")
+                    or current_embedding.get("apibase")
+                    or provider_settings.EMBEDDING_BASE_URL,
+                ),
+                "embedding base URL",
+            )
+            model = str(
+                incoming.get(
+                    "model",
+                    old_embedding.get("model")
+                    or current_embedding.get("model")
+                    or provider_settings.EMBEDDING_MODEL,
+                )
+            ).strip()
+            if not model:
+                raise ValueError("embedding model is required")
+            dimension = self._kb_positive_int(
+                incoming.get(
+                    "dimension",
+                    old_embedding.get("dimension")
+                    or current_embedding.get("dimension")
+                    or provider_settings.EMBEDDING_DIMENSION,
+                ),
+                "embedding dimension",
+            )
+            cfg = dict(old_embedding)
+            cfg.update({"apibase": base_url, "model": model, "dimension": dimension})
+            cfg.pop("base_url", None)
+            api_key = str(incoming.get("apiKey") or "").strip()
+            if not api_key:
+                api_key = str(
+                    old_embedding.get("apikey")
+                    or old_embedding.get("api_key")
+                    or ""
+                ).strip()
+            cfg.pop("api_key", None)
+            if api_key:
+                cfg["apikey"] = api_key
+            else:
+                cfg.pop("apikey", None)
+            updates["kb_embedding_config"] = cfg
+
+        if "mineru" in data:
+            incoming = data.get("mineru")
+            if not isinstance(incoming, dict):
+                raise ValueError("MinerU configuration must be an object")
+            base_url = self._kb_url(
+                incoming.get(
+                    "baseUrl",
+                    old_mineru.get("base_url")
+                    or current_mineru.get("base_url")
+                    or provider_settings.MINERU_BASE_URL,
+                ),
+                "MinerU base URL",
+            )
+            model_version = str(
+                incoming.get(
+                    "modelVersion",
+                    old_mineru.get("model_version")
+                    or current_mineru.get("model_version")
+                    or provider_settings.MINERU_MODEL_VERSION,
+                )
+            ).strip()
+            if not model_version:
+                raise ValueError("MinerU model is required")
+            cfg = dict(old_mineru)
+            cfg.update({"base_url": base_url, "model_version": model_version})
+            api_key = str(incoming.get("apiKey") or "").strip()
+            if not api_key:
+                api_key = str(
+                    old_mineru.get("api_key")
+                    or old_mineru.get("apikey")
+                    or old_mineru.get("token")
+                    or ""
+                ).strip()
+            cfg.pop("apikey", None)
+            cfg.pop("token", None)
+            if api_key:
+                cfg["api_key"] = api_key
+            else:
+                cfg.pop("api_key", None)
+            updates["mineru_config"] = cfg
+
+        if not updates:
+            raise ValueError("no knowledge-base configuration supplied")
+        for var, cfg in updates.items():
+            if self._find_var_block_span(text, var):
+                text = self._patch_var_block(text, var, cfg)
+            else:
+                text = text.rstrip() + f"\n{var} = {self._format_py_dict(cfg)}\n"
+        profiles = self._save_mykey_text(text)
+        return {"profiles": profiles, **self.get_kb_service_configs()}
 
     def _reload_live_agents(self) -> None:
         """mykey.py 改动后，强制所有活着的会话 agent 重建 LLM session，让新 key/模型
@@ -2199,6 +2377,20 @@ async def kb_list_handler(request):
         return json_ok({"ok": False, "error": str(error)}, status=500)
 
 
+async def kb_config_handler(request):
+    try:
+        if request.method == "GET":
+            return json_ok({"ok": True, **manager.get_kb_service_configs()})
+        if request.method == "POST":
+            data = await read_json(request)
+            return json_ok({"ok": True, **manager.save_kb_service_configs(data)})
+        return json_ok({"ok": False, "error": "method_not_allowed"}, status=405)
+    except ValueError as error:
+        return json_ok({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return json_ok({"ok": False, "error": str(error)}, status=500)
+
+
 async def kb_detail_status_handler(request):
     kb_id = str(request.match_info.get("kb_id") or "").strip()
     try:
@@ -3275,6 +3467,8 @@ def create_app():
     app.router.add_post("/session/{sid}/restore", restore_handler)
     app.router.add_post("/session/{sid}/model", session_model_handler)
     app.router.add_get("/kb", kb_list_handler)
+    app.router.add_get("/kb/config", kb_config_handler)
+    app.router.add_post("/kb/config", kb_config_handler)
     app.router.add_post("/kb/import", kb_import_handler)
     app.router.add_get("/kb/jobs", kb_jobs_handler)
     app.router.add_get("/kb/jobs/{job_id}", kb_job_status_handler)
