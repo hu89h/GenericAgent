@@ -648,10 +648,24 @@ fn norm_path(p: &str) -> String {
 fn bridge_identity_matches(project_dir: &str) -> bool {
     let Some(id) = bridge_reported_identity() else { return false; };
     let reported_root = id.get("ga_root").and_then(|v| v.as_str()).unwrap_or("");
+    let reported_app = id.get("app_dir").and_then(|v| v.as_str()).unwrap_or("");
     let reported_build = id.get("build_id").and_then(|v| v.as_str()).unwrap_or("");
     if reported_build != env!("GA_BUILD_ID") {
         return false;
     }
+    // The same GA core and build can be used by a packaged shell and a source
+    // checkout, but their Bridge serves different frontend assets. Treat a
+    // Bridge from another app directory as stale so the current shell takes
+    // over :14168 instead of silently showing an old UI.
+    let expected_app = PathBuf::from(project_dir).join("frontends");
+    let (reported_app, expected_app) = (
+        norm_path(reported_app),
+        norm_path(&expected_app.to_string_lossy()),
+    );
+    #[cfg(windows)]
+    if !reported_app.eq_ignore_ascii_case(&expected_app) { return false; }
+    #[cfg(not(windows))]
+    if reported_app != expected_app { return false; }
     let (a, b) = (norm_path(reported_root), norm_path(project_dir));
     #[cfg(windows)]
     { a.eq_ignore_ascii_case(&b) }
