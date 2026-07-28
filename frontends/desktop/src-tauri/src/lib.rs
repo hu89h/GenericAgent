@@ -378,6 +378,23 @@ fn remove_setting(key: &str) {
 pub fn get_or_discover_config() -> (String, String) {
     let path = settings_path();
 
+    // The source-checkout launcher explicitly supplies its project directory.
+    // Prefer it over persisted settings, which may still point at an installed
+    // bundle from a previous launch. Keep the configured Python when available
+    // so source development can reuse the prepared runtime environment.
+    if let Ok(project) = std::env::var("GA_DESKTOP_PROJECT_DIR") {
+        let project = project.trim().to_string();
+        if !project.is_empty() && PathBuf::from(&project).join("agentmain.py").exists() {
+            let python = read_settings()
+                .get("python_path")
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(find_python);
+            return (python, project);
+        }
+    }
+
     // NOTE: the external GA source override does NOT change which project_dir/bridge we run.
     // 方案三: we always run the bundle's own bridge + frontend, and inject the external核 via
     // the GA_ROOT env (see sanitize_bundle_env). So project_dir stays the bundle here.
