@@ -1532,12 +1532,18 @@ function kbDocumentResultHtml(item) {
     ? ` · ${kbFormat(t('kb.documentWarnings'), { count: item.warningCount })}`
       + (warningReasons ? `：${warningReasons}` : '')
     : '';
-  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(detail + warnings)}</div>`;
+  const errorDetails = Array.isArray(item.errorDetails)
+    ? [...new Set(item.errorDetails.filter(Boolean).map(kbText))].join('；')
+    : '';
+  const suffix = errorDetails ? `<br><small>${escapeHtml(errorDetails)}</small>` : '';
+  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(detail + warnings)}${suffix}</div>`;
 }
 
 function kbPreparationFailureHtml(item) {
   const reason = item.errorCode ? kbErrorText(item.errorCode) : t('kb.error.processing_failed');
-  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(reason)}</div>`;
+  const detail = kbText(item.errorDetail);
+  const suffix = detail && detail !== reason ? `<br><small>${escapeHtml(detail)}</small>` : '';
+  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(reason)}${suffix}</div>`;
 }
 
 function kbFailedDocumentHtml(item) {
@@ -1545,7 +1551,11 @@ function kbFailedDocumentHtml(item) {
   const reasons = codes.length
     ? [...new Set(codes.map(kbErrorText))].join('；')
     : t('kb.error.processing_failed');
-  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(reasons)}</div>`;
+  const details = Array.isArray(item.errorDetails)
+    ? [...new Set(item.errorDetails.filter(Boolean).map(kbText))].join('；')
+    : '';
+  const suffix = details && details !== reasons ? `<br><small>${escapeHtml(details)}</small>` : '';
+  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(reasons)}${suffix}</div>`;
 }
 
 function kbSetTask(job, kind) {
@@ -1662,7 +1672,11 @@ function kbSetTask(job, kind) {
   );
   if (job.state === 'failed' && kbPageEls.taskFailure) {
     kbPageEls.taskFailure.hidden = false;
-    const taskError = `<div>${escapeHtml(kbErrorText(job.errorCode || 'processing_failed'))}</div>`;
+    const taskReason = kbErrorText(job.errorCode || 'processing_failed');
+    const taskDetail = kbText(job.errorDetail);
+    const taskError = `<div>${escapeHtml(taskReason)}`
+      + (taskDetail && taskDetail !== taskReason ? `<br><small>${escapeHtml(taskDetail)}</small>` : '')
+      + '</div>';
     if (failureItems.length || preparationFailures.length) {
       kbPageEls.taskFailure.insertAdjacentHTML('beforeend', taskError);
     } else {

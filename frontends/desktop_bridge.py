@@ -2285,6 +2285,25 @@ def _kb_error_code(error) -> str:
     return "processing_failed"
 
 
+def _kb_error_detail(error, limit: int = 800) -> str:
+    """Return a bounded diagnostic suitable for the local UI and logs.
+
+    Provider failures are useful to the user, but may echo authorization
+    headers or token-like configuration values. Keep the actionable text while
+    redacting common credential forms.
+    """
+    text = " ".join(str(error or "").strip().split())
+    if not text:
+        return ""
+    text = re.sub(r"(?i)bearer\s+[a-z0-9._~+/=-]+", "Bearer <redacted>", text)
+    text = re.sub(
+        r"(?i)((?:api[_ -]?key|token|authorization)\s*[:=]\s*)[^\s,;]+",
+        r"\1<redacted>",
+        text,
+    )
+    return text[:max(80, int(limit))]
+
+
 def _kb_public_job_item(item: dict) -> dict:
     if not isinstance(item, dict):
         return {}
@@ -2295,6 +2314,9 @@ def _kb_public_job_item(item: dict) -> dict:
     error_code = _kb_error_code(item.get("error"))
     if error_code:
         public["errorCode"] = error_code
+    error_detail = _kb_error_detail(item.get("error"))
+    if error_detail:
+        public["errorDetail"] = error_detail
     return public
 
 
@@ -2303,10 +2325,15 @@ def _kb_public_document_result(item: dict) -> dict:
         return {}
     failures = item.get("failures") or []
     error_codes = []
+    error_details = []
     for failure in failures:
-        code = _kb_error_code((failure or {}).get("error"))
+        error = (failure or {}).get("error")
+        code = _kb_error_code(error)
         if code and code not in error_codes:
             error_codes.append(code)
+        detail = _kb_error_detail(error)
+        if detail and detail not in error_details:
+            error_details.append(detail)
     return {
         "name": str(item.get("name") or _kb_display_name(item.get("source"))),
         "status": str(item.get("status") or ""),
@@ -2315,6 +2342,7 @@ def _kb_public_document_result(item: dict) -> dict:
         "imagesTotal": max(0, int(item.get("images_total") or 0)),
         "warningCount": len(failures),
         "errorCodes": error_codes,
+        "errorDetails": error_details,
     }
 
 
@@ -2450,6 +2478,7 @@ def _kb_job_snapshot(job: dict) -> dict:
     if error_code:
         snapshot["errorCode"] = error_code
         snapshot["error"] = str(job.get("error") or "")
+        snapshot["errorDetail"] = _kb_error_detail(job.get("error"))
     return json.loads(json.dumps(snapshot, ensure_ascii=False, default=str))
 
 
@@ -2732,6 +2761,18 @@ async def kb_import_handler(request):
             source = str(event.get("source") or "").strip()
             if source:
                 merge_file(event)
+                detail = _kb_error_detail(event.get("error"))
+                status = str(event.get("file_status") or event.get("status") or "")
+                if status == "failed" and detail:
+                    marker = (source, detail)
+                    logged = current.setdefault("_loggedFailures", set())
+                    if marker not in logged:
+                        logged.add(marker)
+                        print(
+                            f"[kb:{job_id}] {_kb_display_name(source)}: {detail}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
             if isinstance(event.get("files"), list):
                 for item in event["files"]:
                     if isinstance(item, dict) and item.get("kind") == "document":
@@ -2804,6 +2845,12 @@ async def kb_import_handler(request):
                         "indeterminate": False,
                     }
                 return
+            print(
+                f"[kb:{job_id}] import failed: {_kb_error_detail(error)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            traceback.print_exc(file=sys.stderr)
             with _kb_jobs_lock:
                 current = _kb_jobs[job_id]
                 current.update(
