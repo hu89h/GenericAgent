@@ -779,6 +779,7 @@ const kbState = {
   statusRequest: null, documentRequests: new Map(),
   documentLists: new Map(),
   documentHtml: new Map(),
+  collapsedPanels: {},
 };
 const kbEl = id => document.getElementById(id);
 const kbPageEls = {
@@ -786,8 +787,9 @@ const kbPageEls = {
   documents: kbEl('kb-documents-view'), docTitle: kbEl('kb-active-kb-title'), docs: kbEl('kb-doc-list'),
   reader: kbEl('kb-reader-view'), title: kbEl('kb-doc-title'), source: kbEl('kb-md-view'),
   browser: kbEl('kb-browser'), workspace: document.querySelector('.kb-workspace'),
-  workspaceSplitter: kbEl('kb-workspace-splitter'), readerPane: kbEl('kb-reader-pane'), readerLayout: kbEl('kb-reader-layout'),
-  splitter: kbEl('kb-reader-splitter'), qaTitle: kbEl('kb-qa-title'),
+  workspaceSplitter: kbEl('kb-workspace-splitter'), browserToggle: kbEl('kb-browser-toggle'), readerPane: kbEl('kb-reader-pane'), readerLayout: kbEl('kb-reader-layout'),
+  splitter: kbEl('kb-reader-splitter'), qaPane: kbEl('kb-qa-pane'), qaTitle: kbEl('kb-qa-title'),
+  qaToggle: kbEl('kb-qa-toggle'),
   qaLog: kbEl('kb-qa-log'), question: kbEl('kb-question'), ask: kbEl('kb-ask-btn'), open: kbEl('kb-open-doc'),
   task: kbEl('kb-task-modal'), taskTitle: kbEl('kb-task-title'), taskPhase: kbEl('kb-task-phase'),
   taskProgress: kbEl('kb-task-progress-bar'), taskProgressValue: kbEl('kb-task-progress-value'),
@@ -801,6 +803,53 @@ const kbPageEls = {
   buildForm: kbEl('kb-build-form'), buildScope: kbEl('kb-build-scope'),
 };
 
+const KB_PANEL_STORE = 'ga_kb_panels_collapsed_v1';
+const KB_PANEL_KEYS = ['browser', 'qa'];
+
+function kbLoadPanelCollapseState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(KB_PANEL_STORE) || '{}');
+    return KB_PANEL_KEYS.reduce((state, key) => {
+      state[key] = parsed?.[key] === true;
+      return state;
+    }, {});
+  } catch (_) {
+    return {};
+  }
+}
+
+function kbApplyPanelCollapseState() {
+  const browserCollapsed = kbState.collapsedPanels.browser === true;
+  const qaCollapsed = kbState.collapsedPanels.qa === true;
+  kbPageEls.workspace?.classList.toggle('kb-browser-collapsed', browserCollapsed);
+  kbPageEls.readerLayout?.classList.toggle('kb-qa-collapsed', qaCollapsed);
+  const browserToggle = kbPageEls.browserToggle;
+  if (browserToggle) {
+    browserToggle.setAttribute('aria-expanded', browserCollapsed ? 'false' : 'true');
+    const label = t(browserCollapsed ? 'kb.expandBrowser' : 'kb.collapseBrowser');
+    browserToggle.setAttribute('title', label);
+    browserToggle.setAttribute('aria-label', label);
+  }
+  const qaToggle = kbPageEls.qaToggle;
+  if (qaToggle) {
+    qaToggle.setAttribute('aria-expanded', qaCollapsed ? 'false' : 'true');
+    const label = t(qaCollapsed ? 'kb.expandQa' : 'kb.collapseQa');
+    qaToggle.setAttribute('title', label);
+    qaToggle.setAttribute('aria-label', label);
+  }
+}
+
+function kbSetPanelCollapsed(key, collapsed) {
+  if (!KB_PANEL_KEYS.includes(key)) return;
+  kbState.collapsedPanels[key] = !!collapsed;
+  try { localStorage.setItem(KB_PANEL_STORE, JSON.stringify(kbState.collapsedPanels)); } catch (_) {}
+  kbApplyPanelCollapseState();
+  window.__gaClampKbWorkspace?.();
+  window.__gaClampKbReader?.();
+}
+
+kbState.collapsedPanels = kbLoadPanelCollapseState();
+
 function kbScopeForDoc(doc) {
   return normalizeKnowledgeScope({ mode: 'document', origin: 'knowledge', kb_id: doc.kb_id,
     kb_name: kbState.activeKb?.name || kbState.activeKb?.id || doc.kb_id,
@@ -813,6 +862,14 @@ function kbScopeForKb(kb) {
 
 function kbScopeKey(scope) {
   const value = normalizeKnowledgeScope(scope);
+  if (value.mode === 'selection') {
+    const targets = (value.targets || []).map(target => ({
+      kb_id: target.kb_id || '',
+      all_documents: !!target.all_documents,
+      documents: (target.documents || []).map(doc => doc.data_id || doc.ref || doc.file_name || '').sort(),
+    })).sort((a, b) => a.kb_id.localeCompare(b.kb_id));
+    return [value.origin, value.mode, JSON.stringify(targets)].join('|');
+  }
   return [value.origin, value.mode, value.kb_id || '', value.data_id || '', value.ref || '', value.file_name || ''].join('|');
 }
 
@@ -1021,6 +1078,7 @@ function kbRenderView() {
   if (kbPageEls.documents) kbPageEls.documents.hidden = !kbState.activeKb;
   if (kbPageEls.reader) kbPageEls.reader.hidden = false;
   if (kbPageEls.browser) kbPageEls.browser.classList.toggle('has-active-kb', !!kbState.activeKb);
+  kbApplyPanelCollapseState();
   kbRenderLibraries();
   if (kbState.activeKb) kbRenderDocuments();
   kbRenderScopeState();
@@ -1895,6 +1953,15 @@ async function kbOpenBuildModal() {
 }
 
 function initKbPage() {
+  document.querySelectorAll('[data-kb-panel-toggle]').forEach(toggle => {
+    toggle.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = toggle.dataset.kbPanelToggle;
+      kbSetPanelCollapsed(key, !kbState.collapsedPanels[key]);
+    });
+  });
+  kbApplyPanelCollapseState();
   kbBindTaskCapsule();
   bindClick('kb-refresh-btn', () => void kbRefresh({ force: true }));
   bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb, { force: true }));
@@ -1960,45 +2027,82 @@ async function openKnowledgeScopePicker() {
   let selectedKb = null;
   let docState = { loading: false, documents: [], error: '' };
   let docLoadSeq = 0;
+  let kbSearch = '';
+  let docSearch = '';
+  let scopeSync = Promise.resolve();
+  const selectedTargets = new Map();
 
   const currentScope = () => normalizeKnowledgeScope(
     activeSess()?.knowledgeScope || defaultChatKnowledgeScope(),
   );
 
+  const documentKey = doc => String(doc?.data_id || doc?.ref || doc?.file_name || doc?.title || '').trim();
+  const targetDocuments = target => target?.documents instanceof Map ? target.documents : new Map();
+  const addTarget = (kb, { allDocuments = true, documents = [] } = {}) => {
+    const target = { kb, all_documents: !!allDocuments, documents: new Map() };
+    for (const document of documents || []) {
+      const key = documentKey(document);
+      if (key) target.documents.set(key, { ...document });
+    }
+    selectedTargets.set(kb.id, target);
+    return target;
+  };
+  const scopePayload = () => {
+    if (!selectedTargets.size) return { mode: 'none', origin: 'chat' };
+    return {
+      mode: 'selection', origin: 'chat',
+      targets: [...selectedTargets.values()].map(target => ({
+        kb_id: target.kb.id,
+        kb_name: target.kb.name || target.kb.id,
+        all_documents: !!target.all_documents,
+        documents: [...targetDocuments(target).values()],
+      })),
+    };
+  };
+  const applySelection = () => {
+    const payload = scopePayload();
+    scopeSync = scopeSync.then(() => chooseScopeSafely(payload, { close: false }));
+    return scopeSync;
+  };
+  const matching = (value, query) => !query || String(value || '').toLocaleLowerCase().includes(query.toLocaleLowerCase());
+
   const renderPicker = () => {
     const current = currentScope();
-    const kbItems = scopeKbs.length
-      ? scopeKbs.map(kb => {
+    const visibleKbs = scopeKbs.filter(kb => matching(kb.name || kb.id, kbSearch));
+    const kbItems = visibleKbs.length
+      ? visibleKbs.map(kb => {
         const active = selectedKb?.id === kb.id;
-        return `<button type="button" class="ga-menu-item ${active ? 'active' : ''}" data-knowledge-scope-kb-id="${escapeHtml(kb.id)}" data-knowledge-scope-kb-name="${escapeHtml(kb.name || kb.id)}">${escapeHtml(kb.name || kb.id)}</button>`;
+        const target = selectedTargets.get(kb.id);
+        const selected = !!target;
+        const count = target?.all_documents ? t('kb.allInKb') : `${targetDocuments(target).size} ${t('kb.selectedDocuments')}`;
+        return `<button type="button" class="ga-menu-item knowledge-scope-kb-row ${active ? 'active' : ''}" data-knowledge-scope-kb-id="${escapeHtml(kb.id)}" data-knowledge-scope-kb-name="${escapeHtml(kb.name || kb.id)}"><span class="knowledge-scope-check" role="checkbox" aria-checked="${selected ? 'true' : 'false'}">${selected ? '✓' : ''}</span><span class="knowledge-scope-kb-name">${escapeHtml(kb.name || kb.id)}</span>${selected ? `<span class="knowledge-scope-kb-count">${escapeHtml(count)}</span>` : ''}</button>`;
       }).join('')
       : `<div class="knowledge-scope-empty">${escapeHtml(t('kb.noReady'))}</div>`;
     let docItems = `<div class="knowledge-scope-placeholder">${escapeHtml(t('kb.chooseDocument'))}</div>`;
     if (selectedKb) {
-      const allActive = current.mode === 'kb' && current.kb_id === selectedKb.id;
-      const rows = docState.documents.map(doc => {
+      const target = selectedTargets.get(selectedKb.id);
+      const allActive = !!target?.all_documents;
+      const visibleDocs = docState.documents.filter(doc => matching(
+        `${doc.title || ''} ${doc.file_name || ''} ${doc.ref || ''}`, docSearch,
+      ));
+      const rows = visibleDocs.map(doc => {
         const title = doc.title || doc.file_name || doc.ref || doc.data_id || '';
-        const active = current.mode === 'document' && current.kb_id === selectedKb.id
-          && ((current.data_id && current.data_id === doc.data_id) || (current.ref && current.ref === doc.ref));
-        const payload = encodeURIComponent(JSON.stringify({
-          mode: 'document', origin: 'chat', kb_id: doc.kb_id || selectedKb.id,
-          kb_name: selectedKb.name || selectedKb.id, data_id: doc.data_id || '', file_name: doc.file_name || '',
-          ref: doc.ref || '', title,
-        }));
-        return `<button type="button" class="ga-menu-item knowledge-scope-doc ${active ? 'active' : ''}" data-knowledge-scope-doc="${payload}" title="${escapeHtml(doc.file_name || doc.ref || title)}">${escapeHtml(title)}</button>`;
+        const key = documentKey(doc);
+        const active = !!target && !target.all_documents && targetDocuments(target).has(key);
+        return `<button type="button" class="ga-menu-item knowledge-scope-doc ${active ? 'active' : ''}" data-knowledge-scope-doc="${encodeURIComponent(JSON.stringify({ ...doc, kb_id: doc.kb_id || selectedKb.id, title }))}" title="${escapeHtml(doc.file_name || doc.ref || title)}"><span class="knowledge-scope-check" role="checkbox" aria-checked="${active ? 'true' : 'false'}">${active ? '✓' : ''}</span><span>${escapeHtml(title)}</span></button>`;
       }).join('');
       const status = docState.loading
         ? `<div class="knowledge-scope-loading">${escapeHtml(t('kb.loading'))}</div>`
         : docState.error
           ? `<div class="knowledge-scope-empty">${escapeHtml(docState.error)}</div>`
-          : rows || `<div class="knowledge-scope-empty">${escapeHtml(t('kb.noDocs'))}</div>`;
-      docItems = `<div class="knowledge-scope-pane"><div class="knowledge-scope-head">${escapeHtml(selectedKb.name || selectedKb.id)}</div><div class="knowledge-scope-list">`
-        + `<button type="button" class="ga-menu-item ${allActive ? 'active' : ''}" data-knowledge-scope-select-kb="1">${escapeHtml(t('kb.allInKb'))}</button>`
+          : rows || `<div class="knowledge-scope-empty">${escapeHtml(docState.documents.length ? t('kb.noDocs') : t('kb.noDocs'))}</div>`;
+      docItems = `<div class="knowledge-scope-pane"><div class="knowledge-scope-head"><div>${escapeHtml(selectedKb.name || selectedKb.id)}</div><input class="knowledge-scope-search" data-knowledge-scope-search="doc" value="${escapeHtml(docSearch)}" placeholder="${escapeHtml(t('kb.searchDocs'))}"></div><div class="knowledge-scope-list">`
+        + `<button type="button" class="ga-menu-item ${allActive ? 'active' : ''}" data-knowledge-scope-select-kb="1"><span class="knowledge-scope-check" role="checkbox" aria-checked="${allActive ? 'true' : 'false'}">${allActive ? '✓' : ''}</span><span>${escapeHtml(t('kb.allInKb'))}</span></button>`
         + status + `</div></div>`;
     } else {
       docItems = `<div class="knowledge-scope-pane"><div class="knowledge-scope-head">${escapeHtml(t('kb.chooseDocument'))}</div>${docItems}</div>`;
     }
-    picker.innerHTML = `<div class="knowledge-scope-pane"><div class="knowledge-scope-head">${escapeHtml(t('kb.choose'))}</div><div class="knowledge-scope-list">`
+    picker.innerHTML = `<div class="knowledge-scope-pane"><div class="knowledge-scope-head"><div>${escapeHtml(t('kb.choose'))}</div><input class="knowledge-scope-search" data-knowledge-scope-search="kb" value="${escapeHtml(kbSearch)}" placeholder="${escapeHtml(t('kb.searchKbs'))}"></div><div class="knowledge-scope-list">`
       + `<button type="button" class="ga-menu-item ${current.mode === 'none' ? 'active' : ''}" data-knowledge-scope-kind="none">${escapeHtml(t('kb.disabled'))}</button>`
       + `<button type="button" class="ga-menu-item ${current.mode === 'all' ? 'active' : ''}" data-knowledge-scope-kind="all">${escapeHtml(t('kb.scopeAll'))}</button>`
       + kbItems + `</div></div>` + docItems;
@@ -2043,36 +2147,8 @@ async function openKnowledgeScopePicker() {
     }
   };
 
-  picker.addEventListener('click', async event => {
-    // renderPicker() replaces the clicked row before this async handler ends.
-    // Stop propagation first so the detached target is not mistaken for an
-    // outside click by the document-level menu closer.
-    event.stopPropagation();
-    const none = event.target.closest('[data-knowledge-scope-kind="none"]');
-    if (none) { event.preventDefault(); await chooseScopeSafely({ mode: 'none' }); return; }
-    const all = event.target.closest('[data-knowledge-scope-kind="all"]');
-    if (all) { event.preventDefault(); await chooseScopeSafely({ mode: 'all' }); return; }
-    const doc = event.target.closest('[data-knowledge-scope-doc]');
-    if (doc) {
-      event.preventDefault();
-      try { await chooseScopeSafely(JSON.parse(decodeURIComponent(doc.dataset.knowledgeScopeDoc))); }
-      catch (_) { closeKnowledgeScopePicker(); showError(t('err.kbLoad')); }
-      return;
-    }
-    const kbItem = event.target.closest('[data-knowledge-scope-kb-id]');
-    const allDocs = event.target.closest('[data-knowledge-scope-select-kb="1"]');
-    if (allDocs && selectedKb) {
-      event.preventDefault();
-      await chooseScopeSafely({ mode: 'kb', kb_id: selectedKb.id, kb_name: selectedKb.name || selectedKb.id });
-      return;
-    }
-    if (!kbItem) return;
-    event.preventDefault();
-    const kb = scopeKbs.find(item => item.id === kbItem.dataset.knowledgeScopeKbId)
-      || { id: kbItem.dataset.knowledgeScopeKbId, name: kbItem.dataset.knowledgeScopeKbName || kbItem.dataset.knowledgeScopeKbId };
-    // A knowledge-base row only navigates the picker. The scope is committed
-    // from the document pane via "all documents" or a concrete document.
-    selectedKb = kb;
+  const loadDocuments = async kb => {
+    if (!kb) return;
     docState = { loading: true, documents: [], error: '' };
     const loadSeq = ++docLoadSeq;
     renderPicker();
@@ -2089,6 +2165,78 @@ async function openKnowledgeScopePicker() {
       docState = { loading: false, documents: [], error: error.message || t('err.kbLoad') };
     }
     renderPicker();
+  };
+
+  picker.addEventListener('click', async event => {
+    // renderPicker() replaces the clicked row before this async handler ends.
+    // Stop propagation first so the detached target is not mistaken for an
+    // outside click by the document-level menu closer.
+    event.stopPropagation();
+    const none = event.target.closest('[data-knowledge-scope-kind="none"]');
+    if (none) { event.preventDefault(); await chooseScopeSafely({ mode: 'none' }); return; }
+    const all = event.target.closest('[data-knowledge-scope-kind="all"]');
+    if (all) { event.preventDefault(); await chooseScopeSafely({ mode: 'all' }); return; }
+    const kbItem = event.target.closest('[data-knowledge-scope-kb-id]');
+    if (kbItem) {
+      event.preventDefault();
+      const kb = scopeKbs.find(item => item.id === kbItem.dataset.knowledgeScopeKbId)
+        || { id: kbItem.dataset.knowledgeScopeKbId, name: kbItem.dataset.knowledgeScopeKbName || kbItem.dataset.knowledgeScopeKbId };
+      selectedKb = kb;
+      // The entire row is the checkbox target. This keeps selection behavior
+      // predictable when the user clicks the name, count, or empty row area.
+      if (selectedTargets.has(kb.id)) selectedTargets.delete(kb.id);
+      else addTarget(kb, { allDocuments: true });
+      await applySelection();
+      renderPicker();
+      await loadDocuments(kb);
+      return;
+    }
+    const doc = event.target.closest('[data-knowledge-scope-doc]');
+    if (doc) {
+      event.preventDefault();
+      try {
+        if (!selectedKb) return;
+        const payload = JSON.parse(decodeURIComponent(doc.dataset.knowledgeScopeDoc));
+        let target = selectedTargets.get(selectedKb.id);
+        if (!target) target = addTarget(selectedKb, { allDocuments: false });
+        if (target.all_documents) {
+          target.all_documents = false;
+          target.documents.clear();
+        }
+        const key = documentKey(payload);
+        if (target.documents.has(key)) target.documents.delete(key);
+        else target.documents.set(key, payload);
+        if (!target.documents.size) selectedTargets.delete(selectedKb.id);
+        await applySelection();
+        renderPicker();
+      }
+      catch (_) { closeKnowledgeScopePicker(); showError(t('err.kbLoad')); }
+      return;
+    }
+    const allDocs = event.target.closest('[data-knowledge-scope-select-kb="1"]');
+    if (allDocs && selectedKb) {
+      event.preventDefault();
+      const target = selectedTargets.get(selectedKb.id);
+      if (target?.all_documents) selectedTargets.delete(selectedKb.id);
+      else addTarget(selectedKb, { allDocuments: true });
+      await applySelection();
+      renderPicker();
+      return;
+    }
+  });
+
+  picker.addEventListener('input', event => {
+    const input = event.target.closest('[data-knowledge-scope-search]');
+    if (!input) return;
+    if (input.dataset.knowledgeScopeSearch === 'kb') kbSearch = input.value;
+    else docSearch = input.value;
+    renderPicker();
+    requestAnimationFrame(() => {
+      const next = picker.querySelector(`[data-knowledge-scope-search="${input.dataset.knowledgeScopeSearch}"]`);
+      if (!next) return;
+      next.focus();
+      next.setSelectionRange(next.value.length, next.value.length);
+    });
   });
 
   try {
@@ -2097,26 +2245,25 @@ async function openKnowledgeScopePicker() {
     const allKbs = Array.isArray(data?.knowledge_bases) ? data.knowledge_bases : kbStatusKbs();
     scopeKbs = allKbs.filter(kb => ['ready', 'ready_with_warnings'].includes(kb.state));
     const current = currentScope();
-    selectedKb = scopeKbs.find(kb => kb.id === current.kb_id) || null;
-    renderPicker();
-    if (selectedKb) {
-      docState = { loading: true, documents: [], error: '' };
-      const loadSeq = ++docLoadSeq;
-      renderPicker();
-      try {
-        const docs = await window.ga.kbDocs({ kbId: selectedKb.id });
-        if (loadSeq !== docLoadSeq) return;
-        docState = {
-          loading: false,
-          documents: Array.isArray(docs?.documents) ? docs.documents : (Array.isArray(docs?.docs) ? docs.docs : []),
-          error: '',
-        };
-      } catch (error) {
-        if (loadSeq !== docLoadSeq) return;
-        docState = { loading: false, documents: [], error: error.message || t('err.kbLoad') };
+    if (current.mode === 'selection') {
+      for (const target of current.targets || []) {
+        const kb = scopeKbs.find(item => item.id === target.kb_id) || { id: target.kb_id, name: target.kb_name || target.kb_id };
+        addTarget(kb, {
+          allDocuments: !!target.all_documents,
+          documents: target.documents || [],
+        });
       }
-      renderPicker();
+      selectedKb = scopeKbs.find(kb => selectedTargets.has(kb.id)) || null;
+    } else {
+      selectedKb = scopeKbs.find(kb => kb.id === current.kb_id) || null;
+      if (selectedKb && current.mode === 'kb') addTarget(selectedKb, { allDocuments: true });
+      if (selectedKb && current.mode === 'document') addTarget(selectedKb, {
+        allDocuments: false,
+        documents: [{ data_id: current.data_id || '', file_name: current.file_name || '', ref: current.ref || '', title: current.title || '' }],
+      });
     }
+    renderPicker();
+    if (selectedKb) await loadDocuments(selectedKb);
   } catch (error) {
     picker.innerHTML = `<div class="knowledge-scope-pane"><div class="knowledge-scope-empty">${escapeHtml(error.message || t('err.kbLoad'))}</div></div><div class="knowledge-scope-pane"></div>`;
   }
@@ -3098,13 +3245,51 @@ const isActive = (sess) => sess && sess.id === state.activeId;
 
 function normalizeKnowledgeScope(value) {
   const raw = value && typeof value === 'object' ? value : {};
-  const mode = String(raw.mode || raw.kind || 'all').trim().toLowerCase();
+  let mode = String(raw.mode || raw.kind || 'all').trim().toLowerCase();
+  if (['multi', 'selection', 'selected'].includes(mode)) mode = 'selection';
   let origin = String(raw.origin || raw.source || '').trim().toLowerCase();
   if (origin !== 'chat' && origin !== 'knowledge') {
     origin = (mode === 'kb' || mode === 'knowledge_base' || mode === 'document' || mode === 'doc')
       ? 'knowledge' : 'chat';
   }
   if (mode === 'none' || mode === 'disabled') return { mode: 'none', origin: 'chat' };
+  if (mode === 'selection') {
+    const targets = Array.isArray(raw.targets || raw.knowledge_bases || raw.knowledgeBases)
+      ? (raw.targets || raw.knowledge_bases || raw.knowledgeBases) : [];
+    const normalizedTargets = [];
+    const seenKbs = new Set();
+    for (const item of targets) {
+      if (!item || typeof item !== 'object') continue;
+      const kbId = String(item.kb_id || item.kbId || item.id || '').trim();
+      if (!kbId || seenKbs.has(kbId)) continue;
+      seenKbs.add(kbId);
+      const target = { kb_id: kbId };
+      const kbName = String(item.kb_name || item.kbName || item.name || '').trim();
+      if (kbName) target.kb_name = kbName;
+      const allDocuments = !!(item.all_documents ?? item.allDocuments);
+      const docs = Array.isArray(item.documents || item.docs) ? (item.documents || item.docs) : [];
+      const normalizedDocs = [];
+      const seenDocs = new Set();
+      for (const doc of docs) {
+        if (!doc || typeof doc !== 'object') continue;
+        const dataId = String(doc.data_id || doc.dataId || '').trim();
+        const fileName = String(doc.file_name || doc.fileName || '').trim();
+        const ref = String(doc.ref || '').trim();
+        const key = dataId || ref || fileName;
+        if (!key || seenDocs.has(key)) continue;
+        seenDocs.add(key);
+        const normalizedDoc = { data_id: dataId, file_name: fileName, ref };
+        const title = String(doc.title || '').trim();
+        if (title) normalizedDoc.title = title;
+        normalizedDocs.push(normalizedDoc);
+      }
+      if (!allDocuments && !normalizedDocs.length) continue;
+      target.all_documents = allDocuments;
+      if (normalizedDocs.length) target.documents = normalizedDocs;
+      normalizedTargets.push(target);
+    }
+    return normalizedTargets.length ? { mode: 'selection', origin, targets: normalizedTargets } : { mode: 'none', origin: 'chat' };
+  }
   if (mode === 'kb' || mode === 'knowledge_base') {
     const kbId = raw.kb_id || raw.kbId || raw.id;
     return kbId ? {
@@ -3137,6 +3322,19 @@ function knowledgeScopeLabel(scope) {
   if (s.mode === 'none') return t('kb.disabled');
   if (s.mode === 'kb') return `${s.kb_name || s.kb_id} · ${t('kb.allInKb')}`;
   if (s.mode === 'document') return `${s.kb_name || s.kb_id} · ${s.title || s.file_name || s.data_id}`;
+  if (s.mode === 'selection') {
+    const targets = s.targets || [];
+    const names = targets.map(target => target.kb_name || target.kb_id).filter(Boolean);
+    const docCount = targets.reduce((total, target) => total + (target.all_documents ? 0 : (target.documents || []).length), 0);
+    const allCount = targets.filter(target => target.all_documents).length;
+    if (targets.length === 1) {
+      return `${names[0] || t('kb.scopeKb')} · ${allCount ? t('kb.allInKb') : `${docCount} ${t('kb.selectedDocuments')}`}`;
+    }
+    const detail = allCount && docCount ? `${allCount} ${t('kb.allInKb')} + ${docCount} ${t('kb.selectedDocuments')}`
+      : allCount ? `${allCount} ${t('kb.allInKb')}`
+        : `${docCount} ${t('kb.selectedDocuments')}`;
+    return `${names.join('、')} · ${detail}`;
+  }
   return t('kb.scopeAll');
 }
 

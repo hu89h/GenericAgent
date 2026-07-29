@@ -229,6 +229,7 @@
               <div class="page-title" data-i18n="page.kb.title"></div>
             </header>
             <div class="kb-workspace">
+              <button type="button" class="kb-panel-toggle kb-browser-toggle" id="kb-browser-toggle" data-kb-panel-toggle="browser" data-i18n-title="kb.collapseBrowser" title="" aria-expanded="true"><span data-ga-icon="caretLeft" aria-hidden="true"></span></button>
               <aside class="kb-browser" id="kb-browser">
                 <div class="kb-view" id="kb-library-view">
                   <div class="kb-library-head">
@@ -255,7 +256,7 @@
                     <div class="kb-source-view" id="kb-md-view"></div>
                   </section>
                   <div class="kb-reader-splitter" id="kb-reader-splitter" role="separator" aria-orientation="vertical" aria-label="调整阅读与对话宽度" tabindex="0"></div>
-                  <aside class="kb-qa-pane">
+                  <aside class="kb-qa-pane" id="kb-qa-pane">
                     <div class="kb-pane-head"><div class="kb-pane-title" id="kb-qa-title" data-i18n="kb.qa"></div></div>
                     <div class="kb-qa-log" id="kb-qa-log"><div class="kb-empty" data-i18n="kb.qaEmpty"></div></div>
                     <div class="composer kb-qa-composer" id="kb-qa-composer" data-composer-ctx="kb">
@@ -283,6 +284,7 @@
                       <input type="file" id="kb-file-input" multiple hidden>
                     </div>
                   </aside>
+                  <button type="button" class="kb-panel-toggle kb-qa-toggle" id="kb-qa-toggle" data-kb-panel-toggle="qa" data-i18n-title="kb.collapseQa" title="" aria-expanded="true"><span data-ga-icon="caretRight" aria-hidden="true"></span></button>
                 </div>
               </main>
             </div>
