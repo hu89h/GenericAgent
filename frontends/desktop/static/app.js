@@ -590,6 +590,7 @@ function selectLang(code) {
   renderSessionList();
   refreshStatusLabel();
   updateModelChip();
+  refreshQuickstartStates();
   renderSettingsModels();
   if (typeof renderAllPresets === 'function') renderAllPresets();
   if (isServicesPageActive()) refreshServicesPanel();
@@ -2449,25 +2450,28 @@ bindClick('ga-source-clear-btn', async (e) => {
   }
 });
 refreshGaSource();
-// 侧边栏「快速接入」：官方模型 → 预填表单；ga-token → 开 portal 写 mykey
+// 侧边栏新用户引导：模型卡片和知识库服务卡片分别打开各自的引导弹窗。
 const pqEl = document.getElementById('provider-quickstart');
-const pqGaBtn = document.getElementById('pq-ga-token');
-if (pqGaBtn) bridgeFetch('/subscription-portal').then(r => { pqGaBtn.hidden = !r?.available; }).catch(() => {});
+let quickstartKbConfig = null;
+function setQuickstartState(id, configured) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = configured ? t('pq.configured') : t('pq.toConfigure');
+  el.classList.toggle('is-configured', !!configured);
+}
+function refreshQuickstartStates() {
+  const modelReady = (state.modelProfiles || []).some(p =>
+    p.kind === 'native' && p.apiKeyConfigured === true
+  );
+  setQuickstartState('pq-model-state', modelReady);
+  setQuickstartState('pq-embedding-state', !!quickstartKbConfig?.embedding?.apiKeyConfigured);
+  setQuickstartState('pq-mineru-state', !!quickstartKbConfig?.mineru?.apiKeyConfigured);
+}
 if (pqEl) pqEl.addEventListener('click', (e) => {
-  const btn = e.target.closest('.pq-btn[data-provider]');
+  const btn = e.target.closest('.pq-btn[data-provider], .pq-btn[data-setup]');
   if (!btn) return;
   e.preventDefault(); e.stopPropagation();
-  if (btn.dataset.provider === 'ga-token') {
-    window.ga.getMykeyContent().then(r => {
-      const base = r?.content || '', t0 = Date.now();
-      bridgeFetch('/subscription-portal', { method: 'POST', body: {} });
-      const timer = setInterval(async () => {
-        const cur = (await window.ga.getMykeyContent().catch(() => null))?.content;
-        if ((cur != null && cur !== base) || Date.now() - t0 > 3e5) { clearInterval(timer); if (cur !== base) await loadModelProfiles(); }
-      }, 3000);
-    });
-    return;
-  }
+  if (btn.dataset.setup) return void openKbQuickstart(btn.dataset.setup);
   openAddModelFormForProvider(btn.dataset.provider);
 });
 // 「快速接入」卡片折叠/展开（向下箭头），状态记忆到 localStorage
@@ -6010,8 +6014,8 @@ function setKbConfigStatus(form, configured, { error = false, message = '' } = {
     : (configured ? t('set.kbKeyConfigured') : t('set.kbKeyMissing'));
 }
 
-function setKbConfigForm(kind, values) {
-  const form = document.getElementById(kind === 'embedding'
+function setKbConfigForm(kind, values, targetForm = null) {
+  const form = targetForm || document.getElementById(kind === 'embedding'
     ? 'kb-embedding-config-form'
     : 'mineru-config-form');
   if (!form || !values) return;
@@ -6039,10 +6043,14 @@ async function loadKbServiceConfigs() {
     forms.forEach(form => setKbConfigBusy(form, true));
     try {
       const result = await window.ga.kbConfig();
+      quickstartKbConfig = result;
       setKbConfigForm('embedding', result.embedding);
       setKbConfigForm('mineru', result.mineru);
+      refreshQuickstartStates();
     } catch (_) {
+      quickstartKbConfig = null;
       forms.forEach(form => setKbConfigStatus(form, false, { error: true }));
+      refreshQuickstartStates();
     } finally {
       forms.forEach(form => setKbConfigBusy(form, false));
       kbConfigLoading = null;
@@ -6059,12 +6067,18 @@ async function saveKbServiceConfig(kind, form) {
   setKbConfigBusy(form, true);
   try {
     const result = await window.ga.saveKbConfig({ [kind]: payload });
+    quickstartKbConfig = result;
     setKbConfigForm(kind, result[kind]);
+    if (form.id !== (kind === 'embedding' ? 'kb-embedding-config-form' : 'mineru-config-form')) {
+      setKbConfigForm(kind, result[kind], form);
+    }
     if (Array.isArray(result.profiles)) {
       state.modelProfiles = normalizeProfiles(result.profiles);
       renderSettingsModels();
     }
     showChanToast(t('set.kbConfigSaved'), '', 'ok');
+    refreshQuickstartStates();
+    if (form.closest('#kb-quickstart-modal')) closeModals();
   } catch (error) {
     setKbConfigStatus(form, false, {
       error: true,
@@ -6083,6 +6097,8 @@ async function saveKbServiceConfig(kind, form) {
 for (const [kind, id] of [
   ['embedding', 'kb-embedding-config-form'],
   ['mineru', 'mineru-config-form'],
+  ['embedding', 'kb-quickstart-embedding-form'],
+  ['mineru', 'kb-quickstart-mineru-form'],
 ]) {
   const form = document.getElementById(id);
   if (form) form.addEventListener('submit', event => {
@@ -6102,6 +6118,60 @@ function openSettings() {
   syncDefaultKbEnabledSwitch();
   void loadKbServiceConfigs();
 }
+const KB_QUICKSTART_GUIDES = {
+  embedding: {
+    title: 'pq.embeddingModalTitle', name: 'pq.embeddingAction', icon: 'books',
+    color: '#0284C7', tint: 'rgba(14,165,233,.12)',
+    steps: ['pq.embeddingGuide1', 'pq.embeddingGuide2', 'pq.embeddingGuide3'],
+    tip: 'pq.embeddingGuideTip',
+  },
+  mineru: {
+    title: 'pq.mineruModalTitle', name: 'pq.mineruAction', icon: 'fileText',
+    color: '#D97706', tint: 'rgba(245,158,11,.14)',
+    steps: ['pq.mineruGuide1', 'pq.mineruGuide2', 'pq.mineruGuide3'],
+    tip: 'pq.mineruGuideTip',
+    link: 'https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&source=minerU',
+    linkText: 'pq.mineruRegister',
+  },
+};
+async function openKbQuickstart(kind) {
+  const guide = KB_QUICKSTART_GUIDES[kind];
+  if (!guide) return;
+  const modal = document.getElementById('kb-quickstart-modal');
+  const form = document.getElementById(kind === 'embedding'
+    ? 'kb-quickstart-embedding-form'
+    : 'kb-quickstart-mineru-form');
+  if (!modal || !form) return;
+  const title = document.getElementById('kb-quickstart-title');
+  const logo = document.getElementById('kb-quickstart-logo');
+  const name = document.getElementById('kb-quickstart-name');
+  const steps = document.getElementById('kb-quickstart-steps');
+  const tip = document.getElementById('kb-quickstart-tip');
+  const linkRow = document.getElementById('kb-quickstart-link-row');
+  const link = document.getElementById('kb-quickstart-link');
+  if (title) title.textContent = t(guide.title);
+  if (logo) {
+    logo.innerHTML = GA_ICON(guide.icon);
+    logo.style.background = guide.tint || '';
+    logo.style.color = guide.color || '';
+  }
+  if (name) name.textContent = t(guide.name);
+  if (steps) steps.innerHTML = guide.steps.map(key => `<li>${escapeHtml(t(key))}</li>`).join('');
+  if (tip) tip.textContent = t(guide.tip);
+  if (linkRow && link) {
+    linkRow.hidden = !guide.link;
+    link.href = guide.link || '#';
+    link.textContent = guide.linkText ? t(guide.linkText) : '';
+  }
+  document.querySelectorAll('.kb-quickstart-form').forEach(item => { item.hidden = item !== form; });
+  openModal('kb-quickstart-modal');
+  applyI18n();
+  if (!quickstartKbConfig) await loadKbServiceConfigs();
+  const values = quickstartKbConfig?.[kind];
+  if (values) setKbConfigForm(kind, values, form);
+  else setKbConfigStatus(form, false, { error: true });
+  requestAnimationFrame(() => form.querySelector('input:not([type="password"])')?.focus());
+}
 async function loadModelProfiles() {
   try {
     const res = await window.ga.getModelProfiles();
@@ -6120,6 +6190,7 @@ async function loadModelProfiles() {
     }
     updateModelChip();
     renderSettingsModels();
+    refreshQuickstartStates();
   } catch (_) {}
 }
 /* ═══════════════ 模型菜单(chat + conductor 共用一份逻辑,各自一个 DOM) ═══════════════ */
@@ -6715,6 +6786,7 @@ window.ga.onBridgeReady(async () => {
   refreshStatusLabel();
   if (!state.activeId) { refreshEmptyState(null); }
   await loadModelProfiles();
+  void loadKbServiceConfigs();
   await loadBridgeConfig();
   if (isServicesPageActive()) renderChannelList(gaServiceStore.list());
   const sess = activeSess();

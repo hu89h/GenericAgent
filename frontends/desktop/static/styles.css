@@ -600,7 +600,7 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; f
 .foot-row:hover{ background:var(--line-soft); }
 .chev{ width:14px; height:14px; color:var(--muted2); flex:0 0 auto; }
 
-/* ── 侧边栏「快速接入官方模型」:头部与「配置」按钮同款 foot-row 风格,
+/* ── 侧边栏「新用户引导」:头部与「配置」按钮同款 foot-row 风格,
    左侧 lightning 图标 + 标题,右侧 caretRight 跟"配置"完全一致,
    展开时旋转 90° 朝下,折叠时朝右(== "配置"的 >)。默认展开,可折叠。── */
 .provider-quickstart{
@@ -615,7 +615,42 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; f
 .pq-head:hover{ background:var(--line-soft); }
 .pq-collapse{ transition:transform .18s; transform-origin:center; }
 .pq-head:hover .pq-collapse{ color:var(--txt-2); }
-.pq-body{ display:flex; flex-direction:column; gap:6px; padding:0 10px; }
+.pq-body{
+  display:flex; flex-direction:column; gap:6px; padding:0 10px;
+  max-height:min(45vh, 390px); overflow:auto;
+  scrollbar-width:thin;
+}
+.pq-step-head{
+  display:flex; align-items:center; gap:7px; min-height:28px;
+  padding:2px 2px 0; color:var(--txt-2);
+}
+.pq-model-step-head{ order:0; }
+.pq-step-no{
+  flex:0 0 auto; width:18px; height:18px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--accent-bg); color:var(--accent); font-size:10px; font-weight:600;
+}
+.pq-step-copy{ min-width:0; display:flex; flex-direction:column; gap:1px; }
+.pq-step-title{ font-size:12px; font-weight:600; color:var(--txt-strong); line-height:1.35; }
+.pq-step-desc{ font-size:10px; color:var(--muted); line-height:1.3; }
+.pq-step-state{
+  margin-left:auto; flex:0 0 auto; color:var(--muted); font-size:10px; line-height:1;
+}
+.pq-step-state.is-configured{ color:var(--confirm-primary-bg); }
+.pq-body > .pq-btn[data-provider="qwen"]{ order:1; }
+.pq-body > .pq-btn[data-provider="deepseek"]{ order:2; }
+.pq-step[data-step="embedding"]{ order:3; }
+.pq-step[data-step="mineru"]{ order:4; }
+.pq-step{ display:flex; flex-direction:column; gap:5px; }
+.pq-step .pq-step-head{ padding-top:4px; }
+.pq-recommended{
+  display:inline-flex; margin-left:5px; padding:1px 4px; border-radius:4px;
+  background:var(--accent-bg); color:var(--accent); font-size:9px; font-weight:500; vertical-align:1px;
+}
+.pq-logo > span{ width:15px; height:15px; display:block; }
+.pq-logo-embedding{ background:rgba(14,165,233,.12); color:#0284c7; }
+.pq-logo-mineru{ background:rgba(245,158,11,.14); color:#d97706; }
+.pq-setup-btn{ margin:0; }
 /* 默认展开:箭头朝下;折叠:箭头朝右(== 「配置」的 >) */
 .provider-quickstart:not(.collapsed) .pq-collapse{ transform:rotate(90deg); }
 .provider-quickstart.collapsed .pq-collapse{ transform:rotate(0deg); }
@@ -651,6 +686,10 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; f
   display:flex; align-items:center; justify-content:center;
 }
 .model-guide-logo svg{ width:15px; height:15px; }
+.kb-service-guide .model-guide-logo{
+  width:26px; height:26px; border-radius:7px;
+}
+.kb-service-guide .model-guide-logo svg{ width:16px; height:16px; }
 .model-guide-name{ font-size:13px; font-weight:600; color:var(--txt-strong); }
 .model-guide-steps{ margin:0 0 8px; padding-left:18px; display:flex; flex-direction:column; gap:3px; }
 .model-guide-steps li{ font-size:12px; color:var(--txt-2); line-height:1.55; }
@@ -668,6 +707,12 @@ body{ background:var(--bg); color:var(--txt); font-size:13px; overflow:hidden; f
 .model-guide-copy:hover{ color:var(--accent); border-color:var(--accent); }
 .model-guide-copy svg{ width:14px; height:14px; display:block; }
 .model-guide-tip{ margin:8px 0 0; font-size:11px; color:var(--muted); line-height:1.35; }
+#kb-quickstart-modal{ z-index:600; }
+.kb-quickstart-card{ width:420px; }
+.kb-quickstart-body{ min-height:0; padding-bottom:18px; }
+.kb-service-guide{ margin:18px 18px 0; }
+.kb-quickstart-form{ padding:18px; }
+.kb-quickstart-form[hidden]{ display:none; }
 .confirm-card{ width:360px; }
 .confirm-body{ min-height:0; padding:18px; }
 .confirm-message{ white-space:pre-wrap; color:var(--txt-2); font-size:13px; line-height:1.55; }
