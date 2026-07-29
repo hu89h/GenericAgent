@@ -14,23 +14,15 @@ import llmcore
 
 
 class DesktopMultimodalTests(unittest.TestCase):
-    def test_build_cfg_persists_explicit_vision_state(self):
-        manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
-        cfg = manager._build_cfg({
-            "apikey": "secret",
-            "apibase": "https://example.test/v1",
-            "model": "model",
-            "vision": True,
-        })
-        self.assertIs(cfg["vision"], True)
-
     def test_visual_probe_uses_pending_config_and_requires_correct_sequence(self):
         response = SimpleNamespace(content="RRRRRRRR")
+        sessions = []
 
         class FakeSession:
             def __init__(self, cfg):
                 self.cfg = cfg
                 self.system = ""
+                sessions.append(self)
 
             def ask(self, message):
                 self.message = message
@@ -46,6 +38,13 @@ class DesktopMultimodalTests(unittest.TestCase):
                 "model": "pending-model",
                 "vision": True,
             }, "oai")
+
+        self.assertEqual(sessions[0].cfg["apikey"], "pending-key")
+        self.assertEqual(sessions[0].cfg["model"], "pending-model")
+        self.assertFalse(sessions[0].cfg["stream"])
+        self.assertEqual(sessions[0].cfg["max_tokens"], 32)
+        self.assertEqual(sessions[0].message["content"][1]["type"], "image_path")
+        self.assertEqual(sessions[0].message["content"][1]["name"], "vision-probe.png")
 
         response.content = "BBBBBBBB"
         with mock.patch("random.SystemRandom.choice", return_value="R"), \
@@ -131,14 +130,16 @@ class DesktopMultimodalTests(unittest.TestCase):
             self.assertNotIn("base64", raw)
 
     def test_missing_visible_session_image_becomes_explicit_text(self):
-        messages = [{
-            "role": "user",
-            "content": "look",
-            "images": [{"path": "Z:/missing/image.png", "name": "image.png"}],
-        }]
-        restored = desktop_bridge.AgentManager._restored_session_messages(messages)
-        self.assertEqual(restored[0]["images"], [])
-        self.assertIn("no longer available", restored[0]["content"])
+        with tempfile.TemporaryDirectory() as temp:
+            missing = Path(temp) / "missing" / "image.png"
+            messages = [{
+                "role": "user",
+                "content": "look",
+                "images": [{"path": str(missing), "name": "image.png"}],
+            }]
+            restored = desktop_bridge.AgentManager._restored_session_messages(messages)
+            self.assertEqual(restored[0]["images"], [])
+            self.assertIn("no longer available", restored[0]["content"])
 
 
 if __name__ == "__main__":

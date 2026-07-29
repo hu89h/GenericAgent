@@ -1,5 +1,9 @@
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+
+from PIL import Image
 
 from knowledge_base.agent_tools import (
     KB_RESPONSE_SOURCE_INSTRUCTIONS,
@@ -9,6 +13,8 @@ from knowledge_base.agent_tools import (
 
 
 class _Backend:
+    image_abspath = ""
+
     @staticmethod
     def search(query, **_kwargs):
         return {"mode": "vector", "results": []}
@@ -33,7 +39,7 @@ class _Backend:
             "kb_id": "kb-test",
             "data_id": "kb-test::doc.md::image::1",
             "image_id": "image-1",
-            "image_abspath": __file__,
+            "image_abspath": _Backend.image_abspath,
             "source_file_name": "source.pdf",
             "description": "diagram",
         }
@@ -78,13 +84,20 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         )
         self.assertNotIn("attach_image", schema["parameters"]["properties"])
 
-        handler = _Handler()
-        outcome = handler.do_kb_image_read(
-            {"data_id": "kb-test::doc.md::image::1"}, None,
-        )
+        with tempfile.TemporaryDirectory() as temp:
+            image = Path(temp) / "figure.png"
+            Image.new("RGB", (2, 2), "red").save(image)
+            _Backend.image_abspath = str(image)
+            try:
+                handler = _Handler()
+                outcome = handler.do_kb_image_read(
+                    {"data_id": "kb-test::doc.md::image::1"}, None,
+                )
 
-        self.assertEqual(handler.queued_image, __file__)
-        self.assertIn('"attach_status": "attached"', outcome.data)
+                self.assertEqual(handler.queued_image, str(image))
+                self.assertIn('"attach_status": "attached"', outcome.data)
+            finally:
+                _Backend.image_abspath = ""
 
     def test_search_returns_payload_without_info_status_line(self):
         outcome = _Handler().do_kb_search(

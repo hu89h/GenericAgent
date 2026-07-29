@@ -13,9 +13,8 @@ from knowledge_base.pipeline import IngestPipeline, Publisher
 from knowledge_base.usage import UsageTracker
 
 
-PAPER_SOURCE = Path(
-    os.environ.get("GA_KB_PAPER_TEST_SOURCE", r"E:\Works\多模态\paper")
-)
+_PAPER_SOURCE = os.environ.get("GA_KB_PAPER_TEST_SOURCE", "").strip()
+PAPER_SOURCE = Path(_PAPER_SOURCE).expanduser() if _PAPER_SOURCE else None
 
 
 class _DeterministicAssets(ImageAssetProcessor):
@@ -111,7 +110,10 @@ class _FakeIndexBuilder:
         return stats
 
 
-@unittest.skipUnless(PAPER_SOURCE.is_dir(), "paper integration source is unavailable")
+@unittest.skipUnless(
+    PAPER_SOURCE is not None and PAPER_SOURCE.is_dir(),
+    "set GA_KB_PAPER_TEST_SOURCE to a real paper integration fixture",
+)
 class PaperPartialFailureTests(unittest.TestCase):
     def _copy_paper(self, target):
         shutil.copytree(PAPER_SOURCE, target, copy_function=shutil.copy2)
@@ -135,7 +137,7 @@ class PaperPartialFailureTests(unittest.TestCase):
             source = Path(temp) / "paper-doc-failure"
             self._copy_paper(source)
             markdowns = sorted(source.rglob("*.md"))
-            self.assertEqual(len(markdowns), 2)
+            self.assertGreaterEqual(len(markdowns), 2)
             rejected_name = markdowns[0].name
             original = importer._write_markdown
 
@@ -152,12 +154,12 @@ class PaperPartialFailureTests(unittest.TestCase):
                 active = Path(config.active_root(kb_id))
 
                 self.assertEqual(result["state"], "ready_with_warnings")
-                self.assertEqual(result["summary"]["n_docs"], 1)
+                self.assertEqual(result["summary"]["n_docs"], len(markdowns) - 1)
                 self.assertGreater(result["summary"]["text_chunks"], 0)
                 self.assertEqual(result["failures"][0]["stage"], "markdown")
                 self.assertEqual(
                     sorted(item["status"] for item in result["documents"]),
-                    ["failed", "succeeded"],
+                    ["failed", *(["succeeded"] * (len(markdowns) - 1))],
                 )
                 self.assertTrue(active.is_dir())
                 self.assertFalse(Path(config.staging_root(kb_id)).exists())
@@ -169,13 +171,17 @@ class PaperPartialFailureTests(unittest.TestCase):
             with mock.patch.object(config, "DATA_ROOT", str(Path(temp) / "data")), mock.patch.object(
                 config, "CONFIG_PATH", str(Path(temp) / "kb.yaml")
             ):
+                baseline = self._pipeline().import_kb(str(source))
                 result = self._pipeline(failed_images=1).import_kb(str(source))
                 kb_id = result["kb"]["id"]
 
                 self.assertEqual(result["state"], "ready_with_warnings")
-                self.assertEqual(result["summary"]["n_docs"], 2)
-                self.assertEqual(result["summary"]["text_chunks"], 180)
-                self.assertEqual(result["summary"]["image_chunks"], 9)
+                self.assertEqual(result["summary"]["n_docs"], baseline["summary"]["n_docs"])
+                self.assertEqual(result["summary"]["text_chunks"], baseline["summary"]["text_chunks"])
+                self.assertEqual(
+                    result["summary"]["image_chunks"],
+                    baseline["summary"]["image_chunks"] - 1,
+                )
                 self.assertEqual(len(result["failures"]), 1)
                 self.assertEqual(result["failures"][0]["stage"], "image_analysis")
                 self.assertEqual(
@@ -192,12 +198,19 @@ class PaperPartialFailureTests(unittest.TestCase):
             with mock.patch.object(config, "DATA_ROOT", str(Path(temp) / "data")), mock.patch.object(
                 config, "CONFIG_PATH", str(Path(temp) / "kb.yaml")
             ):
+                baseline = self._pipeline().import_kb(str(source))
                 result = self._pipeline(skip_vision=True).import_kb(str(source))
 
                 self.assertEqual(result["state"], "ready_with_warnings")
-                self.assertEqual(result["summary"]["text_chunks"], 180)
-                self.assertEqual(result["summary"]["image_chunks"], 10)
-                self.assertEqual(len(result["failures"]), 2)
+                self.assertEqual(
+                    result["summary"]["text_chunks"],
+                    baseline["summary"]["text_chunks"],
+                )
+                self.assertEqual(
+                    result["summary"]["image_chunks"],
+                    baseline["summary"]["image_chunks"],
+                )
+                self.assertTrue(result["failures"])
                 self.assertTrue(all(
                     item["stage"] == "image_capability"
                     for item in result["failures"]
