@@ -9,6 +9,8 @@ __pycache__/
 .venv/
 venv/
 env/
+.portable/
+artifacts/
 build/
 dist/
 *.egg-info/

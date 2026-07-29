@@ -46,9 +46,7 @@ param(
     [string]$PipIndexUrl = "https://pypi.tuna.tsinghua.edu.cn/simple",
     [string]$NpmRegistry = "https://registry.npmmirror.com",
     # Offline install: when set, pip installs from local wheels only (no network). Used by the portable bundle.
-    [string]$WheelDir = "",
-    # Extra packages to install beyond the core deps (e.g. "fastapi uvicorn websockets" for the conductor service).
-    [string]$ExtraPipPackages = ""
+    [string]$WheelDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -152,28 +150,25 @@ function Ensure-Venv([string]$root, [string]$basePython) {
 function Install-Dependencies([string]$root, [string]$py) {
     if ($SkipPipInstall) { Write-Warn "SkipPipInstall is set; dependencies are not installed."; return }
 
-    # Extra packages (e.g. conductor service deps) appended to the core install.
-    $extra = @()
-    if ($ExtraPipPackages) { $extra = $ExtraPipPackages.Split(" ", [StringSplitOptions]::RemoveEmptyEntries) }
+    $desktop = @("fastapi", "uvicorn", "websockets", "pydantic")
 
     # Offline mode (portable bundle): install from local wheels only, no network, no pip self-upgrade.
     if ($WheelDir) {
         $wd = (Resolve-Path $WheelDir -ErrorAction Stop).Path
         Write-Ok "offline wheels: $wd"
-        if ($extra.Count) { Write-Ok "extra packages: $($extra -join ', ')" }
         Write-Host "GAPROGRESS|deps"
         Write-Step "Install GenericAgent dependencies and desktop bridge extras (offline)"
         # Install deps directly (NOT an editable -e of the source): an editable install bakes the
         # project's absolute path into a .pth. With -NoVenv (deps go into the relocatable embedded
         # python) this keeps the portable bundle movable. The bridge adds the source to sys.path
         # itself (ensure_ga_import_path), so the project itself need not be installed.
-        & $py -m pip install --no-index --find-links $wd "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil "zvec>=0.6,<0.7" "pypdf>=5.0" @extra
+        & $py -m pip install --no-index --find-links $wd "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil "zvec>=0.6,<0.7" "pypdf>=5.0" "Pillow>=9.0" "PySocks>=1.7" $desktop
         if ($LASTEXITCODE -ne 0) { Fail "offline pip install failed (check wheels dir)." }
         Write-Host "GAPROGRESS|done"
         return
     }
 
-    # Online mode: use a pip index mirror when -PipIndexUrl is set (default: Tsinghua). Pass -PipIndexUrl "" for official PyPI.
+    # Online mode: use a pip index mirror when -PipIndexUrl is set (default: Tsinghua).
     $pipIndexArgs = @()
     if ($PipIndexUrl) {
         $pipIndexArgs = @("-i", $PipIndexUrl)
@@ -188,8 +183,18 @@ function Install-Dependencies([string]$root, [string]$py) {
     Write-Step "Install GenericAgent minimal package and desktop bridge extras"
     # pyproject.toml already includes: requests, beautifulsoup4, bottle, simple-websocket-server, aiohttp.
     # desktop_bridge.py additionally imports psutil.
-    & $py -m pip install @pipIndexArgs -e $root psutil @extra
+    & $py -m pip install @pipIndexArgs -e $root psutil $desktop
     if ($LASTEXITCODE -ne 0) { Fail "pip install failed." }
+}
+
+function Test-InstalledDependencies([string]$py) {
+    Write-Step "Verify GenericAgent runtime dependencies"
+    $probe = & $py -c "import aiohttp, fastapi, PIL, pydantic, requests, socks, uvicorn, websockets, zvec; print('dependency smoke test: ok')" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $detail = ($probe | Out-String).Trim()
+        Fail "Dependency smoke test failed: $detail"
+    }
+    Write-Ok (($probe | Out-String).Trim())
 }
 
 function Ensure-MyKey([string]$root) {
@@ -347,6 +352,7 @@ $py = Ensure-Venv $root $basePy
 Write-Ok "Runtime Python: $py"
 
 Install-Dependencies $root $py
+Test-InstalledDependencies $py
 Ensure-MyKey $root
 Write-DesktopSettings $root $py
 Test-WebView2Installed

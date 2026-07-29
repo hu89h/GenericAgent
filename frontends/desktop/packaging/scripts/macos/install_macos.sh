@@ -18,7 +18,6 @@ MODE="PrepareOnly"
 NO_VENV=0
 SKIP_PIP_INSTALL=0
 WHEEL_DIR=""
-EXTRA_PACKAGES=""
 APP_PATH=""
 
 log_step() { printf '\n==> %s\n' "$*" >&2; }
@@ -38,7 +37,6 @@ while [[ $# -gt 0 ]]; do
     --no-venv) NO_VENV=1; shift ;;
     --skip-pip-install) SKIP_PIP_INSTALL=1; shift ;;
     --wheel-dir) [[ $# -ge 2 ]] || fail "Missing value for $1"; WHEEL_DIR="$2"; shift 2 ;;
-    --extra-packages) [[ $# -ge 2 ]] || fail "Missing value for $1"; EXTRA_PACKAGES="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) fail "Unknown argument: $1" ;;
   esac
@@ -111,18 +109,17 @@ install_deps() {
   "$py" -m pip install --upgrade pip setuptools wheel
   local pkgs=(
     "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil
-    "zvec>=0.6,<0.7" "pypdf>=5.0"
+    "zvec>=0.6,<0.7" "pypdf>=5.0" "Pillow>=9.0" "PySocks>=1.7"
+    fastapi uvicorn websockets pydantic
   )
-  if [[ -n "$EXTRA_PACKAGES" ]]; then
-    # shellcheck disable=SC2206
-    pkgs+=( $EXTRA_PACKAGES )
-  fi
   if [[ -n "$WHEEL_DIR" && -d "$WHEEL_DIR" ]]; then
     "$py" -m pip install --no-index --find-links "$WHEEL_DIR" "${pkgs[@]}"
   else
     log_warn "No wheel dir supplied; falling back to online pip install"
     "$py" -m pip install "${pkgs[@]}"
   fi
+  "$py" -c 'import aiohttp, fastapi, PIL, pydantic, requests, socks, uvicorn, websockets, zvec; print("dependency smoke test: ok")' \
+    || fail "Dependency smoke test failed."
 }
 
 ensure_mykey() {

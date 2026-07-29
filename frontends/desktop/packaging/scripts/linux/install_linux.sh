@@ -32,7 +32,6 @@ NO_VENV=0
 SKIP_PIP_INSTALL=0
 APPIMAGE_PATH=""
 WHEEL_DIR=""
-EXTRA_PACKAGES=""
 
 log_step() { printf '\n==> %s\n' "$*" >&2; }
 log_ok() { printf '[OK] %s\n' "$*" >&2; }
@@ -64,9 +63,6 @@ while [[ $# -gt 0 ]]; do
     --wheel-dir)
       [[ $# -ge 2 ]] || fail "Missing value for $1"
       WHEEL_DIR="$2"; shift 2 ;;
-    --extra-packages)
-      [[ $# -ge 2 ]] || fail "Missing value for $1"
-      EXTRA_PACKAGES="$2"; shift 2 ;;
     --help|-h)
       usage; exit 0 ;;
     *)
@@ -205,14 +201,16 @@ install_dependencies() {
     # sys.path itself (ensure_ga_import_path), so no install of the project is needed.
     # shellcheck disable=SC2086
     "$py" -m pip install --no-index --find-links "$WHEEL_DIR" \
-      "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil "zvec>=0.6,<0.7" "pypdf>=5.0" $EXTRA_PACKAGES \
+      "requests>=2.28" "beautifulsoup4>=4.12" "bottle>=0.12" "simple-websocket-server>=0.4" "aiohttp>=3.9" psutil "zvec>=0.6,<0.7" "pypdf>=5.0" "Pillow>=9.0" "PySocks>=1.7" fastapi uvicorn websockets pydantic \
       || fail "Offline pip install failed (check wheel dir)."
   else
     log_step "Install/refresh minimal Python dependencies"
     "$py" -m pip install --upgrade pip setuptools wheel || fail "pip bootstrap failed."
     # shellcheck disable=SC2086
-    "$py" -m pip install -e "$root" psutil $EXTRA_PACKAGES || fail "pip install failed."
+    "$py" -m pip install -e "$root" psutil fastapi uvicorn websockets pydantic || fail "pip install failed."
   fi
+  "$py" -c 'import aiohttp, fastapi, PIL, pydantic, requests, socks, uvicorn, websockets, zvec; print("dependency smoke test: ok")' \
+    || fail "Dependency smoke test failed."
   printf 'GAPROGRESS|done\n'
 }
 

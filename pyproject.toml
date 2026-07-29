@@ -17,6 +17,10 @@ dependencies = [
     "psutil>=5.9",
     "zvec>=0.6,<0.7",
     "pypdf>=5.0",
+    # Native image messages and KB image preprocessing.
+    "Pillow>=9.0",
+    # requests[socks] is required when the host uses a SOCKS/ SOCKS5H proxy.
+    "PySocks>=1.7",
 ]
 
 [project.optional-dependencies]
