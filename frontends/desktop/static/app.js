@@ -6052,9 +6052,12 @@ async function loadKbServiceConfigs() {
 }
 
 async function saveKbServiceConfig(kind, form) {
+  // Capture the form before disabling its controls. FormData intentionally
+  // excludes disabled inputs, so toggling the busy state first would submit
+  // an empty configuration and make user edits appear to be ignored.
+  const payload = Object.fromEntries(new FormData(form).entries());
   setKbConfigBusy(form, true);
   try {
-    const payload = Object.fromEntries(new FormData(form).entries());
     const result = await window.ga.saveKbConfig({ [kind]: payload });
     setKbConfigForm(kind, result[kind]);
     if (Array.isArray(result.profiles)) {
