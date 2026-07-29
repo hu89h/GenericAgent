@@ -3479,6 +3479,7 @@ async def start_extras_handler(request):
 async def identity_handler(request):
     return json_ok({"ga_root": str(DEFAULT_GA_ROOT), "app_dir": str(APP_DIR), "pid": os.getpid(),
                     "build_id": os.environ.get("GA_BUILD_ID", ""),
+                    "python_path": sys.executable,
                     "hot_reload": _hot_reload_enabled(),
                     "reload_token": _reload_token() if _hot_reload_enabled() else ""})
 
@@ -3545,7 +3546,20 @@ def _hot_reload_watchdog() -> None:
         try:
             # Rebuild all imported Python modules in a clean interpreter while
             # preserving the host environment and desktop-parent relationship.
-            # POSIX keeps the PID; Windows may create a replacement PID for execv.
+            # ``os.execv`` on Windows can resolve a venv launcher to its base
+            # interpreter (for example Conda), so start the exact executable as
+            # a child and terminate this process instead.
+            if os.name == "nt":
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                subprocess.Popen(
+                    [sys.executable, *sys.argv],
+                    cwd=os.getcwd(),
+                    env=os.environ.copy(),
+                    creationflags=flags,
+                    close_fds=True,
+                )
+                os._exit(0)
             os.execv(sys.executable, [sys.executable, *sys.argv])
         except Exception as exc:
             print(f"[bridge] hot reload failed: {exc}", file=sys.stderr)

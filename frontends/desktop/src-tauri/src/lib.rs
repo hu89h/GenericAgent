@@ -81,13 +81,32 @@ fn bundle_python() -> Option<PathBuf> {
 /// 1. The embedded bundle python (runtime/python) — deps are installed directly into it
 ///    (no venv), and its path is resolved relative to the bundle anchor at runtime, so the
 ///    package stays relocatable (moving the folder doesn't break absolute venv paths).
-/// 2. .portable/uv-python/ 下找 python.exe (Windows) 或 python3 (Unix)
-/// 3. Fallback to system PATH
+/// 2. .portable/ 下找项目自带的 Python（开发环境）
+/// 3. .portable/uv-python/ 下找 uv 安装的 Python
+/// 4. Fallback to system PATH
 fn find_python() -> String {
     if let Some(p) = bundle_python() {
         return p.to_string_lossy().to_string();
     }
     let root = project_root();
+    #[cfg(windows)]
+    for candidate in [
+        root.join(".portable").join("python").join("python.exe"),
+        root.join(".portable").join("uv-python").join("python.exe"),
+    ] {
+        if candidate.is_file() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+    #[cfg(not(windows))]
+    for candidate in [
+        root.join(".portable").join("python").join("bin").join("python3"),
+        root.join(".portable").join("uv-python").join("bin").join("python3"),
+    ] {
+        if candidate.is_file() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
     let portable_python_dir = root.join(".portable").join("uv-python");
 
     if portable_python_dir.exists() {
@@ -167,6 +186,57 @@ fn read_settings() -> serde_json::Map<String, serde_json::Value> {
         }
     }
     serde_json::Map::new()
+}
+
+fn valid_python_path(value: &str) -> Option<String> {
+    let path = PathBuf::from(value.trim());
+    if path.is_file() {
+        Some(path.to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
+/// Resolve the interpreter for a source-checkout launch.  A source launcher must not silently
+/// reuse the Python path of an installed bundle: that path can have a different dependency set
+/// (and is exactly how a stale portable runtime ended up serving the source frontend).  The
+/// launcher may explicitly provide GA_DESKTOP_PYTHON_PATH; otherwise the project-owned portable
+/// interpreter wins.  A local venv remains a development fallback for machines that have not yet
+/// prepared the portable interpreter, while persisted bundle settings are only a last resort.
+fn source_launcher_python(project: &str) -> String {
+    if let Ok(value) = std::env::var("GA_DESKTOP_PYTHON_PATH") {
+        if let Some(path) = valid_python_path(&value) {
+            return path;
+        }
+        if !value.trim().is_empty() {
+            eprintln!("[tauri] GA_DESKTOP_PYTHON_PATH is not a file: {}", value.trim());
+        }
+    }
+
+    let project_path = PathBuf::from(project);
+    #[cfg(windows)]
+    let local_candidates = [
+        project_path.join(".portable").join("python").join("python.exe"),
+        project_path.join(".portable").join("uv-python").join("python.exe"),
+        project_path.join(".venv").join("Scripts").join("python.exe"),
+    ];
+    #[cfg(not(windows))]
+    let local_candidates = [
+        project_path.join(".portable").join("python").join("bin").join("python3"),
+        project_path.join(".portable").join("uv-python").join("bin").join("python3"),
+        project_path.join(".venv").join("bin").join("python3"),
+    ];
+    for candidate in local_candidates {
+        if let Some(path) = valid_python_path(&candidate.to_string_lossy()) {
+            return path;
+        }
+    }
+
+    read_settings()
+        .get("python_path")
+        .and_then(|value| value.as_str())
+        .and_then(valid_python_path)
+        .unwrap_or_else(find_python)
 }
 
 /// Merge `updates` into the existing settings file and write it back, preserving any keys
@@ -385,12 +455,7 @@ pub fn get_or_discover_config() -> (String, String) {
     if let Ok(project) = std::env::var("GA_DESKTOP_PROJECT_DIR") {
         let project = project.trim().to_string();
         if !project.is_empty() && PathBuf::from(&project).join("agentmain.py").exists() {
-            let python = read_settings()
-                .get("python_path")
-                .and_then(|v| v.as_str())
-                .filter(|value| !value.trim().is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(find_python);
+            let python = source_launcher_python(&project);
             return (python, project);
         }
     }
@@ -540,7 +605,6 @@ fn run_offline_prepare(project_dir: &str, report: &dyn Fn(i32, &str)) -> Result<
             .arg("-PythonPath").arg(&py)
             .arg("-ProjectDir").arg(project_dir)
             .arg("-WheelDir").arg(&wheels)
-            .arg("-ExtraPipPackages").arg("fastapi uvicorn websockets")
             // -NoVenv: install deps straight into the embedded python (no venv) so the
             // bundle is relocatable. See prepared_marker / find_python.
             .args(["-Mode", "PrepareOnly", "-SkipNpmInstall", "-NoVenv"]);
@@ -553,7 +617,6 @@ fn run_offline_prepare(project_dir: &str, report: &dyn Fn(i32, &str)) -> Result<
             .arg("--python-path").arg(&py)
             .arg("--project-dir").arg(project_dir)
             .arg("--wheel-dir").arg(&wheels)
-            .arg("--extra-packages").arg("fastapi uvicorn websockets")
             // --no-venv: install deps straight into the embedded python (no venv) so the
             // bundle is relocatable. See prepared_marker / find_python.
             .args(["--mode", "PrepareOnly", "--no-venv"]);
@@ -662,14 +725,23 @@ fn norm_path(p: &str) -> String {
 /// same build. The build id (commit+timestamp, see build.rs) changes on every build, so an
 /// in-place upgrade or a same-version re-publish still counts as a different bridge → take over.
 /// An old bridge with no /identity (None) or no build_id field ("") never matches → taken over.
-fn bridge_identity_matches(project_dir: &str) -> bool {
+fn bridge_identity_matches(project_dir: &str, python_path: &str) -> bool {
     let Some(id) = bridge_reported_identity() else { return false; };
     let reported_root = id.get("ga_root").and_then(|v| v.as_str()).unwrap_or("");
     let reported_app = id.get("app_dir").and_then(|v| v.as_str()).unwrap_or("");
     let reported_build = id.get("build_id").and_then(|v| v.as_str()).unwrap_or("");
+    let reported_python = id.get("python_path").and_then(|v| v.as_str()).unwrap_or("");
     if reported_build != env!("GA_BUILD_ID") {
         return false;
     }
+    let (reported_python, expected_python) = (
+        norm_path(reported_python),
+        norm_path(python_path),
+    );
+    #[cfg(windows)]
+    if !reported_python.eq_ignore_ascii_case(&expected_python) { return false; }
+    #[cfg(not(windows))]
+    if reported_python != expected_python { return false; }
     // The same GA core and build can be used by a packaged shell and a source
     // checkout, but their Bridge serves different frontend assets. Treat a
     // Bridge from another app directory as stale so the current shell takes
@@ -782,11 +854,11 @@ fn request_bridge_shutdown() {
     let _ = stream.read(&mut [0u8; 512]);
 }
 
-fn takeover_stale_bridge(project_dir: &str) {
+fn takeover_stale_bridge(project_dir: &str, python_path: &str) {
     if project_dir.is_empty() || !is_bridge_running() {
         return;
     }
-    if bridge_identity_matches(project_dir) {
+    if bridge_identity_matches(project_dir, python_path) {
         return;
     }
     eprintln!("[tauri] a different/stale bridge holds 127.0.0.1:14168; taking over");
@@ -858,6 +930,16 @@ fn show_bridge_window(app_handle: &tauri::AppHandle) {
 
 #[tauri::command]
 fn start_bridge_with_config(app_handle: tauri::AppHandle, python_path: String, project_dir: String) -> Result<(), String> {
+    let (python_path, project_dir) = if let Ok(source_project) = std::env::var("GA_DESKTOP_PROJECT_DIR") {
+        let source_project = source_project.trim().to_string();
+        if !source_project.is_empty() && PathBuf::from(&source_project).join("agentmain.py").exists() {
+            (source_launcher_python(&source_project), source_project)
+        } else {
+            (python_path, project_dir)
+        }
+    } else {
+        (python_path, project_dir)
+    };
     // Save to settings (merge so sibling keys like desktop_shortcut survive).
     merge_settings(serde_json::json!({"python_path": python_path, "project_dir": project_dir}));
 
@@ -1037,7 +1119,7 @@ pub fn run() {
     let effective_ga_root = valid_ga_source_override().unwrap_or_else(|| eff_project.clone());
     let needs_prepare = needs_first_run_prepare(&eff_project);
 
-    takeover_stale_bridge(&effective_ga_root);
+    takeover_stale_bridge(&effective_ga_root, &eff_py);
 
     let bridge_ok = is_bridge_running();
     let mut spawned_bridge = false;
