@@ -224,9 +224,12 @@ class KnowledgeBaseRetriever:
         return hit
 
     @staticmethod
-    def _doc_name_candidates(file_name: str | None = None, title: str | None = None) -> list[str]:
+    def _doc_name_candidates(file_name: str | list[str] | None = None, title: str | list[str] | None = None) -> list[str]:
         vals = []
-        for raw in (file_name, title):
+        raw_values = []
+        for value in (file_name, title):
+            raw_values.extend(value if isinstance(value, (list, tuple, set)) else [value])
+        for raw in raw_values:
             value = str(raw or "").strip().replace("\\", "/")
             if not value:
                 continue
@@ -507,6 +510,7 @@ class KnowledgeBaseRetriever:
         file_name: str | None = None,
         title: str | None = None,
         mode: str = "rrf",
+        scope_targets: list[dict] | None = None,
     ) -> dict:
         """Search with the exact channel selected by the agent."""
         self._local.search_errors = []
@@ -560,6 +564,42 @@ class KnowledgeBaseRetriever:
             if not kb.get("exists"):
                 self._record_search_error(kb, "config", "knowledge base directory is missing")
                 continue
+            scoped_file_names = file_name
+            if scope_targets is not None:
+                kb_targets = [
+                    target for target in scope_targets
+                    if isinstance(target, dict)
+                    and str(target.get("kb_id") or target.get("kbId") or target.get("id") or "").strip() == kb["id"]
+                ]
+                if not kb_targets:
+                    continue
+                if not any(bool(target.get("all_documents", target.get("allDocuments", False))) for target in kb_targets):
+                    scoped_file_names = [
+                        str(
+                            document.get("file_name")
+                            or document.get("fileName")
+                            or document.get("ref")
+                            or document.get("title")
+                            or (
+                                str(document.get("data_id") or "").split("::", 1)[1].split("::image::", 1)[0]
+                                if "::" in str(document.get("data_id") or "") else ""
+                            )
+                            or ""
+                        ).strip()
+                        for target in kb_targets
+                        for document in (target.get("documents") or target.get("docs") or [])
+                        if isinstance(document, dict)
+                        and str(
+                            document.get("file_name")
+                            or document.get("fileName")
+                            or document.get("ref")
+                            or document.get("title")
+                            or document.get("data_id")
+                            or ""
+                        ).strip()
+                    ]
+                    if not scoped_file_names:
+                        continue
             # Exact figure/table-number matches (图3-1, 表4.1, ...) are injected
             # for every mode, on purpose — including mode="vector" and
             # mode="sparse".  When the user names a specific figure/table, that
@@ -569,7 +609,7 @@ class KnowledgeBaseRetriever:
             add_hits(
                 self._search_exact_image_refs(
                     kb, query, top_k, snippet_chars,
-                    file_name=file_name, title=title,
+                    file_name=scoped_file_names, title=title,
                 ),
                 4.0,
                 "ref_exact",
@@ -581,7 +621,7 @@ class KnowledgeBaseRetriever:
                 add_hits(
                     self._search_one_zvec(
                         kb, query, top_k, snippet_chars,
-                        file_name=file_name, title=title, query_vector=dense_vector,
+                        file_name=scoped_file_names, title=title, query_vector=dense_vector,
                     ),
                     self._vector_weight,
                     "vector",
@@ -590,7 +630,7 @@ class KnowledgeBaseRetriever:
                 add_hits(
                     self._search_one_zvec_sparse(
                         kb, query, top_k, snippet_chars,
-                        file_name=file_name, title=title, query_vector=sparse_vector,
+                        file_name=scoped_file_names, title=title, query_vector=sparse_vector,
                     ),
                     self._sparse_weight,
                     "sparse",

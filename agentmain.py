@@ -58,6 +58,22 @@ def knowledge_scope_prompt(knowledge_scope):
             "mode": "all_documents_in_knowledge_base",
             "knowledge_base": str(scope.get("kb_name") or "selected knowledge base"),
         }
+    elif mode == "selection":
+        targets = []
+        for target in scope.get("targets") or []:
+            if not isinstance(target, dict):
+                continue
+            item = {"knowledge_base": str(target.get("kb_name") or "selected knowledge base")}
+            if target.get("all_documents"):
+                item["documents"] = "all"
+            else:
+                item["documents"] = [
+                    str(document.get("title") or document.get("file_name") or "selected document")
+                    for document in target.get("documents") or []
+                    if isinstance(document, dict)
+                ]
+            targets.append(item)
+        detail = {"mode": "selected_sources", "knowledge_bases": targets}
     else:
         detail = {"mode": "all_knowledge_bases"}
     return (

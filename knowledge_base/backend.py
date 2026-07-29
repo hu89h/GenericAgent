@@ -298,6 +298,7 @@ def search(
     file_name: str | None = None,
     title: str | None = None,
     mode: str = "rrf",
+    scope_targets: list[dict] | None = None,
 ) -> dict:
     return _runtime().retrieval.search(
         query,
@@ -307,6 +308,7 @@ def search(
         file_name=file_name,
         title=title,
         mode=mode,
+        scope_targets=scope_targets,
     )
 
 

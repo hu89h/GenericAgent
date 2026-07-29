@@ -188,7 +188,9 @@ def normalize_knowledge_scope(value: Any) -> dict:
     """Normalize the scope carried by a Desktop chat session."""
     raw = value if isinstance(value, dict) else {}
     mode = str(raw.get("mode") or raw.get("kind") or raw.get("type") or "all").strip().lower()
-    if mode not in {"none", "all", "kb", "document"}:
+    if mode in {"multi", "selection", "selected"}:
+        mode = "selection"
+    if mode not in {"none", "all", "kb", "document", "selection"}:
         mode = "all"
     origin = str(raw.get("origin") or raw.get("source") or "").strip().lower()
     if origin not in {"chat", "knowledge"}:
@@ -196,6 +198,54 @@ def normalize_knowledge_scope(value: Any) -> dict:
         # workspace. Existing all-scope sessions remain ordinary chat sessions.
         origin = "knowledge" if mode in {"kb", "document"} else "chat"
     scope = {"mode": mode, "origin": origin}
+    if mode == "selection":
+        targets = raw.get("targets") or raw.get("knowledge_bases") or raw.get("knowledgeBases") or []
+        if not isinstance(targets, list):
+            targets = []
+        normalized_targets = []
+        seen_kbs = set()
+        for item in targets:
+            if not isinstance(item, dict):
+                continue
+            kb_id = str(item.get("kb_id") or item.get("kbId") or item.get("id") or "").strip()
+            if not kb_id or kb_id in seen_kbs:
+                continue
+            seen_kbs.add(kb_id)
+            target = {"kb_id": kb_id}
+            kb_name = str(item.get("kb_name") or item.get("kbName") or item.get("name") or "").strip()
+            if kb_name:
+                target["kb_name"] = kb_name
+            all_documents = bool(item.get("all_documents", item.get("allDocuments", False)))
+            documents = item.get("documents") or item.get("docs") or []
+            if not isinstance(documents, list):
+                documents = []
+            normalized_documents = []
+            seen_documents = set()
+            for document in documents:
+                if not isinstance(document, dict):
+                    continue
+                data_id = str(document.get("data_id") or document.get("dataId") or "").strip()
+                file_name = str(document.get("file_name") or document.get("fileName") or "").strip()
+                ref = str(document.get("ref") or "").strip()
+                key = data_id or ref or file_name
+                if not key or key in seen_documents:
+                    continue
+                seen_documents.add(key)
+                clean_document = {"data_id": data_id, "file_name": file_name, "ref": ref}
+                title = str(document.get("title") or "").strip()
+                if title:
+                    clean_document["title"] = title
+                normalized_documents.append(clean_document)
+            if not all_documents and not normalized_documents:
+                continue
+            target["all_documents"] = all_documents
+            if normalized_documents:
+                target["documents"] = normalized_documents
+            normalized_targets.append(target)
+        if not normalized_targets:
+            return {"mode": "none", "origin": origin}
+        scope = {"mode": "selection", "origin": origin, "targets": normalized_targets}
+        return scope
     if mode in {"kb", "document"}:
         kb_id = str(raw.get("kb_id") or raw.get("kbId") or "").strip()
         if not kb_id:

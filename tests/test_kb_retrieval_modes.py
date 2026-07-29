@@ -139,6 +139,28 @@ class RetrievalModeTests(unittest.TestCase):
 
         self.assertEqual(self.index.sparse_calls, 0)
 
+    def test_selection_scope_passes_document_filter_to_each_channel(self):
+        calls = []
+
+        def capture(*_args, **kwargs):
+            calls.append(kwargs.get("file_name"))
+            return [_hit("zvec")]
+
+        self.retriever._search_exact_image_refs = capture
+        self.retriever._search_one_zvec = capture
+        result = self.retriever.search(
+            "scoped",
+            mode="vector",
+            scope_targets=[{
+                "kb_id": "kb-test",
+                "all_documents": False,
+                "documents": [{"file_name": "documents/selected.md"}],
+            }],
+        )
+
+        self.assertTrue(result["results"])
+        self.assertEqual(calls, [["documents/selected.md"], ["documents/selected.md"]])
+
 
 if __name__ == "__main__":
     unittest.main()

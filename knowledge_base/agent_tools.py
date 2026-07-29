@@ -130,14 +130,43 @@ class KnowledgeBaseToolsMixin:
         raw = getattr(self.parent, "knowledge_scope", None)
         scope = dict(raw) if isinstance(raw, dict) else {}
         mode = str(scope.get("mode") or scope.get("kind") or "all").strip().lower()
-        if mode not in {"none", "all", "kb", "document"}:
+        if mode in {"multi", "selection", "selected"}:
+            mode = "selection"
+        if mode not in {"none", "all", "kb", "document", "selection"}:
             mode = "all"
         scope["mode"] = mode
         return scope
 
-    def _scope_kb_id(self):
+    def _scope_targets(self):
         scope = self._knowledge_scope()
-        return str(scope.get("kb_id") or "").strip() or None
+        if scope["mode"] != "selection":
+            return []
+        targets = scope.get("targets") or scope.get("knowledge_bases") or []
+        return [target for target in targets if isinstance(target, dict)]
+
+    def _scope_kb_ids(self):
+        scope = self._knowledge_scope()
+        if scope["mode"] == "selection":
+            out = []
+            for target in self._scope_targets():
+                kb_id = str(target.get("kb_id") or target.get("kbId") or target.get("id") or "").strip()
+                if kb_id and kb_id not in out:
+                    out.append(kb_id)
+            return out
+        kb_id = str(scope.get("kb_id") or "").strip()
+        return [kb_id] if kb_id else []
+
+    def _scope_kb_id(self):
+        ids = self._scope_kb_ids()
+        return ids[0] if len(ids) == 1 else None
+
+    def _scope_read_kb_id(self, data_id=None, ref=None, file_name=None):
+        target_kb, _target_doc = self._target_parts(
+            data_id=data_id, ref=ref, file_name=file_name,
+        )
+        if target_kb:
+            return target_kb
+        return self._scope_kb_id()
 
     def _scope_allows_target(self, data_id=None, ref=None, file_name=None, kb_id=None):
         scope = self._knowledge_scope()
@@ -149,6 +178,24 @@ class KnowledgeBaseToolsMixin:
         target_kb, target_doc = self._target_parts(
             data_id=data_id, ref=ref, file_name=file_name, kb_id=kb_id
         )
+        if scope["mode"] == "selection":
+            for target in self._scope_targets():
+                expected_kb = str(target.get("kb_id") or target.get("kbId") or target.get("id") or "").strip()
+                if not expected_kb or expected_kb != target_kb:
+                    continue
+                if bool(target.get("all_documents", target.get("allDocuments", False))):
+                    return True
+                for document in target.get("documents") or target.get("docs") or []:
+                    if not isinstance(document, dict):
+                        continue
+                    expected_doc = self._document_key(
+                        data_id=document.get("data_id") or document.get("dataId"),
+                        ref=document.get("ref"),
+                        file_name=document.get("file_name") or document.get("fileName"),
+                    )
+                    if expected_doc and target_doc and expected_doc == target_doc:
+                        return True
+            return False
         expected_kb = str(scope.get("kb_id") or "").strip()
         if not expected_kb or not target_kb or target_kb != expected_kb:
             return False
@@ -168,6 +215,8 @@ class KnowledgeBaseToolsMixin:
             return {"kb_id": "__knowledge_disabled__"}
         if scope["mode"] == "all":
             return {}
+        if scope["mode"] == "selection":
+            return {"scope_targets": self._scope_targets()}
         out = {"kb_id": self._scope_kb_id()}
         if scope["mode"] == "document":
             document = self._document_key(
@@ -332,7 +381,7 @@ class KnowledgeBaseToolsMixin:
                 data_id=data_id,
                 ref=ref,
                 chunk_index=index,
-                kb_id=self._scope_kb_id(),
+                kb_id=self._scope_read_kb_id(data_id=data_id, ref=ref),
                 max_chars=max_chars,
             )
             if str(content).startswith("[未找到]"):
@@ -341,7 +390,7 @@ class KnowledgeBaseToolsMixin:
             reference = backend.reference_for_chunk(
                 data_id=data_id,
                 ref=ref,
-                kb_id=self._scope_kb_id(),
+                kb_id=self._scope_read_kb_id(data_id=data_id, ref=ref),
                 chunk_index=index,
             )
             hint = self._source_hint(reference)
@@ -368,14 +417,14 @@ class KnowledgeBaseToolsMixin:
             result = self._kb_backend().list_chunks(
                 data_id=data_id,
                 ref=ref,
-                kb_id=self._scope_kb_id(),
+                kb_id=self._scope_read_kb_id(data_id=data_id, ref=ref),
                 preview_chars=preview,
             )
             if isinstance(result, dict) and not result.get("error"):
                 source = self._kb_backend().reference_for_chunk(
                     data_id=data_id,
                     ref=ref,
-                    kb_id=self._scope_kb_id(),
+                    kb_id=self._scope_read_kb_id(data_id=data_id, ref=ref),
                     chunk_index=0,
                 )
                 result = dict(result)
@@ -388,12 +437,29 @@ class KnowledgeBaseToolsMixin:
                 )
                 result["source_hint"] = self._source_hint(source)
         else:
-            documents = self._kb_backend().list_documents(kb_id=self._scope_kb_id())
-            if self._knowledge_scope()["mode"] == "document":
+            scope = self._knowledge_scope()
+            if scope["mode"] == "selection":
+                documents = []
+                seen = set()
+                for kb_id in self._scope_kb_ids():
+                    for document in self._kb_backend().list_documents(kb_id=kb_id):
+                        key = str(document.get("data_id") or document.get("ref") or document.get("file_name") or "")
+                        if key in seen or not self._scope_allows_target(
+                            data_id=document.get("data_id"),
+                            ref=document.get("ref"),
+                            file_name=document.get("file_name"),
+                            kb_id=kb_id,
+                        ):
+                            continue
+                        seen.add(key)
+                        documents.append(document)
+            else:
+                documents = self._kb_backend().list_documents(kb_id=self._scope_kb_id())
+            if scope["mode"] == "document":
                 expected = self._document_key(
-                    data_id=self._knowledge_scope().get("data_id"),
-                    ref=self._knowledge_scope().get("ref"),
-                    file_name=self._knowledge_scope().get("file_name"),
+                    data_id=scope.get("data_id"),
+                    ref=scope.get("ref"),
+                    file_name=scope.get("file_name"),
                 )
                 documents = [
                     document for document in documents
@@ -426,7 +492,38 @@ class KnowledgeBaseToolsMixin:
         if lookup["data_id"] and not self._scope_allows_target(data_id=lookup["data_id"]):
             return None, "[Error] 图片目标不在当前会话的知识库范围内。"
         try:
-            info = self._kb_backend().read_image(kb_id=self._scope_kb_id(), **lookup)
+            read_kb_id = self._scope_read_kb_id(data_id=lookup.get("data_id"))
+            if self._knowledge_scope()["mode"] == "selection" and not lookup.get("data_id"):
+                matches = []
+                for kb_id in self._scope_kb_ids():
+                    candidate = self._kb_backend().read_image(kb_id=kb_id, **lookup)
+                    candidates = []
+                    if isinstance(candidate, dict) and candidate.get("error_code") == "image_ambiguous":
+                        candidates = candidate.get("candidates") or []
+                    elif isinstance(candidate, dict) and not candidate.get("error"):
+                        candidates = [candidate]
+                    for item in candidates:
+                        if not self._scope_allows_target(
+                            data_id=item.get("data_id"),
+                            ref=item.get("ref"),
+                            file_name=item.get("file_name"),
+                            kb_id=item.get("kb_id") or kb_id,
+                        ):
+                            continue
+                        if item is not candidate and item.get("data_id"):
+                            item = self._kb_backend().read_image(
+                                kb_id=kb_id, data_id=item.get("data_id")
+                            )
+                        if isinstance(item, dict) and not item.get("error"):
+                            matches.append(item)
+                if len(matches) == 1:
+                    info = matches[0]
+                elif len(matches) > 1:
+                    return None, "[Error] 图片目标不明确，请使用 kb_search 返回的完整 data_id。"
+                else:
+                    info = {"error": "[未找到图片资产]"}
+            else:
+                info = self._kb_backend().read_image(kb_id=read_kb_id, **lookup)
         except Exception as error:
             return None, f"[Error] 知识库图片读取失败: {error}"
         if not isinstance(info, dict) or info.get("error"):

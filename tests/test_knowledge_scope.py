@@ -80,6 +80,49 @@ class KnowledgeScopeTests(unittest.TestCase):
         self.assertFalse(handler._scope_allows_target(data_id="kb-a::documents/two.md"))
         self.assertFalse(handler._scope_allows_target(data_id="kb-b::documents/one.md"))
 
+    def test_selection_scope_allows_selected_documents_across_knowledge_bases(self):
+        scope = normalize_knowledge_scope({
+            "mode": "selection",
+            "targets": [
+                {
+                    "kb_id": "kb-a",
+                    "kb_name": "论文 A",
+                    "documents": [{"data_id": "kb-a::documents/one.md", "title": "一"}],
+                },
+                {"kb_id": "kb-b", "kb_name": "论文 B", "all_documents": True},
+            ],
+        })
+        handler = _ScopeHandler(scope)
+
+        self.assertTrue(handler._scope_allows_target(data_id="kb-a::documents/one.md"))
+        self.assertFalse(handler._scope_allows_target(data_id="kb-a::documents/two.md"))
+        self.assertTrue(handler._scope_allows_target(data_id="kb-b::documents/any.md"))
+        self.assertFalse(handler._scope_allows_target(data_id="kb-c::documents/any.md"))
+        self.assertEqual(
+            handler._scope_search_kwargs()["scope_targets"],
+            scope["targets"],
+        )
+
+    def test_selection_scope_prompt_uses_only_display_labels(self):
+        prompt = agentmain.knowledge_scope_prompt({
+            "mode": "selection",
+            "targets": [
+                {
+                    "kb_id": "internal-kb-id",
+                    "kb_name": "论文",
+                    "documents": [{
+                        "data_id": "internal::documents/report.md",
+                        "title": "研究报告.pdf",
+                    }],
+                },
+            ],
+        })
+
+        self.assertIn("论文", prompt)
+        self.assertIn("研究报告.pdf", prompt)
+        self.assertNotIn("internal-kb-id", prompt)
+        self.assertNotIn("internal::documents/report.md", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
