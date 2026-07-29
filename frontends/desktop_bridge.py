@@ -103,7 +103,7 @@ def _hot_reload_paths(*, frontend: bool) -> tuple[Path, ...]:
     # The effective GA core may be an external checkout. Include its top-level
     # modules and the code/plugin directories that can be imported at runtime.
     paths.extend(_walk_source_files(DEFAULT_GA_ROOT, recursive=False))
-    for name in ("ga_cli", "reflect", "plugins"):
+    for name in ("ga_cli", "reflect", "plugins", "knowledge_base"):
         paths.extend(_walk_source_files(DEFAULT_GA_ROOT / name, recursive=True))
 
     if frontend:

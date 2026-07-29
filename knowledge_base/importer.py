@@ -36,7 +36,17 @@ IMAGE_EXTS = mineru.IMAGE_EXTS
 SUPPORTED_EXTS = mineru.SUPPORTED_EXTS
 _IMAGE_SUFFIXES = tuple(sorted(IMAGE_EXTS | {".tif", ".tiff"}))
 _MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
-_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+_MD_LINK_RE = re.compile(
+    r"(?<!!)\[([^\]\r\n]+)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)"
+)
+_IMAGE_SUFFIX_RE = re.compile(
+    r"(?i)(?:"
+    + "|".join(
+        re.escape(suffix)
+        for suffix in sorted(_IMAGE_SUFFIXES, key=len, reverse=True)
+    )
+    + r")"
+)
 
 
 def _path_is_within(root: Path, path: Path) -> bool:
@@ -78,11 +88,18 @@ def _compact_asset_name(path_part: str, source_image: Path) -> str:
 
 
 def _image_refs(body: str) -> list[tuple[re.Match[str], str]]:
-    matches: list[re.Match[str]] = []
-    matches.extend(_MD_IMAGE_RE.finditer(body or ""))
+    image_matches = list(_MD_IMAGE_RE.finditer(body or ""))
+    matches: list[re.Match[str]] = list(image_matches)
     # Image links without the ! prefix are accepted because MinerU sometimes
     # emits them for a page asset instead of Markdown image syntax.
-    matches.extend(_MD_LINK_RE.finditer(body or ""))
+    image_spans = [(match.start(), match.end()) for match in image_matches]
+    for match in _MD_LINK_RE.finditer(body or ""):
+        if any(
+            match.start() < end and match.end() > start
+            for start, end in image_spans
+        ):
+            continue
+        matches.append(match)
     matches.sort(key=lambda match: (match.start(), match.end()))
     return [(match, html.unescape(unquote(match.group(2).strip()))) for match in matches]
 
@@ -97,6 +114,122 @@ def _local_image_path(markdown_path: Path, raw: str) -> tuple[str, Path] | None:
     return path_part, (markdown_path.parent / path_part).resolve()
 
 
+def _canonical_image_reference(markdown_path: Path, image: Path) -> str:
+    return quote(
+        os.path.relpath(image, markdown_path.parent).replace(os.sep, "/"),
+        safe="/-._~",
+    )
+
+
+def _resolve_unique_image_basename(source_root: Path, path_part: str) -> Path | None:
+    """Resolve a flattened MinerU asset only when its basename is unique."""
+    name = Path(path_part).name.casefold()
+    if not name:
+        return None
+    candidates = sorted(
+        {
+            path.resolve()
+            for path in source_root.rglob("*")
+            if path.is_file() and path.name.casefold() == name
+        },
+        key=lambda path: path.as_posix().casefold(),
+    )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _split_concatenated_image_target(
+    markdown_path: Path,
+    source_root: Path,
+    raw: str,
+) -> list[str] | None:
+    """Return local image targets when MinerU joined consecutive links.
+
+    A small number of MinerU Markdown results have two image links joined at
+    the image suffix, for example ``first.jpgsecond.assets/second.jpg``.
+    Splitting on a suffix alone would corrupt legitimate URLs, so every
+    candidate segment must resolve to a real image below the extracted source
+    directory. MinerU can also flatten an asset directory while leaving its
+    old prefix in Markdown; in that case a unique basename is accepted and
+    rewritten to the real relative path. ``None`` means the target is either
+    valid as-is or cannot be unambiguously repaired.
+    """
+    value = raw.strip().strip("<>")
+    if not value or "?" in value or "#" in value:
+        return None
+    if re.match(r"^[a-z][a-z0-9+.-]*:", value, re.I):
+        return None
+
+    # Do not reinterpret a legitimate local filename that happens to contain
+    # another image suffix in its name.
+    decoded_value = html.unescape(unquote(value))
+    whole_local = _local_image_path(markdown_path, decoded_value)
+    if whole_local is not None:
+        _path_part, whole_image = whole_local
+        if _path_is_within(source_root, whole_image) and whole_image.is_file():
+            return None
+
+    boundaries = sorted({match.end() for match in _IMAGE_SUFFIX_RE.finditer(value)})
+    if len(boundaries) < 2:
+        return None
+
+    memo: dict[int, list[str] | None] = {}
+
+    def resolve(start: int) -> list[str] | None:
+        if start in memo:
+            return memo[start]
+        for end in boundaries:
+            if end <= start:
+                continue
+            part = value[start:end]
+            decoded = html.unescape(unquote(part))
+            local = _local_image_path(markdown_path, decoded)
+            if local is None:
+                continue
+            path_part, image = local
+            if not _path_is_within(source_root, image) or not image.is_file():
+                image = _resolve_unique_image_basename(source_root, path_part)
+                if image is None or not _path_is_within(source_root, image):
+                    continue
+            canonical = _canonical_image_reference(markdown_path, image)
+            if end == len(value):
+                result = [canonical]
+            else:
+                rest = resolve(end)
+                result = [canonical, *rest] if rest else None
+            if result:
+                memo[start] = result
+                return result
+        memo[start] = None
+        return None
+
+    parts = resolve(0)
+    return parts if parts and len(parts) > 1 else None
+
+
+def _normalize_mineru_image_links(
+    markdown_path: Path,
+    source_root: Path,
+    body: str,
+) -> str:
+    """Repair MinerU links that contain multiple local image paths."""
+    replacements: list[tuple[int, int, str]] = []
+    for match, raw in _image_refs(body):
+        parts = _split_concatenated_image_target(markdown_path, source_root, raw)
+        if not parts:
+            continue
+        prefix = body[match.start():match.start(2)]
+        suffix = body[match.end(2):match.end()]
+        links = [
+            prefix + part + (")" if index < len(parts) - 1 else suffix)
+            for index, part in enumerate(parts)
+        ]
+        replacements.append((match.start(), match.end(), "\n".join(links)))
+
+    for start, end, replacement in reversed(replacements):
+        body = body[:start] + replacement + body[end:]
+    return body
+
+
 def _prepare_markdown(
     markdown_path: Path,
     source_root: Path,
@@ -107,6 +240,7 @@ def _prepare_markdown(
 ) -> tuple[str, int]:
     """Copy referenced images and rewrite their paths for a final Markdown."""
     body = read_textfile(str(markdown_path))
+    body = _normalize_mineru_image_links(markdown_path, source_root, body)
     replacements: list[tuple[int, int, str]] = []
     copied: set[Path] = set()
     namespace = asset_namespace or Path(".")
@@ -326,6 +460,7 @@ class DocumentProcessor:
                     body = read_textfile(str(path))
                 except Exception:
                     continue
+                body = _normalize_mineru_image_links(path, source_root, body)
                 for _match, raw in _image_refs(body):
                     local = _local_image_path(path, raw)
                     if local is None:

@@ -17,8 +17,12 @@ from .cancellation import KnowledgeBaseCancelled, check_cancelled
 
 
 _MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
-_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
-_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff")
+_MD_LINK_RE = re.compile(
+    r"(?<!!)\[([^\]\r\n]+)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)"
+)
+_IMAGE_EXTS = (
+    ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp", ".tif", ".tiff"
+)
 _REF_CANDIDATE_RE = re.compile(
     r"(?:图|表)\s*[0-9０-９]{1,3}(?:\s*[-－–—.．·]\s*[0-9０-９]{1,3}){0,3}"
 )
@@ -326,14 +330,21 @@ class ImageAssetProcessor:
         return DocumentImageIndex.build(self, body)
 
     def scan_image_refs(self, body: str):
+        image_matches = list(_MD_IMAGE_RE.finditer(body or ""))
         out = []
-        for match in _MD_IMAGE_RE.finditer(body or ""):
+        image_spans = [(match.start(), match.end()) for match in image_matches]
+        for match in image_matches:
             raw = html.unescape(unquote((match.group(2) or "").strip()))
             if not raw or re.match(r"^[a-z][a-z0-9+.-]*:", raw, re.I):
                 continue
             out.append({"alt": (match.group(1) or "").strip(), "path": raw, "start": match.start(), "end": match.end()})
         seen = {(row["start"], row["end"], row["path"]) for row in out}
         for match in _MD_LINK_RE.finditer(body or ""):
+            if any(
+                match.start() < end and match.end() > start
+                for start, end in image_spans
+            ):
+                continue
             raw = html.unescape(unquote((match.group(2) or "").strip()))
             if not raw or re.match(r"^[a-z][a-z0-9+.-]*:", raw, re.I):
                 continue
