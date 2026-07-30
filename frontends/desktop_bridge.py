@@ -406,6 +406,7 @@ class AgentManager:
     def __init__(self):
         self.lock = threading.RLock()
         self._mykey_write_lock = threading.RLock()
+        self._vision_probe_tokens: dict[str, dict[str, Any]] = {}
         self.ga_root = str(DEFAULT_GA_ROOT)
         self.config: Dict[str, Any] = {}
         self.sessions: Dict[str, Session] = {}
@@ -709,7 +710,58 @@ class AgentManager:
             return text[:s].rstrip() + "\n" + text[e:].lstrip("\n")
         return text[:s] + f"{var} = {self._format_py_dict(cfg)}\n" + text[e:]
 
-    def _build_cfg(self, data: dict, existing: Optional[dict] = None, *, require_key: bool = True) -> dict:
+    @staticmethod
+    def _bool_value(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _vision_probe_fingerprint(cfg: dict, protocol: str) -> str:
+        material = json.dumps(
+            {
+                "apikey": str(cfg.get("apikey") or ""),
+                "apibase": str(cfg.get("apibase") or "").rstrip("/"),
+                "model": str(cfg.get("model") or ""),
+                "protocol": str(protocol or "").strip().lower(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
+
+    @staticmethod
+    def _vision_probe_protocol(value: Any) -> str:
+        protocol = str(value or "oai").strip().lower()
+        return "claude" if protocol in {"claude", "anthropic", "messages", "anthropic_messages"} else "oai"
+
+    def _vision_probe_store(self) -> dict[str, dict[str, Any]]:
+        store = getattr(self, "_vision_probe_tokens", None)
+        if store is None:
+            store = {}
+            self._vision_probe_tokens = store
+        now = time.time()
+        for token, item in list(store.items()):
+            if float(item.get("expires", 0) or 0) <= now:
+                store.pop(token, None)
+        return store
+
+    def _require_vision_probe(self, data: dict, cfg: dict) -> None:
+        token = str(data.get("visionProbeToken") or data.get("vision_probe_token") or "").strip()
+        protocol = self._vision_probe_protocol(data.get("protocol"))
+        expected = self._vision_probe_fingerprint(cfg, protocol)
+        item = self._vision_probe_store().get(token)
+        if not item or item.get("fingerprint") != expected:
+            raise ValueError("vision_probe_required")
+
+    def _build_cfg(
+        self,
+        data: dict,
+        existing: Optional[dict] = None,
+        *,
+        require_key: bool = True,
+        require_vision_probe: bool = True,
+    ) -> dict:
         apibase, model = str(data.get("apibase") or "").strip(), str(data.get("model") or "").strip()
         if not apibase or not model:
             raise ValueError("apibase and model are required")
@@ -720,12 +772,39 @@ class AgentManager:
         # reasoning_effort / fake_cc_system_prompt / thinking_type …），避免 GUI 编辑时丢失
         cfg: Dict[str, Any] = dict(existing or {})
         cfg.update({"apikey": apikey, "apibase": apibase, "model": model})
-        raw_vision = data.get("vision", False)
-        cfg["vision"] = (
-            raw_vision
-            if isinstance(raw_vision, bool)
-            else str(raw_vision).strip().lower() in {"1", "true", "yes", "on"}
-        )
+        if "api_mode" in data or "apiMode" in data:
+            raw_api_mode = str(data.get("api_mode", data.get("apiMode", "")) or "").strip().lower().replace("-", "_")
+            if raw_api_mode in {"chat", "chat_completions", "chatcompletion", "chat_completions_api"}:
+                cfg["api_mode"] = "chat_completions"
+            elif raw_api_mode in {"response", "responses"}:
+                protocol = self._vision_probe_protocol(data.get("protocol"))
+                if protocol == "claude":
+                    raise ValueError("api_mode_invalid_for_protocol")
+                cfg["api_mode"] = "responses"
+            else:
+                raise ValueError("api_mode_invalid")
+        vision_mode = str(
+            data.get("vision_mode") or data.get("visionMode") or ""
+        ).strip().lower()
+        if vision_mode not in {"text", "multimodal"}:
+            raise ValueError("vision_mode_required")
+        cfg["vision_mode"] = vision_mode
+        cfg["vision"] = vision_mode == "multimodal"
+        cfg["vision_verified"] = False
+        if vision_mode == "multimodal":
+            if require_vision_probe:
+                protocol = self._vision_probe_protocol(data.get("protocol"))
+                existing_verified = bool(
+                    existing
+                    and str(existing.get("vision_mode") or "").strip().lower() == "multimodal"
+                    and existing.get("vision") is True
+                    and existing.get("vision_verified") is True
+                    and self._vision_probe_fingerprint(existing, protocol)
+                    == self._vision_probe_fingerprint(cfg, protocol)
+                )
+                if not existing_verified:
+                    self._require_vision_probe(data, cfg)
+            cfg["vision_verified"] = True
         if "name" in data:
             name = str(data.get("name") or "").strip()
             if name:
@@ -793,11 +872,50 @@ class AgentManager:
         provider_settings = self._kb_provider_settings()
         embedding = provider_settings.embedding_config()
         mineru = provider_settings.mineru_config()
+        vision = provider_settings.vision_config()
+        embedding_api_key = str(
+            embedding.get("apikey") or embedding.get("api_key") or ""
+        ).strip()
+        mineru_api_key = str(
+            mineru.get("api_key")
+            or mineru.get("apikey")
+            or mineru.get("token")
+            or ""
+        ).strip()
+        selected_profile = str(vision.get("model_profile") or "").strip()
+        available_profiles = [
+            {
+                "varName": profile.get("varName") or "",
+                "name": profile.get("name") or profile.get("model") or "",
+                "model": profile.get("model") or "",
+            }
+            for profile in self.list_model_profiles()
+            if profile.get("kind") == "native"
+            and profile.get("vision")
+            and profile.get("visionVerified")
+            and str(profile.get("apiMode") or "chat_completions").strip().lower() == "chat_completions"
+        ]
+        selected = next(
+            (profile for profile in available_profiles if profile["varName"] == selected_profile),
+            None,
+        )
+        if selected is None and selected_profile:
+            # Model blocks can be renumbered when a stale mykey.py entry is
+            # removed (for example native_oai_config1 -> native_oai_config).
+            # Keep the persisted file untouched, but recover an unambiguous
+            # current profile so the wizard does not appear blank.
+            selector_base = re.sub(r"\d+$", "", selected_profile)
+            renamed = [
+                profile for profile in available_profiles
+                if re.sub(r"\d+$", "", profile["varName"]) == selector_base
+            ]
+            if len(renamed) == 1:
+                selected = renamed[0]
+                selected_profile = selected["varName"]
         return {
             "embedding": {
-                "apiKeyConfigured": bool(
-                    str(embedding.get("apikey") or embedding.get("api_key") or "").strip()
-                ),
+                "apiKey": embedding_api_key,
+                "apiKeyConfigured": bool(embedding_api_key),
                 "baseUrl": str(
                     embedding.get("apibase")
                     or embedding.get("base_url")
@@ -812,7 +930,8 @@ class AgentManager:
                 ),
             },
             "mineru": {
-                "apiKeyConfigured": bool(str(mineru.get("api_key") or "").strip()),
+                "apiKey": mineru_api_key,
+                "apiKeyConfigured": bool(mineru_api_key),
                 "baseUrl": str(
                     mineru.get("base_url") or provider_settings.MINERU_BASE_URL
                 ).strip().rstrip("/"),
@@ -820,6 +939,12 @@ class AgentManager:
                     mineru.get("model_version")
                     or provider_settings.MINERU_MODEL_VERSION
                 ).strip(),
+            },
+            "vision": {
+                "enabled": vision.get("enabled") if "enabled" in vision else None,
+                "modelProfile": selected_profile,
+                "modelProfileName": selected.get("name") if selected else "",
+                "availableProfiles": available_profiles,
             },
         }
 
@@ -836,6 +961,8 @@ class AgentManager:
         old_embedding = dict(old_embedding) if isinstance(old_embedding, dict) else {}
         old_mineru = raw.get("mineru_config")
         old_mineru = dict(old_mineru) if isinstance(old_mineru, dict) else {}
+        old_vision = raw.get("kb_vision_config")
+        old_vision = dict(old_vision) if isinstance(old_vision, dict) else {}
         current_embedding = provider_settings.embedding_config()
         current_mineru = provider_settings.mineru_config()
         text = self._mykey_file().read_text(encoding="utf-8")
@@ -932,6 +1059,36 @@ class AgentManager:
                 cfg.pop("api_key", None)
             updates["mineru_config"] = cfg
 
+        if "vision" in data:
+            incoming = data.get("vision")
+            if not isinstance(incoming, dict):
+                raise ValueError("knowledge-base image understanding configuration must be an object")
+            if "enabled" not in incoming:
+                raise ValueError("vision_enabled_required")
+            enabled = self._bool_value(incoming.get("enabled"))
+            selected_profile = str(
+                incoming.get("modelProfile")
+                or incoming.get("model_profile")
+                or old_vision.get("model_profile")
+                or ""
+            ).strip()
+            cfg = {"enabled": enabled}
+            if enabled:
+                available = {
+                    str(profile.get("varName") or ""): profile
+                    for profile in self.list_model_profiles()
+                    if profile.get("kind") == "native"
+                    and profile.get("vision")
+                    and profile.get("visionVerified")
+                    and str(profile.get("apiMode") or "chat_completions").strip().lower() == "chat_completions"
+                }
+                if not selected_profile or selected_profile not in available:
+                    raise ValueError("vision_model_required")
+                cfg["model_profile"] = selected_profile
+            elif selected_profile:
+                cfg["model_profile"] = selected_profile
+            updates["kb_vision_config"] = cfg
+
         if not updates:
             raise ValueError("no knowledge-base configuration supplied")
         for var, cfg in updates.items():
@@ -988,25 +1145,56 @@ class AgentManager:
             except (TypeError, ValueError):
                 raise ValueError("profile not found") from None
         probe_data = dict(data)
-        probe_data["vision"] = True
-        cfg = self._build_cfg(probe_data, existing, require_key=False)
+        probe_data["vision_mode"] = "multimodal"
+        cfg = self._build_cfg(
+            probe_data,
+            existing,
+            require_key=False,
+            require_vision_probe=False,
+        )
         if not str(cfg.get("apikey") or "").strip():
             raise ValueError("apikey is required")
         self.ensure_ga_import_path()
         from llmcore import probe_model_vision
         protocol = str(data.get("protocol") or "").strip().lower()
-        if protocol not in {"oai", "openai", "claude", "anthropic"}:
+        if protocol in {"claude", "anthropic", "messages", "anthropic_messages"}:
+            protocol = "claude"
+        elif protocol not in {"oai", "openai"}:
             protocol = "claude" if "claude" in var.lower() else "oai"
         probe_model_vision(cfg, protocol)
-        return {"ok": True, "vision": True, "visionVerified": True}
+        token = uuid.uuid4().hex
+        self._vision_probe_store()[token] = {
+            "fingerprint": self._vision_probe_fingerprint(cfg, protocol),
+            "expires": time.time() + 900,
+        }
+        return {
+            "ok": True,
+            "visionMode": "multimodal",
+            "visionVerified": True,
+            "probeToken": token,
+        }
 
     def get_model_profile(self, profile_id: int) -> dict:
         var, cfg = self._profile_at(profile_id)
-        ks = ("model", "apibase", "apikey", "name", "max_retries", "connect_timeout", "read_timeout")
-        out = {"id": profile_id, "varName": var, **{k: cfg.get(k, d) for k, d in zip(ks, ("", "", "", "", 5, 15, 300))}}
+        ks = ("model", "apibase", "name", "max_retries", "connect_timeout", "read_timeout")
+        out = {"id": profile_id, "varName": var, **{k: cfg.get(k, d) for k, d in zip(ks, ("", "", "", 5, 15, 300))}}
+        # 配置向导卡片需要把已保存的 Key 回填到 password 输入框；浏览器负责
+        # 视觉遮挡。设置页不会把这个字段写回输入框。
+        out["apiKey"] = str(cfg.get("apikey") or cfg.get("api_key") or "").strip()
+        out["apiKeyConfigured"] = bool(str(cfg.get("apikey") or cfg.get("api_key") or "").strip())
         out["stream"] = cfg.get("stream", True)
-        out["vision"] = bool(cfg.get("vision", False))
-        out["visionVerified"] = "vision" in cfg
+        out["protocol"] = "claude" if "claude" in var.lower() else "oai"
+        out["apiMode"] = str(cfg.get("api_mode") or "chat_completions").strip().lower()
+        out["visionMode"] = str(cfg.get("vision_mode") or "").strip().lower()
+        out["vision"] = (
+            out["visionMode"] == "multimodal"
+            and bool(cfg.get("vision", False))
+            and bool(cfg.get("vision_verified", False))
+        )
+        out["visionVerified"] = (
+            out["visionMode"] == "text"
+            or (out["visionMode"] == "multimodal" and bool(cfg.get("vision_verified", False)))
+        )
         return out
 
     @_serialize_mykey_mutation
@@ -1102,14 +1290,16 @@ class AgentManager:
         active = self.config.get("llmNo", 0)
         out = []
         vision_by_name = {
-            self._base_display_name(k, mk.get(k) if isinstance(mk.get(k), dict) else {}): bool(
-                (mk.get(k) or {}).get("vision", False)
+            self._base_display_name(k, mk.get(k) if isinstance(mk.get(k), dict) else {}): (
+                (mk.get(k) or {}).get("vision_mode") == "multimodal"
+                and bool((mk.get(k) or {}).get("vision", False))
+                and bool((mk.get(k) or {}).get("vision_verified", False))
             )
             for k in keys if "mixin" not in k
         }
         vision_known_by_name = {
             self._base_display_name(k, mk.get(k) if isinstance(mk.get(k), dict) else {}): (
-                "vision" in (mk.get(k) or {})
+                str((mk.get(k) or {}).get("vision_mode") or "").strip().lower() in {"text", "multimodal"}
             )
             for k in keys if "mixin" not in k
         }
@@ -1130,8 +1320,20 @@ class AgentManager:
                             "apiKeyConfigured": bool(
                                 str(cfg.get("apikey") or cfg.get("api_key") or "").strip()
                             ),
-                            "vision": bool(cfg.get("vision", False)),
-                            "visionVerified": "vision" in cfg,
+                            "visionMode": str(cfg.get("vision_mode") or "").strip().lower(),
+                            "vision": (
+                                str(cfg.get("vision_mode") or "").strip().lower() == "multimodal"
+                                and bool(cfg.get("vision", False))
+                                and bool(cfg.get("vision_verified", False))
+                            ),
+                            "visionVerified": (
+                                str(cfg.get("vision_mode") or "").strip().lower() == "text"
+                                or (
+                                    str(cfg.get("vision_mode") or "").strip().lower() == "multimodal"
+                                    and bool(cfg.get("vision_verified", False))
+                                )
+                            ),
+                            "apiMode": str(cfg.get("api_mode") or "chat_completions").strip().lower(),
                             "group": "native" if "native" in k else "std",
                             "inMixin": name in all_mixin_members, "active": i == active})
         return out

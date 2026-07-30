@@ -15,8 +15,8 @@
 #
 #  Native = tools go in the API's native `tool` field (function calling), same
 #  way Claude Code and Codex do it. Recommended for GPT / Claude / Gemini.
-#  Image input is opt-in. Enable "Supports image input" in Desktop model
-#  settings; saving performs a real visual check and writes vision=True.
+#  Image input is explicit: choose text-only or multimodal in Desktop model
+#  settings. Multimodal profiles must pass a real visual check before saving.
 #
 #  Tip: runtime overrides via `/session.<attr>=<val>` in the REPL, e.g.
 #      /session.reasoning_effort=high
@@ -41,15 +41,13 @@
 # 'enabled': True turns on build-time image analysis: a vision model reads each
 # image and writes its caption/table/description into the index so retrieval can
 # match on it (off = images kept as placeholders only, not searchable text).
-# Leave apibase/apikey/model empty to reuse native_oai/native_claude (the model
-# must accept image input); or point to a dedicated vision model. The env var
-# GA_KB_IMAGE_ANALYSIS, when explicitly set, takes precedence over this flag.
+# Select a verified multimodal model profile; it may be different from the
+# current chat profile. Do not use an unverified text model for image analysis.
 # kb_vision_config = {
 #     'enabled': True,
-#     # 'protocol': 'openai',  # or 'anthropic' for native Anthropic Messages
-#     # 'apibase': 'https://.../v1',
-#     # 'apikey': '<your-vision-api-key>',
-#     # 'model': '<vision-capable-model>',
+#     'model_profile': 'native_oai_vision',
+#     # 'max_tokens': 8192,
+#     # 'max_retries': 4,
 # }
 
 
@@ -62,7 +60,7 @@ native_claude_config = {
     'apikey': 'sk-ant-<your-anthropic-key>',
     'apibase': 'https://api.anthropic.com',
     'model': 'claude-opus-4-7[1m]',           # or 'claude-sonnet-4-6'
-    'vision': False,                          # enable and verify in Desktop settings
+    'vision_mode': 'text',                    # or 'multimodal' after verification
     'thinking_type': 'adaptive',              # 'adaptive' | 'enabled' | 'disabled'
     # 'thinking_budget_tokens': 32768,        # required if thinking_type='enabled'
     # 'max_retries': 3,
@@ -78,7 +76,7 @@ native_oai_config = {
     'apikey': 'sk-<your-openai-key>',
     'apibase': 'https://api.openai.com/v1',
     'model': 'gpt-5.4',                       # or 'o4', 'gpt-5.3-codex', etc.
-    'vision': False,                          # enable and verify in Desktop settings
+    'vision_mode': 'text',                    # or 'multimodal' after verification
     'api_mode': 'chat_completions',           # or 'responses' for /v1/responses
     # 'reasoning_effort': 'high',             # none|minimal|low|medium|high|xhigh
     # 'max_retries': 3,

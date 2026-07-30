@@ -2758,9 +2758,12 @@ function refreshQuickstartStates() {
   );
   const embeddingReady = !!quickstartKbConfig?.embedding?.apiKeyConfigured;
   const mineruReady = !!quickstartKbConfig?.mineru?.apiKeyConfigured;
+  const visionReady = quickstartKbConfig?.vision?.enabled === true
+    && !!quickstartKbConfig?.vision?.modelProfile;
   setQuickstartState('pq-model-state', modelReady);
   setQuickstartState('pq-embedding-state', embeddingReady);
   setQuickstartState('pq-mineru-state', mineruReady);
+  setQuickstartState('pq-vision-state', visionReady);
   const knowledgeGroup = document.querySelector('[data-pq-group="knowledge"]');
   const hasKnowledgeBase = kbStatusKbs().length > 0;
   if (knowledgeGroup && hasKnowledgeBase && (!embeddingReady || !mineruReady)) {
@@ -2769,6 +2772,13 @@ function refreshQuickstartStates() {
     if (userChoice == null) applyPqGroupState(knowledgeGroup, false);
   }
 }
+document.querySelectorAll('#kb-quickstart-vision-form').forEach(form => {
+  const enabled = form.elements.namedItem('enabled');
+  const select = form.elements.namedItem('modelProfile');
+  enabled?.addEventListener('change', () => {
+    if (select) select.required = !!enabled.checked;
+  });
+});
 if (pqEl) pqEl.addEventListener('click', (e) => {
   const btn = e.target.closest('.pq-btn[data-provider], .pq-btn[data-setup]');
   if (!btn) return;
@@ -6181,10 +6191,48 @@ const MODEL_ACT_EDIT = GA_ICON('pencilSimple');
 const MODEL_ACT_DEL = GA_ICON('trash');
 let editingModelId = null;
 
+function setSecretInputVisible(input, visible) {
+  if (!input) return;
+  input.type = visible ? 'text' : 'password';
+  input.dataset.secretVisible = visible ? 'true' : 'false';
+  const toggle = input.parentElement?.querySelector('.secret-input-toggle');
+  if (!toggle) return;
+  const label = visible ? t('model.hideApiKey') : t('model.showApiKey');
+  toggle.innerHTML = GA_ICON(visible ? 'eyeSlash' : 'eye');
+  toggle.title = label;
+  toggle.setAttribute('aria-label', label);
+  toggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
+}
+
+function initSecretInput(input) {
+  if (!input || input.dataset.secretToggleReady === 'true') return;
+  input.dataset.secretToggleReady = 'true';
+  const shell = document.createElement('span');
+  shell.className = 'secret-input-shell';
+  input.parentNode.insertBefore(shell, input);
+  shell.appendChild(input);
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'secret-input-toggle';
+  toggle.addEventListener('click', () => {
+    setSecretInputVisible(input, input.type !== 'text');
+    input.focus();
+  });
+  shell.appendChild(toggle);
+  setSecretInputVisible(input, false);
+}
+
+function initSecretInputs(root = document) {
+  root.querySelectorAll('input[type="password"]').forEach(initSecretInput);
+}
+
+initSecretInputs();
+
 function setModelApikeyMode(isAdd) {
   const apikey = document.getElementById('model-apikey-input');
   const apikeyReq = document.querySelector('#model-apikey-label .field-req');
   if (!apikey) return;
+  setSecretInputVisible(apikey, false);
   apikey.required = isAdd;
   apikey.dataset.i18nPh = isAdd ? 'model.apikeyPh' : 'model.apikeyKeep';
   if (isAdd) apikey.removeAttribute('data-optional-ph');
@@ -6225,28 +6273,55 @@ const PROVIDER_MODEL_OPTIONS = {
   ],
 };
 
-function modelVisionValue(form) {
-  return form?.querySelector('#model-vision-value');
+function modelVisionMode(form = document.getElementById('add-model-form')) {
+  return form?.querySelector('input[name="vision_mode"]')?.value || '';
 }
 
-function setModelVisionState({ success = false, unsupported = false, error = false, busy = false } = {}) {
+function setModelVisionMode(mode = '') {
+  const form = document.getElementById('add-model-form');
+  const value = form?.querySelector('input[name="vision_mode"]');
+  const normalized = ['text', 'multimodal'].includes(mode) ? mode : '';
+  if (value) value.value = normalized;
+  form?.querySelectorAll('[data-vision-mode]').forEach(button => {
+    const active = button.dataset.visionMode === normalized;
+    button.classList.toggle('is-selected', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  return normalized;
+}
+
+function setModelVisionState({ success = false, error = false, busy = false, clear = false } = {}) {
   const form = document.getElementById('add-model-form');
   const button = document.getElementById('model-vision-probe');
+  const buttonLabel = document.getElementById('model-vision-probe-label');
   const status = document.getElementById('model-vision-status');
-  const value = modelVisionValue(form);
+  const token = document.getElementById('model-vision-probe-token');
+  const verified = document.getElementById('model-vision-verified');
+  const mode = modelVisionMode(form);
   if (!form || !button || !status) return;
-  if (value) value.value = success ? 'true' : 'false';
-  button.disabled = busy || unsupported;
-  button.hidden = unsupported;
+  if (clear) {
+    if (token) token.value = '';
+    if (verified) verified.value = 'false';
+  } else if (success) {
+    if (verified) verified.value = 'true';
+  }
+  // 仅文本模式保留按钮位置，但不可点击；只有真实请求中才使用等待光标。
+  button.disabled = busy || mode !== 'multimodal';
+  button.hidden = mode === '';
+  button.dataset.busy = busy ? 'true' : 'false';
   button.classList.toggle('is-success', success);
   button.classList.toggle('is-error', error);
-  button.textContent = busy
+  if (buttonLabel) buttonLabel.textContent = busy
     ? t('model.visionTesting')
-    : t('model.visionProbe');
-  status.textContent = unsupported
-    ? t('model.visionUnsupported')
-    : (error ? t('model.visionProbeFailed') : (success ? t('model.visionSuccess') : t('model.visionPending')));
-  status.dataset.state = unsupported ? 'unsupported' : (error ? 'error' : (success ? 'success' : 'pending'));
+    : (success ? t('model.visionProbeAgain') : t('model.visionProbe'));
+  const provider = form.dataset.provider || '';
+  let statusText = t('model.visionPending');
+  if (mode === 'text') statusText = t('model.visionTextSelected');
+  else if (provider === 'deepseek') statusText = t('model.visionUnsupported');
+  else if (error) statusText = t('model.visionProbeFailed');
+  else if (success) statusText = t('model.visionSuccess');
+  status.textContent = statusText;
+  status.dataset.state = mode === 'text' ? 'text' : (provider === 'deepseek' ? 'unsupported' : (error ? 'error' : (success ? 'success' : 'pending')));
 }
 
 function populateProviderModelOptions(provider, selected = '') {
@@ -6270,16 +6345,31 @@ function setModelSuggestionsOpen(open) {
   input.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
+function syncModelApiMode() {
+  const form = document.getElementById('add-model-form');
+  if (!form) return;
+  const protocol = form.querySelector('input[name="protocol"]:checked')?.value || 'oai';
+  const responses = form.querySelector('input[name="api_mode"][value="responses"]');
+  const chat = form.querySelector('input[name="api_mode"][value="chat_completions"]');
+  const responsesOption = responses?.closest('.seg-opt');
+  const unsupported = protocol === 'claude';
+  if (responses) responses.disabled = unsupported;
+  if (responsesOption) responsesOption.setAttribute('aria-disabled', unsupported ? 'true' : 'false');
+  if (unsupported && responses?.checked && chat) chat.checked = true;
+}
+
 function setModelFormMode(provider = '') {
   const form = document.getElementById('add-model-form');
   const input = form?.querySelector('input[name="model"]');
   const apibase = document.getElementById('model-apibase-input');
   const suggestions = document.getElementById('model-preset-options');
   const capability = document.getElementById('model-capability-row');
+  const advanced = form?.querySelectorAll('.model-advanced-field');
   if (!form) return;
   const key = String(provider || '').trim().toLowerCase();
   form.dataset.provider = key;
   form.dataset.protocol = PROVIDER_PRESETS[key]?.protocol || '';
+  advanced?.forEach(field => { field.hidden = !!key; });
   if (apibase) apibase.readOnly = !!key;
   if (key && PROVIDER_MODEL_OPTIONS[key]) {
     populateProviderModelOptions(key, input?.value || PROVIDER_PRESETS[key]?.model || '');
@@ -6292,14 +6382,22 @@ function setModelFormMode(provider = '') {
     suggestions.hidden = true;
   }
   if (input) input.hidden = false;
-  if (capability) capability.hidden = key === 'deepseek';
-  setModelVisionState({ success: false, unsupported: key === 'deepseek' });
+  if (capability) capability.hidden = false;
+  const multimodalButton = form?.querySelector('[data-vision-mode="multimodal"]');
+  if (multimodalButton) {
+    multimodalButton.disabled = key === 'deepseek';
+    if (key === 'deepseek' && modelVisionMode(form) === 'multimodal') setModelVisionMode('');
+  }
+  setModelVisionState({ clear: true });
   if (capability) capability.dataset.provider = key;
+  syncModelApiMode();
 }
 
 function invalidateModelVision() {
-  const provider = document.getElementById('add-model-form')?.dataset.provider || '';
-  setModelVisionState(provider === 'deepseek' ? { unsupported: true } : {});
+  const form = document.getElementById('add-model-form');
+  const mode = modelVisionMode(form);
+  if (mode === 'multimodal') setModelVisionState({ clear: true });
+  else setModelVisionState();
 }
 
 async function probeModelVision() {
@@ -6313,12 +6411,14 @@ async function probeModelVision() {
     return;
   }
   payload.protocol = payload.protocol || form.dataset.protocol || 'oai';
-  payload.vision = true;
+  payload.vision_mode = 'multimodal';
   if (editingModelId != null) payload.profileId = editingModelId;
   setModelVisionState({ busy: true });
   if (errorEl) errorEl.hidden = true;
   try {
-    await bridgeFetch('/model-profiles/vision-probe', { method: 'POST', body: payload });
+    const result = await bridgeFetch('/model-profiles/vision-probe', { method: 'POST', body: payload });
+    const token = document.getElementById('model-vision-probe-token');
+    if (token) token.value = result?.probeToken || '';
     setModelVisionState({ success: true });
   } catch (error) {
     setModelVisionState({ error: true });
@@ -6362,6 +6462,16 @@ document.querySelectorAll('#add-model-form input[name="model"], #add-model-form 
   .forEach(input => input.addEventListener('input', () => {
     invalidateModelVision();
   }));
+document.querySelectorAll('#add-model-form [data-vision-mode]').forEach(button => {
+  button.addEventListener('click', () => {
+    if (button.disabled) return;
+    const mode = setModelVisionMode(button.dataset.visionMode || '');
+    setModelVisionState({ clear: mode === 'multimodal' });
+  });
+});
+document.querySelectorAll('#add-model-form input[name="protocol"]').forEach(input => {
+  input.addEventListener('change', syncModelApiMode);
+});
 
 // 在「添加模型」弹窗顶部显示/隐藏接入指引横幅。key 为 null 时隐藏。
 function setModelGuide(key) {
@@ -6385,9 +6495,26 @@ window.gaRefreshModelGuide = () => {
   if (box && !box.hidden && box.dataset.provider) setModelGuide(box.dataset.provider);
 };
 
-function openAddModelFormForProvider(key) {
+function providerCardProfile(key) {
+  const needle = String(key || '').toLowerCase();
+  const matches = state.modelProfiles.filter(profile => {
+    if (profile.kind !== 'native') return false;
+    const haystack = `${profile.model || ''} ${profile.name || ''} ${profile.varName || ''}`.toLowerCase();
+    return needle === 'qwen'
+      ? /qwen|通义|dashscope/.test(haystack)
+      : needle === 'deepseek' && /deepseek/.test(haystack);
+  });
+  return matches.find(profile => profile.active) || matches[0] || null;
+}
+
+async function openAddModelFormForProvider(key) {
   const p = PROVIDER_PRESETS[key];
   if (!p) return openAddModelForm();
+  const existing = providerCardProfile(key);
+  if (existing) {
+    await openEditModelForm(existing.id, { revealApiKey: true, providerKey: key });
+    return;
+  }
   editingModelId = null;
   const form = document.getElementById('add-model-form');
   const title = document.getElementById('model-form-title');
@@ -6395,12 +6522,16 @@ function openAddModelFormForProvider(key) {
   if (title) title.dataset.i18n = 'modal.addModel';
   if (form) {
     form.reset();
+    setModelVisionMode('');
     form.model.value = p.model || '';
     form.apibase.value = p.apibase || '';
     form.name.value = p.name || '';
+    const protocol = form.querySelector(`input[name="protocol"][value="${p.protocol || 'oai'}"]`);
+    if (protocol) protocol.checked = true;
+    const apiMode = form.querySelector('input[name="api_mode"][value="chat_completions"]');
+    if (apiMode) apiMode.checked = true;
   }
   setModelFormMode(key);
-  if (key === 'deepseek') setModelVisionState({ unsupported: true });
   setModelApikeyMode(true);
   if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
   setModelGuide(key);
@@ -6416,19 +6547,21 @@ function openAddModelForm() {
   const title = document.getElementById('model-form-title');
   const errEl = document.getElementById('add-model-err');
   if (title) title.dataset.i18n = 'modal.addModel';
-  if (form) form.reset();
+  if (form) {
+    form.reset();
+    setModelVisionMode('');
+  }
   setModelFormMode('');
-  setModelVisionState({});
   setModelApikeyMode(true);
   setModelGuide(null);
   if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
   openModal('add-model-modal');
   applyI18n();
 }
-async function openEditModelForm(id) {
+async function openEditModelForm(id, { revealApiKey = false, providerKey = '' } = {}) {
   editingModelId = id;
   setModelGuide(null);
-  setModelFormMode('');
+  setModelFormMode(providerKey || '');
   const errEl = document.getElementById('add-model-err');
   if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
   try {
@@ -6442,14 +6575,35 @@ async function openEditModelForm(id) {
       form.model.value = p.model || '';
       form.apibase.value = p.apibase || '';
       form.name.value = p.name || '';
-      const vision = modelVisionValue(form);
-      if (vision) vision.value = p.vision ? 'true' : 'false';
+      form.dataset.protocol = p.protocol || 'oai';
+      const protocol = form.querySelector(`input[name="protocol"][value="${p.protocol || 'oai'}"]`);
+      if (protocol) protocol.checked = true;
+      const apiMode = form.querySelector(`input[name="api_mode"][value="${p.apiMode || 'chat_completions'}"]`);
+      if (apiMode) apiMode.checked = true;
+      const stream = form.querySelector(`input[name="stream"][value="${p.stream === false ? 'false' : 'true'}"]`);
+      if (stream) stream.checked = true;
+      form.max_retries.value = p.max_retries ?? 5;
+      form.connect_timeout.value = p.connect_timeout ?? 15;
+      form.read_timeout.value = p.read_timeout ?? 300;
+      setModelVisionMode(p.visionMode || '');
+      const token = document.getElementById('model-vision-probe-token');
+      if (token) token.value = '';
+      const verified = document.getElementById('model-vision-verified');
+      if (verified) verified.value = p.visionMode === 'multimodal' && p.visionVerified ? 'true' : 'false';
     }
+    syncModelApiMode();
     const deepseek = /deepseek/i.test(`${p.model || ''} ${p.apibase || ''}`);
     const capability = document.getElementById('model-capability-row');
-    if (capability) capability.hidden = deepseek;
-    setModelVisionState({ success: !deepseek && !!p.vision && !!p.visionVerified, unsupported: deepseek });
+    if (capability) capability.hidden = false;
+    const multimodal = form?.querySelector('[data-vision-mode="multimodal"]');
+    if (multimodal) multimodal.disabled = deepseek;
+    setModelVisionState({ success: p.visionMode === 'multimodal' && p.visionVerified === true });
     setModelApikeyMode(false);
+    if (revealApiKey && p.apiKey) {
+      const apikey = document.getElementById('model-apikey-input');
+      if (apikey) apikey.value = p.apiKey;
+    }
+    if (providerKey) setModelGuide(providerKey);
     openModal('add-model-modal');
     applyI18n();
   } catch (ex) {
@@ -6565,7 +6719,7 @@ let kbConfigLoading = null;
 function setKbConfigBusy(form, busy) {
   if (!form) return;
   form.classList.toggle('is-loading', !!busy);
-  form.querySelectorAll('input, button').forEach(el => { el.disabled = !!busy; });
+  form.querySelectorAll('input, select, button').forEach(el => { el.disabled = !!busy; });
 }
 
 function setKbConfigStatus(form, configured, { error = false, message = '' } = {}) {
@@ -6579,10 +6733,31 @@ function setKbConfigStatus(form, configured, { error = false, message = '' } = {
 }
 
 function setKbConfigForm(kind, values, targetForm = null) {
-  const form = targetForm || document.getElementById(kind === 'embedding'
-    ? 'kb-embedding-config-form'
-    : 'mineru-config-form');
+  const form = targetForm;
   if (!form || !values) return;
+  if (kind === 'vision') {
+    const enabled = form.elements.namedItem('enabled');
+    const select = form.elements.namedItem('modelProfile');
+    if (enabled) enabled.checked = values.enabled === true;
+    if (select) {
+      const profiles = Array.isArray(values.availableProfiles) ? values.availableProfiles : [];
+      select.replaceChildren(new Option(t('set.kbVisionChooseModel'), ''));
+      profiles.forEach(profile => {
+        const option = new Option(profile.name || profile.varName || '', profile.varName || '');
+        if (profile.model) option.textContent += ` · ${profile.model}`;
+        select.appendChild(option);
+      });
+      select.value = values.modelProfile || '';
+      select.required = !!enabled?.checked;
+    }
+    const status = form.querySelector('.kb-config-status');
+    if (status) {
+      status.classList.toggle('is-ok', values.enabled === true);
+      status.classList.remove('is-error');
+      status.textContent = values.enabled === true ? t('set.kbVisionEnabled') : t('set.kbVisionDisabled');
+    }
+    return;
+  }
   const baseUrl = form.elements.namedItem('baseUrl');
   const model = form.elements.namedItem(kind === 'embedding' ? 'model' : 'modelVersion');
   if (baseUrl) baseUrl.value = values.baseUrl || '';
@@ -6590,17 +6765,18 @@ function setKbConfigForm(kind, values, targetForm = null) {
     ? (values.model || '')
     : (values.modelVersion || '');
   const secret = form.elements.namedItem('apiKey');
-  if (secret) secret.value = '';
+  // 配置向导卡片使用普通 password 输入框：值保持在表单里，浏览器负责视觉遮挡。
+  if (secret) secret.value = values.apiKey || '';
+  if (secret) setSecretInputVisible(secret, false);
   setKbConfigStatus(form, !!values.apiKeyConfigured);
 }
 
 async function loadKbServiceConfigs() {
   if (kbConfigLoading) return kbConfigLoading;
   const forms = [
-    document.getElementById('kb-embedding-config-form'),
-    document.getElementById('mineru-config-form'),
     document.getElementById('kb-quickstart-embedding-form'),
     document.getElementById('kb-quickstart-mineru-form'),
+    document.getElementById('kb-quickstart-vision-form'),
   ].filter(Boolean);
   if (!forms.length) return;
   kbConfigLoading = (async () => {
@@ -6608,8 +6784,6 @@ async function loadKbServiceConfigs() {
     try {
       const result = await window.ga.kbConfig();
       quickstartKbConfig = result;
-      setKbConfigForm('embedding', result.embedding);
-      setKbConfigForm('mineru', result.mineru);
       refreshQuickstartStates();
     } catch (_) {
       quickstartKbConfig = null;
@@ -6628,14 +6802,19 @@ async function saveKbServiceConfig(kind, form) {
   // excludes disabled inputs, so toggling the busy state first would submit
   // an empty configuration and make user edits appear to be ignored.
   const payload = Object.fromEntries(new FormData(form).entries());
+  if (kind === 'vision') {
+    payload.enabled = !!form.elements.namedItem('enabled')?.checked;
+    payload.modelProfile = form.elements.namedItem('modelProfile')?.value || '';
+    if (payload.enabled && !payload.modelProfile) {
+      setKbConfigStatus(form, false, { error: true, message: t('err.visionModelRequired') });
+      return;
+    }
+  }
   setKbConfigBusy(form, true);
   try {
     const result = await window.ga.saveKbConfig({ [kind]: payload });
     quickstartKbConfig = result;
-    setKbConfigForm(kind, result[kind]);
-    if (form.id !== (kind === 'embedding' ? 'kb-embedding-config-form' : 'mineru-config-form')) {
-      setKbConfigForm(kind, result[kind], form);
-    }
+    setKbConfigForm(kind, result[kind], form);
     if (Array.isArray(result.profiles)) {
       state.modelProfiles = normalizeProfiles(result.profiles);
       renderSettingsModels();
@@ -6644,13 +6823,17 @@ async function saveKbServiceConfig(kind, form) {
     refreshQuickstartStates();
     if (form.closest('#kb-quickstart-modal')) closeModals();
   } catch (error) {
+    const code = String(error?.message || '').trim();
+    const detail = code === 'vision_model_required'
+      ? t('err.visionModelRequired')
+      : (code === 'vision_enabled_required' ? t('err.visionEnabledRequired') : t('set.kbConfigSaveFailed'));
     setKbConfigStatus(form, false, {
       error: true,
-      message: t('set.kbConfigSaveFailed'),
+      message: detail,
     });
     showChanToast(
       t('set.kbConfigSaveFailed'),
-      error.message || String(error),
+      detail,
       'err',
     );
   } finally {
@@ -6659,10 +6842,9 @@ async function saveKbServiceConfig(kind, form) {
 }
 
 for (const [kind, id] of [
-  ['embedding', 'kb-embedding-config-form'],
-  ['mineru', 'mineru-config-form'],
   ['embedding', 'kb-quickstart-embedding-form'],
   ['mineru', 'kb-quickstart-mineru-form'],
+  ['vision', 'kb-quickstart-vision-form'],
 ]) {
   const form = document.getElementById(id);
   if (form) form.addEventListener('submit', event => {
@@ -6699,14 +6881,22 @@ const KB_QUICKSTART_GUIDES = {
     link: 'https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&source=minerU',
     linkText: 'pq.mineruRegister',
   },
+  vision: {
+    title: 'pq.visionModalTitle', name: 'pq.visionAction', icon: 'image',
+    color: '#7C3AED', tint: 'rgba(124,58,237,.12)',
+    steps: ['pq.visionGuide1', 'pq.visionGuide2', 'pq.visionGuide3'],
+    tip: 'pq.visionGuideTip', link: '', linkText: '',
+  },
 };
 async function openKbQuickstart(kind) {
   const guide = KB_QUICKSTART_GUIDES[kind];
   if (!guide) return;
   const modal = document.getElementById('kb-quickstart-modal');
-  const form = document.getElementById(kind === 'embedding'
-    ? 'kb-quickstart-embedding-form'
-    : 'kb-quickstart-mineru-form');
+  const form = document.getElementById({
+    embedding: 'kb-quickstart-embedding-form',
+    mineru: 'kb-quickstart-mineru-form',
+    vision: 'kb-quickstart-vision-form',
+  }[kind] || '');
   if (!modal || !form) return;
   const title = document.getElementById('kb-quickstart-title');
   const logo = document.getElementById('kb-quickstart-logo');
@@ -6912,8 +7102,17 @@ if (addModelForm) addModelForm.addEventListener('submit', async (e) => {
   const errEl = document.getElementById('add-model-err');
   const fd = new FormData(addModelForm);
   const payload = Object.fromEntries(fd.entries());
-  payload.protocol = payload.protocol || addModelForm.dataset.protocol || 'oai';
   const isEdit = editingModelId != null;
+  payload.protocol = payload.protocol || addModelForm.dataset.protocol || 'oai';
+  payload.vision = payload.vision_mode === 'multimodal';
+  if (!['text', 'multimodal'].includes(payload.vision_mode)) {
+    if (errEl) { errEl.textContent = t('err.visionModeRequired'); errEl.hidden = false; }
+    return;
+  }
+  if (payload.vision_mode === 'multimodal' && ((!isEdit && !payload.visionProbeToken) || payload.visionVerified !== 'true')) {
+    if (errEl) { errEl.textContent = t('err.visionProbeRequired'); errEl.hidden = false; }
+    return;
+  }
   if (!payload.apibase?.trim() || !payload.model?.trim()) {
     if (errEl) { errEl.textContent = t('err.modelRequired'); errEl.hidden = false; }
     return;

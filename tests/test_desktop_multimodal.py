@@ -89,7 +89,7 @@ class DesktopMultimodalTests(unittest.TestCase):
                     "apikey": "pending-key",
                     "apibase": "https://example.test/v1",
                     "model": "pending-model",
-                    "vision": True,
+                    "vision_mode": "text",
                 })
             probe.assert_not_called()
             self.assertEqual(len(saved), 1)
@@ -97,6 +97,70 @@ class DesktopMultimodalTests(unittest.TestCase):
             self.assertNotIn("max_retries", saved[0])
             self.assertNotIn("connect_timeout", saved[0])
             self.assertNotIn("read_timeout", saved[0])
+
+    def test_model_profile_advanced_transport_options_are_normalized(self):
+        manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
+        cfg = manager._build_cfg({
+            "protocol": "oai",
+            "api_mode": "responses",
+            "stream": "false",
+            "max_retries": "7",
+            "connect_timeout": "21",
+            "read_timeout": "480",
+            "apikey": "key",
+            "apibase": "https://example.test/v1",
+            "model": "model",
+            "vision_mode": "text",
+        })
+        self.assertEqual(cfg["api_mode"], "responses")
+        self.assertIs(cfg["stream"], False)
+        self.assertEqual((cfg["max_retries"], cfg["connect_timeout"], cfg["read_timeout"]), (7, 21, 480))
+        with self.assertRaisesRegex(ValueError, "api_mode_invalid_for_protocol"):
+            manager._build_cfg({
+                "protocol": "claude",
+                "api_mode": "responses",
+                "apikey": "key",
+                "apibase": "https://example.test/v1",
+                "model": "model",
+                "vision_mode": "text",
+            })
+
+    def test_editing_an_unchanged_verified_multimodal_profile_keeps_verification(self):
+        manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
+        existing = {
+            "apikey": "vision-key",
+            "apibase": "https://vision.example/v1",
+            "model": "vision-model",
+            "vision_mode": "multimodal",
+            "vision": True,
+            "vision_verified": True,
+        }
+        cfg = manager._build_cfg({
+            "protocol": "oai",
+            "apibase": existing["apibase"],
+            "model": existing["model"],
+            "vision_mode": "multimodal",
+        }, existing, require_key=False)
+        self.assertTrue(cfg["vision_verified"])
+        with self.assertRaisesRegex(ValueError, "vision_probe_required"):
+            manager._build_cfg({
+                "protocol": "oai",
+                "apibase": existing["apibase"],
+                "model": "changed-model",
+                "vision_mode": "multimodal",
+            }, existing, require_key=False)
+
+    def test_model_profile_detail_reports_key_for_password_card(self):
+        manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
+        manager._profile_at = lambda profile_id: ("native_oai_config", {
+            "apikey": "secret-that-must-not-leak",
+            "apibase": "https://example.test/v1",
+            "model": "vision-model",
+            "vision_mode": "text",
+        })
+        profile = manager.get_model_profile(0)
+        self.assertTrue(profile["apiKeyConfigured"])
+        self.assertEqual(profile["apiKey"], "secret-that-must-not-leak")
 
     def test_desktop_prompt_contract_has_no_legacy_images_argument(self):
         parameters = inspect.signature(desktop_bridge.AgentManager.submit_prompt).parameters

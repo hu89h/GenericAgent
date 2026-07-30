@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>GenericAgent</title>
 <link rel="stylesheet" href="assets/fonts/fonts.css?v=2">
-  <link rel="stylesheet" href="styles.css?v=207">
+  <link rel="stylesheet" href="styles.css?v=212">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
@@ -146,6 +146,12 @@
                 <span class="pq-logo pq-logo-mineru" aria-hidden="true"><span data-ga-icon="fileText"></span></span>
                 <span class="pq-btn-text"><span class="pq-btn-name" data-i18n="pq.mineruAction"></span><span class="pq-btn-desc" data-i18n="pq.mineruActionDesc"></span></span>
                 <span class="pq-step-state" id="pq-mineru-state" aria-live="polite"></span>
+                <span class="pq-arrow" data-ga-icon="caretRight"></span>
+              </button>
+              <button type="button" class="pq-btn pq-setup-btn" data-setup="vision">
+                <span class="pq-logo pq-logo-vision" aria-hidden="true"><span data-ga-icon="image"></span></span>
+                <span class="pq-btn-text"><span class="pq-btn-name" data-i18n="pq.visionAction"></span><span class="pq-btn-desc" data-i18n="pq.visionActionDesc"></span></span>
+                <span class="pq-step-state" id="pq-vision-state" aria-live="polite"></span>
                 <span class="pq-arrow" data-ga-icon="caretRight"></span>
               </button>
             </div>
@@ -674,11 +680,45 @@
           <label class="model-model-field"><span class="field-label"><span data-i18n="model.model"></span><span class="field-req" aria-hidden="true">*</span></span><span class="model-input-shell"><input name="model" required data-i18n-ph="model.modelPh" maxlength="50" autocomplete="off" aria-autocomplete="list" aria-controls="model-preset-options" aria-expanded="false"><span class="model-model-suggestions" id="model-preset-options" role="listbox" hidden></span></span></label>
           <div class="model-capability-row" id="model-capability-row">
             <div class="model-capability-copy"><span class="field-label" data-i18n="model.vision"></span><span class="field-hint" id="model-vision-status"></span></div>
-            <input type="hidden" name="vision" value="false" id="model-vision-value">
-            <button type="button" class="model-vision-probe" id="model-vision-probe" data-i18n="model.visionProbe"></button>
+            <div class="model-vision-controls">
+              <div class="model-vision-options" id="model-vision-options" role="group" aria-label="图片输入模式">
+                <button type="button" class="model-vision-option" data-vision-mode="text" aria-pressed="false" data-i18n="model.visionText"></button>
+                <button type="button" class="model-vision-option" id="model-vision-multimodal-option" data-vision-mode="multimodal" aria-pressed="false" data-i18n="model.visionMultimodal"></button>
+              </div>
+              <input type="hidden" name="vision_mode" value="" id="model-vision-mode">
+              <input type="hidden" name="visionProbeToken" value="" id="model-vision-probe-token">
+              <input type="hidden" name="visionVerified" value="false" id="model-vision-verified">
+              <button type="button" class="model-vision-probe" id="model-vision-probe" hidden><span class="model-vision-probe-icon" data-ga-icon="crosshair" aria-hidden="true"></span><span id="model-vision-probe-label" data-i18n="model.visionProbe"></span></button>
+            </div>
           </div>
           <label id="model-apikey-label"><span class="field-label"><span data-i18n="model.apikey"></span><span class="field-req" aria-hidden="true">*</span></span><input name="apikey" type="password" data-i18n-ph="model.apikeyPh" id="model-apikey-input" maxlength="200"></label>
           <label><span class="field-label"><span data-i18n="model.apibase"></span><span class="field-req" aria-hidden="true">*</span></span><input name="apibase" required data-i18n-ph="model.apibasePh" id="model-apibase-input" maxlength="200"></label>
+          <div class="model-form-field model-advanced-field">
+            <span class="field-label"><span data-i18n="model.protocol"></span><span class="field-req" aria-hidden="true">*</span></span>
+            <div class="seg-group" role="radiogroup">
+              <label class="seg-opt"><input type="radio" name="protocol" value="oai" required checked><span data-i18n="model.protocolOai"></span></label>
+              <label class="seg-opt"><input type="radio" name="protocol" value="claude" required><span data-i18n="model.protocolClaude"></span></label>
+            </div>
+          </div>
+          <div class="model-form-field model-advanced-field">
+            <span class="field-label"><span data-i18n="model.apiMode"></span></span>
+            <div class="seg-group" role="radiogroup">
+              <label class="seg-opt"><input type="radio" name="api_mode" value="chat_completions" checked><span data-i18n="model.apiModeChat"></span></label>
+              <label class="seg-opt"><input type="radio" name="api_mode" value="responses"><span data-i18n="model.apiModeResponses"></span></label>
+            </div>
+          </div>
+          <div class="model-form-field model-advanced-field">
+            <span class="field-label"><span data-i18n="model.stream"></span></span>
+            <div class="seg-group" role="radiogroup">
+              <label class="seg-opt"><input type="radio" name="stream" value="true" checked><span data-i18n="model.streamOn"></span></label>
+              <label class="seg-opt"><input type="radio" name="stream" value="false"><span data-i18n="model.streamOff"></span></label>
+            </div>
+          </div>
+          <div class="model-form-row model-advanced-field">
+            <label class="model-form-mini"><span data-i18n="model.retries"></span><input name="max_retries" type="number" min="1" max="20" value="5"></label>
+            <label class="model-form-mini"><span data-i18n="model.connTimeout"></span><input name="connect_timeout" type="number" min="1" max="300" value="15"></label>
+            <label class="model-form-mini"><span data-i18n="model.readTimeout"></span><input name="read_timeout" type="number" min="5" max="3600" value="300"></label>
+          </div>
           <p class="model-form-err" id="add-model-err" hidden></p>
           <div class="model-form-actions">
             <button type="button" class="set-btn ghost" data-close data-i18n="common.cancel"></button>
@@ -728,6 +768,11 @@
           <label class="kb-config-field"><span data-i18n="model.apibase"></span><input name="baseUrl" type="url" autocomplete="off" required></label>
           <label class="kb-config-field"><span data-i18n="set.kbParserModel"></span><input name="modelVersion" autocomplete="off" required></label>
           <div class="kb-config-foot"><span class="kb-config-status" id="kb-quickstart-mineru-status"></span><button class="set-btn primary" type="submit" data-i18n="common.save"></button></div>
+        </form>
+        <form class="kb-config-form kb-quickstart-form" id="kb-quickstart-vision-form" data-kind="vision" hidden>
+          <label class="kb-config-check"><input name="enabled" type="checkbox"><span data-i18n="pq.visionEnable"></span></label>
+          <label class="kb-config-field"><span data-i18n="pq.visionModel"></span><select name="modelProfile"></select><small data-i18n="pq.visionModelHint"></small></label>
+          <div class="kb-config-foot"><span class="kb-config-status" id="kb-quickstart-vision-status"></span><button class="set-btn primary" type="submit" data-i18n="common.save"></button></div>
         </form>
       </div>
     </div>
@@ -906,49 +951,6 @@
           </button>
         </div>
         <div class="set-block">
-          <div class="set-sec-t" data-i18n="set.kbEmbedding"></div>
-          <form class="kb-config-form" id="kb-embedding-config-form">
-            <label class="kb-config-field">
-              <span data-i18n="model.apikey"></span>
-              <input name="apiKey" type="password" autocomplete="new-password" data-i18n-placeholder="model.apikeyKeep">
-            </label>
-            <label class="kb-config-field">
-              <span data-i18n="model.apibase"></span>
-              <input name="baseUrl" type="url" autocomplete="off" required>
-            </label>
-            <label class="kb-config-field">
-              <span data-i18n="model.model"></span>
-              <input name="model" autocomplete="off" required>
-            </label>
-            <div class="kb-config-foot">
-              <span class="kb-config-status" id="kb-embedding-config-status"></span>
-              <button class="set-btn primary" type="submit" data-i18n="common.save"></button>
-            </div>
-          </form>
-        </div>
-        <div class="set-block">
-          <div class="set-sec-t" data-i18n="set.kbMineru"></div>
-          <form class="kb-config-form" id="mineru-config-form">
-            <label class="kb-config-field">
-              <span data-i18n="model.apikey"></span>
-              <input name="apiKey" type="password" autocomplete="new-password" data-i18n-placeholder="model.apikeyKeep">
-            </label>
-            <label class="kb-config-field">
-              <span data-i18n="model.apibase"></span>
-              <input name="baseUrl" type="url" autocomplete="off" required>
-            </label>
-            <label class="kb-config-field">
-              <span data-i18n="set.kbParserModel"></span>
-              <input name="modelVersion" autocomplete="off" required>
-            </label>
-            <a class="kb-config-link" href="https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&amp;source=minerU" data-external-link data-i18n="set.kbMineruRegister"></a>
-            <div class="kb-config-foot">
-              <span class="kb-config-status" id="mineru-config-status"></span>
-              <button class="set-btn primary" type="submit" data-i18n="common.save"></button>
-            </div>
-          </form>
-        </div>
-        <div class="set-block">
           <div class="set-sec-t" data-i18n="set.features"></div>
           <button class="set-btn" id="import-mykey-btn" type="button" data-i18n-title="set.importMykeyTip">
             <span data-ga-icon="fileText"></span>
@@ -996,8 +998,8 @@
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
-<script src="phosphor-icons.js?v=2"></script>
-<script src="i18n.js?v=25"></script>
-  <script src="app.js?v=248"></script>
+<script src="phosphor-icons.js?v=3"></script>
+<script src="i18n.js?v=30"></script>
+  <script src="app.js?v=254"></script>
 </body>
 </html>
