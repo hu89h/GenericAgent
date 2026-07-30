@@ -14,7 +14,7 @@ from . import config
 from .assets import ImageAssetProcessor
 from .build import IndexBuilder, RecordBuilder
 from .importer import DocumentProcessor
-from .locking import KnowledgeBaseLockedError
+from .locking import KnowledgeBaseLockedError, mutation_lock
 from .pipeline import IngestPipeline, Publisher
 from .providers import provider_settings
 from .retrieval import KnowledgeBaseRetriever
@@ -152,6 +152,31 @@ def import_kb(
         _mark_processing(kb_id, False)
 
 
+def create_kb(name: str) -> dict:
+    with mutation_lock:
+        return config.create_kb(name)
+
+
+def add_documents(
+    kb_id: str,
+    source_files: list[str],
+    *,
+    progress=None,
+    cancelled=None,
+) -> dict:
+    value = str(kb_id or "").strip()
+    _mark_processing(value, True)
+    try:
+        return _runtime().pipeline.add_documents(
+            value,
+            source_files,
+            progress=progress,
+            cancelled=cancelled,
+        )
+    finally:
+        _mark_processing(value, False)
+
+
 def reindex(kb_id: str, *, progress=None, logfn=None) -> dict:
     value = str(kb_id or "").strip()
     _mark_processing(value, True)
@@ -201,6 +226,26 @@ def _source_fingerprint(source_path: str) -> list[dict] | None:
     return rows
 
 
+def _selected_source_fingerprint(manifest: dict) -> list[dict] | None:
+    rows = []
+    expected = manifest.get("source_fingerprint") or []
+    if not expected or not all(isinstance(item, dict) and item.get("path") for item in expected):
+        return None
+    for item in expected:
+        path = os.path.realpath(str(item.get("path") or ""))
+        if not os.path.isfile(path):
+            return None
+        stat = os.stat(path)
+        rows.append({
+            "source": str(item.get("source") or ""),
+            "path": path,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        })
+    rows.sort(key=lambda item: item["path"].casefold())
+    return rows
+
+
 def kb_status(kb: dict) -> dict:
     manifest = _load_manifest(kb)
     processing = _is_processing(kb["id"])
@@ -230,8 +275,15 @@ def kb_status(kb: dict) -> dict:
         state = "ready_with_warnings"
     else:
         state = "ready"
-    current_source = _source_fingerprint(kb.get("source_path") or "")
     expected_source = manifest.get("source_fingerprint")
+    if kb.get("source_path"):
+        has_external_files = any(
+            isinstance(item, dict) and os.path.isabs(str(item.get("path") or ""))
+            for item in (expected_source or [])
+        )
+        current_source = None if has_external_files else _source_fingerprint(kb.get("source_path") or "")
+    else:
+        current_source = _selected_source_fingerprint(manifest)
     source_changed = (
         None if current_source is None or not isinstance(expected_source, list)
         else current_source != expected_source

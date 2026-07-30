@@ -207,16 +207,14 @@ def upsert_kb(
     kb_id: str,
     *,
     name: str = "",
-    source_path: str,
+    source_path: str = "",
     config_path: str | None = None,
 ) -> list[dict]:
     config_path = config_path or CONFIG_PATH
     kb_id = str(kb_id or "").strip()
     if not valid_kb_id(kb_id):
         raise ValueError("知识库 ID 不合法")
-    source = canonical_source_path(source_path)
-    if not source:
-        raise ValueError("知识库源目录不能为空")
+    source = canonical_source_path(source_path) if source_path else ""
     data = _load_raw_config(config_path)
     block = _kb_block(data)
     block[kb_id] = {
@@ -226,6 +224,28 @@ def upsert_kb(
     data["knowledge_base"] = block
     _dump_raw_config(data, config_path)
     return load_config(config_path)
+
+
+def create_kb(name: str, config_path: str | None = None) -> dict:
+    """Create an empty user-named knowledge base ready for document additions."""
+    import uuid
+
+    label = str(name or "").strip()
+    if not label:
+        raise ValueError("知识库名称不能为空")
+    if len(label) > 120:
+        raise ValueError("知识库名称过长")
+    config_path = config_path or CONFIG_PATH
+    data = _load_raw_config(config_path)
+    block = _kb_block(data)
+    while True:
+        kb_id = f"kb-{uuid.uuid4().hex[:16]}"
+        if kb_id not in block:
+            break
+    block[kb_id] = {"name": label, "source_path": ""}
+    data["knowledge_base"] = block
+    _dump_raw_config(data, config_path)
+    return next(row for row in load_config(config_path) if row["id"] == kb_id)
 
 
 def remove_kb(kb_id: str, config_path: str | None = None) -> bool:
@@ -248,6 +268,7 @@ __all__ = [
     "ROOT",
     "active_root",
     "canonical_source_path",
+    "create_kb",
     "kb_by_id",
     "kb_id_for_source",
     "kb_root",

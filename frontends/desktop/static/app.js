@@ -219,6 +219,7 @@ let bridgeUiOffline = false;
         return http(`/session/${encodeURIComponent(sid)}/cancel`, { method: 'POST', body: params || {} });
       }
       case 'kb/status': return http('/kb');
+      case 'kb/create': return http('/kb/create', { method: 'POST', body: params || {} });
       case 'kb/config/get': return http('/kb/config');
       case 'kb/config/save': return http('/kb/config', { method: 'POST', body: params || {} });
       case 'kb/docs': {
@@ -344,7 +345,11 @@ let bridgeUiOffline = false;
     pickDirectory: window.__TAURI__?.core?.invoke
       ? (title = '') => tauriInvoke('pick_directory', { title })
       : null,
+    pickFiles: window.__TAURI__?.core?.invoke
+      ? (title = '') => tauriInvoke('pick_files', { title })
+      : null,
     kbStatus: () => rpc('kb/status', {}),
+    kbCreate: (name) => rpc('kb/create', { name }),
     kbConfig: () => rpc('kb/config/get', {}),
     saveKbConfig: (params = {}) => rpc('kb/config/save', params),
     kbDocs: (params = {}) => rpc('kb/docs', params),
@@ -1185,6 +1190,10 @@ function kbRenderView() {
   if (kbPageEls.documents) kbPageEls.documents.hidden = !kbState.activeKb;
   if (kbPageEls.reader) kbPageEls.reader.hidden = false;
   if (kbPageEls.browser) kbPageEls.browser.classList.toggle('has-active-kb', !!kbState.activeKb);
+  ['kb-import-btn', 'kb-add-docs-btn'].forEach(id => {
+    const button = kbEl(id);
+    if (button) button.disabled = !kbState.activeKb;
+  });
   kbApplyPanelCollapseState();
   kbRenderLibraries();
   if (kbState.activeKb) kbRenderDocuments();
@@ -2019,6 +2028,53 @@ async function kbImport(sourceDir) {
   } catch (error) { showError(`${t('err.kbImport')}: ${error.message || error}`); }
 }
 
+async function kbCreateLibrary(name) {
+  const value = kbText(name).trim();
+  if (!value) return;
+  try {
+    const result = await window.ga.kbCreate(value);
+    const created = result?.knowledge_base;
+    if (!created?.id) throw new Error(result?.error || t('err.kbCreate'));
+    closeModals();
+    await kbRefresh({ force: true });
+    const kb = kbStatusKbs().find(item => item.id === created.id) || created;
+    await kbOpenDocuments(kb);
+  } catch (error) { showError(`${t('err.kbCreate')}: ${error.message || error}`); }
+}
+
+async function kbPickAndAddDocuments() {
+  const kb = kbState.activeKb;
+  if (!kb) {
+    showError(t('err.kbNoSelection'));
+    return;
+  }
+  if (typeof window.ga.pickFiles !== 'function') {
+    showError(t('err.kbFilePicker'));
+    return;
+  }
+  try {
+    const files = await window.ga.pickFiles(t('kb.import'));
+    if (!Array.isArray(files) || !files.length) return;
+    if (kbState.job && !kbJobTerminal(kbState.job)) {
+      kbOpenTrackedTask();
+      return;
+    }
+    const result = await window.ga.kbImport({ kbId: kb.id, sourceFiles: files });
+    if (!result.jobId) throw new Error(result.error || t('err.kbImport'));
+    await kbTrackJob('import', result.jobId);
+    await kbRefresh({ force: true });
+    const refreshed = kbStatusKbs().find(item => item.id === kb.id);
+    if (refreshed) await kbOpenDocuments(refreshed, { force: true });
+  } catch (error) {
+    const code = error?.data?.error || '';
+    const translated = code ? t(`kb.error.${code}`) : '';
+    const detail = translated && translated !== `kb.error.${code}`
+      ? translated
+      : (error.message || error);
+    showError(`${t('err.kbImport')}: ${detail}`);
+  }
+}
+
 async function kbPickAndImport() {
   if (typeof window.ga.pickDirectory !== 'function') {
     showError(t('err.kbFolderPicker'));
@@ -2072,7 +2128,19 @@ function initKbPage() {
   kbBindTaskCapsule();
   bindClick('kb-refresh-btn', () => void kbRefresh({ force: true }));
   bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb, { force: true }));
-  bindClick('kb-import-btn', () => void kbPickAndImport());
+  bindClick('kb-import-btn', () => void kbPickAndAddDocuments());
+  bindClick('kb-add-docs-btn', () => void kbPickAndAddDocuments());
+  bindClick('kb-folder-import-btn', () => void kbPickAndImport());
+  bindClick('kb-create-btn', () => {
+    const form = kbEl('kb-create-form');
+    if (form) form.reset();
+    openModal('kb-create-modal');
+    requestAnimationFrame(() => kbEl('kb-create-name')?.focus());
+  });
+  kbEl('kb-create-form')?.addEventListener('submit', event => {
+    event.preventDefault();
+    void kbCreateLibrary(kbEl('kb-create-name')?.value);
+  });
   bindClick('kb-build-btn', kbOpenBuildModal);
   bindClick('kb-open-doc', async () => {
     const doc = kbState.activeDoc;

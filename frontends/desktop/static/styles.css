@@ -2798,7 +2798,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
 /* Knowledge-base workspace */
 .kb-page{ flex:1 1 auto; width:100%; min-width:0; min-height:0; overflow:hidden; display:flex; flex-direction:column; gap:12px; }
 .kb-page-head{ width:100%; flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:16px; }
-.kb-library-actions{ display:flex; align-items:center; gap:4px; flex:0 0 auto; }
+.kb-library-actions{ display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px; flex:0 0 auto; }
 .kb-btn{ min-height:32px; padding:0 12px; border:1px solid var(--line); border-radius:4px; background:var(--card); color:var(--txt-2); font:inherit; font-size:calc(12px * var(--ui-scale)); display:inline-flex; align-items:center; justify-content:center; gap:6px; cursor:pointer; }
 .kb-btn-compact{ min-height:30px; padding:0 7px; font-size:calc(11px * var(--ui-scale)); gap:4px; }
 .kb-btn-compact svg{ width:14px; height:14px; }
@@ -2832,6 +2832,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
 .kb-view{ flex:1; min-height:0; display:flex; flex-direction:column; }
 .kb-view[hidden]{ display:none; }
 .kb-library-head,.kb-view-head{ flex:0 0 auto; display:flex; align-items:center; gap:8px; min-height:42px; padding:10px 12px; }
+.kb-view-actions{ display:flex; align-items:center; gap:4px; flex:0 0 auto; }
 .kb-library-head{ justify-content:space-between; }
 .kb-section-title,.kb-view-title{ min-width:0; flex:1; color:var(--txt-strong); font-size:calc(14px * var(--ui-scale)); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .kb-library-grid,.kb-doc-grid{ display:flex; flex-direction:column; gap:2px; align-content:start; overflow:auto; min-width:0; width:100%; min-height:0; padding:2px 6px 8px; }
@@ -2956,6 +2957,8 @@ svg.kb-doc-icon{ width:20px; height:20px; }
   font:inherit; cursor:pointer; outline:none;
 }
 .kb-build-select:focus{ border-color:var(--accent); background:var(--card); }
+.kb-build-input{ width:100%; height:38px; padding:0 11px; border:1px solid var(--line); border-radius:4px; background:var(--field-bg); color:var(--txt); font:inherit; outline:none; }
+.kb-build-input:focus{ border-color:var(--accent); background:var(--card); }
 .kb-build-modes{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
 .kb-build-mode{
   position:relative; display:flex; min-width:0; padding:11px 12px;

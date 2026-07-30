@@ -35,7 +35,7 @@ class RecordBuilder:
         for entry in manifest.get("files") or []:
             if not isinstance(entry, dict) or entry.get("kind") != "document":
                 continue
-            title = os.path.basename(str(entry.get("source") or "")) or str(entry.get("name") or "")
+            title = str(entry.get("name") or "") or os.path.basename(str(entry.get("source") or ""))
             for rel in entry.get("processed") or []:
                 titles[str(rel).replace("\\", "/").lstrip("/")] = title
         return titles

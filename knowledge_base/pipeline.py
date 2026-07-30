@@ -149,7 +149,14 @@ class IngestPipeline:
                         owner = entry
                         break
             if owner is not None:
-                failure["source_document"] = cls._relative_key(owner.get("source"))
+                failure["source_document"] = str(
+                    (
+                        owner.get("name")
+                        if owner.get("source_path")
+                        else cls._relative_key(owner.get("source"))
+                    )
+                    or cls._relative_key(owner.get("source"))
+                )
             decorated_failures.append(failure)
 
         document_results: list[dict] = []
@@ -162,7 +169,10 @@ class IngestPipeline:
             }
             owned_failures = [
                 failure for failure in decorated_failures
-                if cls._relative_key(failure.get("source_document")) == source
+                if cls._relative_key(failure.get("source_document")) in {
+                    source,
+                    cls._relative_key(entry.get("name")),
+                }
             ]
             owned_records = [
                 record for record in records
@@ -180,7 +190,7 @@ class IngestPipeline:
                 status = "failed"
             document_results.append({
                 "source": source,
-                "name": os.path.basename(source) or str(entry.get("name") or ""),
+                "name": str(entry.get("name") or "") or os.path.basename(source),
                 "status": status,
                 "text_chunks": text_chunks,
                 "images_indexed": images_indexed,
@@ -228,6 +238,135 @@ class IngestPipeline:
                             ignore_errors=True,
                         )
 
+    def _build_and_publish(
+        self,
+        *,
+        kb_id: str,
+        name: str,
+        source_path: str,
+        stage: str,
+        manifest: dict,
+        prepared_summary: dict,
+        prepared_failures: list[dict],
+        progress: Callable[[dict], None] | None = None,
+        logfn: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict:
+        """Build a complete index from the staged processed documents and publish it."""
+        check_cancelled(cancelled)
+        stage_processed = os.path.join(stage, "processed")
+        stage_kb = {
+            "id": kb_id,
+            "name": name,
+            "source_path": source_path,
+            "path": stage_processed,
+            "exists": True,
+        }
+        built = self.records.build(
+            stage_kb,
+            manifest,
+            progress=progress,
+            logfn=logfn,
+            cancelled=cancelled,
+        )
+        check_cancelled(cancelled)
+        records_file = os.path.join(stage, "records.jsonl")
+        self.records.write_records(records_file, built.records, kb_id=kb_id)
+        check_cancelled(cancelled)
+        sources = {
+            **built.sources,
+            "records_sha256": self.records.records_sha256(records_file),
+        }
+        index_stats = self.index_builder.build(
+            stage_kb,
+            records=built.records,
+            sources=sources,
+            progress=progress,
+            logfn=logfn,
+            cancelled=cancelled,
+        )
+        check_cancelled(cancelled)
+
+        document_results, failures = self._document_results(
+            manifest,
+            built.records,
+            list(prepared_failures) + list(built.failures),
+        )
+        documents_succeeded = sum(
+            item["status"] in {"succeeded", "succeeded_with_warnings"}
+            for item in document_results
+        )
+        documents_with_warnings = sum(
+            item["status"] == "succeeded_with_warnings"
+            for item in document_results
+        )
+        documents_failed = sum(item["status"] == "failed" for item in document_results)
+        summary = {
+            **dict(prepared_summary or {}),
+            **{
+                key: int(index_stats.get(key) or 0)
+                for key in (
+                    "n_docs", "n_chunks", "text_chunks",
+                    "image_chunks", "image_assets",
+                )
+            },
+            "total": len(document_results),
+            "completed": len(document_results),
+            "succeeded": documents_succeeded,
+            "failed": documents_failed,
+            "documents_total": len(document_results),
+            "documents_succeeded": documents_succeeded,
+            "documents_with_warnings": documents_with_warnings,
+            "documents_failed": documents_failed,
+            "failure_items": len(failures),
+        }
+        manifest = dict(manifest)
+        manifest.update({
+            "schema_version": int(manifest.get("schema_version") or 1),
+            "kb_id": kb_id,
+            "name": name,
+            "source_path": source_path,
+            "state": "ready_with_warnings" if failures else "ready",
+            "published_at": int(time.time()),
+            "failures": failures,
+            "summary": summary,
+            "document_results": document_results,
+            "index_sources": sources,
+            "index_stats": index_stats,
+        })
+        _write_json_atomic(os.path.join(stage, "manifest.json"), manifest)
+        probe = self.index.probe(stage_processed)
+        if not all(
+            probe[key]
+            for key in ("present", "openable", "schema_valid", "embedding_matches")
+        ):
+            raise RuntimeError("staging 索引发布前校验失败")
+
+        self._emit(progress, phase="publishing", current=name, **summary)
+        check_cancelled(cancelled)
+        kb = self.publisher.publish(
+            kb_id=kb_id,
+            name=name,
+            source_path=source_path,
+        )
+        result = {
+            "ok": True,
+            "state": manifest["state"],
+            "kb": kb,
+            "summary": summary,
+            "failures": failures,
+            "documents": document_results,
+        }
+        self._emit(
+            progress,
+            phase="completed_with_failures" if failures else "completed",
+            current="",
+            documents=document_results,
+            result=result,
+            **summary,
+        )
+        return result
+
     def import_kb(
         self,
         source_dir: str,
@@ -261,125 +400,122 @@ class IngestPipeline:
                 stage_processed = prepared["processed_path"]
                 self._copy_image_cache(kb_id, stage_processed)
                 check_cancelled(cancelled)
-                stage_kb = {
-                    "id": kb_id,
-                    "name": prepared["name"],
-                    "source_path": source_path,
-                    "path": stage_processed,
-                    "exists": True,
-                }
-                built = self.records.build(
-                    stage_kb,
-                    prepared["manifest"],
-                    progress=progress,
-                    logfn=logfn,
-                    cancelled=cancelled,
-                )
-                check_cancelled(cancelled)
-                records_file = os.path.join(stage, "records.jsonl")
-                self.records.write_records(records_file, built.records, kb_id=kb_id)
-                check_cancelled(cancelled)
-                sources = {
-                    **built.sources,
-                    "records_sha256": self.records.records_sha256(records_file),
-                }
-                index_stats = self.index_builder.build(
-                    stage_kb,
-                    records=built.records,
-                    sources=sources,
-                    progress=progress,
-                    logfn=logfn,
-                    cancelled=cancelled,
-                )
-                check_cancelled(cancelled)
-
-                document_results, failures = self._document_results(
-                    prepared["manifest"],
-                    built.records,
-                    list(prepared["failures"]) + list(built.failures),
-                )
-                manifest = dict(prepared["manifest"])
-                documents_succeeded = sum(
-                    item["status"] in {"succeeded", "succeeded_with_warnings"}
-                    for item in document_results
-                )
-                documents_with_warnings = sum(
-                    item["status"] == "succeeded_with_warnings"
-                    for item in document_results
-                )
-                documents_failed = sum(
-                    item["status"] == "failed"
-                    for item in document_results
-                )
-                summary = {
-                    **prepared["summary"],
-                    **{
-                        key: int(index_stats.get(key) or 0)
-                        for key in (
-                            "n_docs", "n_chunks", "text_chunks",
-                            "image_chunks", "image_assets",
-                        )
-                    },
-                    "total": len(document_results),
-                    "completed": len(document_results),
-                    "succeeded": documents_succeeded,
-                    "failed": documents_failed,
-                    "documents_total": len(document_results),
-                    "documents_succeeded": documents_succeeded,
-                    "documents_with_warnings": documents_with_warnings,
-                    "documents_failed": documents_failed,
-                    "failure_items": len(failures),
-                }
-                manifest.update({
-                    "state": "ready_with_warnings" if failures else "ready",
-                    "published_at": int(time.time()),
-                    "failures": failures,
-                    "summary": summary,
-                    "document_results": document_results,
-                    "index_sources": sources,
-                    "index_stats": index_stats,
-                })
-                _write_json_atomic(os.path.join(stage, "manifest.json"), manifest)
-                probe = self.index.probe(stage_processed)
-                if not all(
-                    probe[key]
-                    for key in ("present", "openable", "schema_valid", "embedding_matches")
-                ):
-                    raise RuntimeError("staging 索引发布前校验失败")
-
-                check_cancelled(cancelled)
-                self._emit(
-                    progress,
-                    phase="publishing",
-                    current=prepared["name"],
-                    **summary,
-                )
-                # Once publishing starts, the Bridge rejects new cancellation
-                # requests. This second check closes the race with a request
-                # accepted immediately before the publishing phase was emitted.
-                check_cancelled(cancelled)
-                kb = self.publisher.publish(
+                return self._build_and_publish(
                     kb_id=kb_id,
                     name=prepared["name"],
                     source_path=source_path,
+                    stage=stage,
+                    manifest=prepared["manifest"],
+                    prepared_summary=prepared["summary"],
+                    prepared_failures=prepared["failures"],
+                    progress=progress,
+                    logfn=logfn,
+                    cancelled=cancelled,
                 )
-                result = {
-                    "ok": True,
-                    "state": manifest["state"],
-                    "kb": kb,
-                    "summary": summary,
-                    "failures": failures,
-                    "documents": document_results,
-                }
-                self._emit(
-                    progress,
-                    phase="completed_with_failures" if failures else "completed",
-                    current="",
-                    documents=document_results,
-                    result=result,
-                    **summary,
+            except Exception:
+                shutil.rmtree(stage, ignore_errors=True)
+                raise
+
+    def add_documents(
+        self,
+        kb_id: str,
+        source_files: list[str],
+        *,
+        progress: Callable[[dict], None] | None = None,
+        logfn: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict:
+        """Append selected external files and rebuild one complete staged index."""
+        value = str(kb_id or "").strip()
+        if not value:
+            raise ValueError("知识库 ID 不能为空")
+        with mutation_lock:
+            check_cancelled(cancelled)
+            kb = config.kb_by_id(value)
+            if kb is None:
+                raise KeyError("knowledge_base_not_found")
+            self.index_builder.begin_build()
+            stage = config.staging_root(value)
+            shutil.rmtree(stage, ignore_errors=True)
+            try:
+                active = config.active_root(value)
+                if os.path.isdir(active):
+                    shutil.copytree(active, stage, dirs_exist_ok=True)
+                os.makedirs(os.path.join(stage, "processed"), exist_ok=True)
+                old_manifest = {}
+                manifest_path = os.path.join(stage, "manifest.json")
+                if os.path.isfile(manifest_path):
+                    with open(manifest_path, encoding="utf-8") as handle:
+                        old_manifest = json.load(handle)
+                old_manifest = old_manifest if isinstance(old_manifest, dict) else {}
+                source_root = str(kb.get("source_path") or "").strip()
+                existing_sources = set()
+                for entry in old_manifest.get("files") or []:
+                    if not isinstance(entry, dict) or entry.get("kind") != "document":
+                        continue
+                    source_value = str(entry.get("source_path") or "").strip()
+                    if not source_value and source_root:
+                        relative = str(entry.get("source") or "").replace("/", os.sep)
+                        candidate = os.path.realpath(os.path.join(source_root, relative))
+                        if os.path.isfile(candidate):
+                            source_value = candidate
+                    if source_value:
+                        existing_sources.add(os.path.normcase(os.path.realpath(source_value)))
+                selected = []
+                selected_keys = set()
+                for raw in source_files or []:
+                    path = os.path.realpath(os.path.expanduser(str(raw or "")))
+                    if not os.path.isfile(path):
+                        raise ValueError(f"source file not found: {path}")
+                    identity = os.path.normcase(path)
+                    if identity not in existing_sources and identity not in selected_keys:
+                        selected.append(path)
+                        selected_keys.add(identity)
+                if not selected:
+                    raise ValueError("所选文件均已在知识库中")
+                prepared = self.documents.prepare_files(
+                    selected,
+                    stage_root=stage,
+                    kb_id=value,
+                    name=kb.get("name") or value,
+                    progress=progress,
+                    cancelled=cancelled,
                 )
-                return result
+                merged = dict(old_manifest)
+                merged["files"] = [
+                    item for item in (old_manifest.get("files") or [])
+                    if isinstance(item, dict)
+                ] + list(prepared["manifest"].get("files") or [])
+                merged["source_path"] = kb.get("source_path") or ""
+                merged["source_fingerprint"] = sorted(
+                    [
+                        item
+                        for item in (
+                            *list(old_manifest.get("source_fingerprint") or []),
+                            *list(prepared["manifest"].get("source_fingerprint") or []),
+                        )
+                        if isinstance(item, dict)
+                    ],
+                    key=lambda item: str(item.get("path") or "").casefold(),
+                )
+                failures = [
+                    *list(old_manifest.get("failures") or []),
+                    *list(prepared.get("failures") or []),
+                ]
+                merged["failures"] = failures
+                merged["name"] = kb.get("name") or value
+                return self._build_and_publish(
+                    kb_id=value,
+                    name=kb.get("name") or value,
+                    source_path=kb.get("source_path") or "",
+                    stage=stage,
+                    manifest=merged,
+                    prepared_summary=prepared.get("summary") or {},
+                    prepared_failures=failures,
+                    progress=progress,
+                    logfn=logfn,
+                    cancelled=cancelled,
+                )
             except Exception:
                 shutil.rmtree(stage, ignore_errors=True)
                 raise

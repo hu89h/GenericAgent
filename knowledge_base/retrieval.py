@@ -116,7 +116,7 @@ class KnowledgeBaseRetriever:
         titles = {}
         for entry in self._imported_document_entries(kb_path):
             source = str(entry.get("source") or "")
-            title = os.path.basename(source) or source
+            title = str(entry.get("name") or "") or os.path.basename(source) or source
             for rel in entry.get("processed") or []:
                 normalized = str(rel).replace("\\", "/").lstrip("/")
                 if normalized:
@@ -969,21 +969,27 @@ class KnowledgeBaseRetriever:
                 for processed_rel in entry.get("processed") or []:
                     rel = str(processed_rel or "").replace("\\", "/")
                     if rel:
-                        manifest_by_processed[rel] = source_rel
+                        manifest_by_processed[rel] = entry
                         if rel.startswith("processed/"):
-                            manifest_by_processed[rel[len("processed/"):]] = source_rel
+                            manifest_by_processed[rel[len("processed/"):]] = entry
                         else:
-                            manifest_by_processed[f"processed/{rel}"] = source_rel
+                            manifest_by_processed[f"processed/{rel}"] = entry
             source_root_value = str(kb.get("source_path") or "").strip()
             source_root = os.path.realpath(source_root_value) if source_root_value else ""
             for rel, absolute_path, _mtime, size in documents.scan_documents(kb["path"]):
                 rel = rel.replace("\\", "/")
-                source_rel = manifest_by_processed.get(rel, "")
-                source_path = os.path.realpath(os.path.join(source_root, source_rel)) if source_root and source_rel else ""
-                source_is_safe = bool(source_root and source_rel and self._path_is_within(source_root, source_path))
+                entry = manifest_by_processed.get(rel) or {}
+                source_rel = str(entry.get("source") or "").replace("\\", "/")
+                entry_source_path = str(entry.get("source_path") or "").strip()
+                if entry_source_path:
+                    source_path = os.path.realpath(entry_source_path)
+                    source_is_safe = True
+                else:
+                    source_path = os.path.realpath(os.path.join(source_root, source_rel)) if source_root and source_rel else ""
+                    source_is_safe = bool(source_root and source_rel and self._path_is_within(source_root, source_path))
                 source_exists = bool(source_is_safe and os.path.isfile(source_path))
                 source_size = os.path.getsize(source_path) if source_exists else 0
-                display_name = os.path.basename(source_rel) if source_rel else imported_titles.get(rel, os.path.basename(rel))
+                display_name = str(entry.get("name") or "") or (os.path.basename(source_rel) if source_rel else imported_titles.get(rel, os.path.basename(rel)))
                 docs.append(with_reference({
                     "kb_id": kb["id"],
                     "data_id": f"{kb['id']}::{rel}",
@@ -991,7 +997,7 @@ class KnowledgeBaseRetriever:
                     "file_name": rel,
                     "folder": (source_rel or rel).split("/", 1)[0] if "/" in (source_rel or rel) else "",
                     "size": size,
-                    "source_file_name": source_rel,
+                    "source_file_name": display_name,
                     "source_size": source_size,
                     "source_exists": source_exists,
                     "abspath": absolute_path,
@@ -1089,6 +1095,7 @@ class KnowledgeBaseRetriever:
             return error
         package_root = os.path.realpath(os.path.dirname(kb["path"]))
         source_rel = ""
+        source_entry = None
         manifest = os.path.join(package_root, "manifest.json")
         try:
             with open(manifest, encoding="utf-8") as handle:
@@ -1097,6 +1104,7 @@ class KnowledgeBaseRetriever:
                 processed = [str(item).replace("\\", "/") for item in (entry.get("processed") or [])]
                 if processed_rel in processed:
                     source_rel = str(entry.get("source") or "").replace("\\", "/")
+                    source_entry = entry
                     break
         except Exception as manifest_error:
             return {
@@ -1110,15 +1118,22 @@ class KnowledgeBaseRetriever:
             }
         source_root_value = str(kb.get("source_path") or "").strip()
         source_root = os.path.realpath(source_root_value) if source_root_value else ""
-        source_path = (
-            os.path.realpath(os.path.join(source_root, source_rel))
-            if source_root
-            else ""
-        )
-        if (
-            not source_root
-            or not self._path_is_within(source_root, source_path)
-            or not os.path.isfile(source_path)
+        entry_source_path = str((source_entry or {}).get("source_path") or "").strip()
+        if entry_source_path:
+            source_path = os.path.realpath(entry_source_path)
+        else:
+            source_path = (
+                os.path.realpath(os.path.join(source_root, source_rel))
+                if source_root
+                else ""
+            )
+        if not source_path or not os.path.isfile(source_path):
+            return {
+                "error_code": "source_document_not_found",
+                "error": "[未找到原始文档]",
+            }
+        if not entry_source_path and (
+            not source_root or not self._path_is_within(source_root, source_path)
         ):
             return {
                 "error_code": "source_document_not_found",
@@ -1128,8 +1143,8 @@ class KnowledgeBaseRetriever:
             "kb_id": kb["id"],
             "data_id": f"{kb['id']}::{processed_rel}",
             "file_name": processed_rel,
-            "source_file_name": source_rel,
-            "title": os.path.basename(source_rel),
+            "source_file_name": str((source_entry or {}).get("name") or "") or os.path.basename(source_path) or source_rel,
+            "title": str((source_entry or {}).get("name") or "") or os.path.basename(source_path) or os.path.basename(source_rel),
             "path": source_path,
             "is_original": True,
             "ref": f"{kb['id']}/{processed_rel}",
@@ -1151,8 +1166,7 @@ class KnowledgeBaseRetriever:
         if source.get("error") or not source.get("is_original"):
             return None
         kb = self._kb_by_id(source.get("kb_id") or kb_id or "")
-        source_root_value = str((kb or {}).get("source_path") or "").strip()
-        if kb is None or not source_root_value:
+        if kb is None:
             return None
         raw = str(image_path or "").strip().strip("<>")
         raw = unquote(raw.split("?", 1)[0].split("#", 1)[0]).replace("\\", "/")
@@ -1163,7 +1177,8 @@ class KnowledgeBaseRetriever:
             or os.path.splitext(raw)[1].lower() not in _SOURCE_IMAGE_EXTENSIONS
         ):
             return None
-        source_root = os.path.realpath(source_root_value)
+        source_root_value = str((kb or {}).get("source_path") or "").strip()
+        source_root = os.path.realpath(source_root_value) if source_root_value else os.path.dirname(os.path.realpath(source["path"]))
         target = os.path.realpath(
             os.path.join(os.path.dirname(source["path"]), raw.replace("/", os.sep))
         )

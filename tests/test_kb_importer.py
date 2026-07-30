@@ -101,6 +101,65 @@ class DocumentProcessorTests(unittest.TestCase):
             self.assertTrue((stage / "manifest.json").is_file())
             self.assertTrue(any((stage / "processed").rglob("*.md")))
 
+    def test_selected_file_import_keeps_only_selected_document_and_original_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            stage = Path(temp) / "stage"
+            source.mkdir()
+            image = source / "figure.jpg"
+            Image.new("RGB", (2, 2), (40, 80, 120)).save(image, format="JPEG")
+            document = source / "selected.md"
+            document.write_text("# Selected\n\n![图1](figure.jpg)\n", encoding="utf-8")
+            (source / "not-selected.md").write_text("# Ignore", encoding="utf-8")
+
+            result = importer.DocumentProcessor().prepare_files(
+                [str(document)], stage_root=str(stage), kb_id="kb-test"
+            )
+
+            self.assertEqual(result["summary"]["ready"], 1)
+            entries = [
+                item for item in result["manifest"]["files"]
+                if item.get("kind") == "document"
+            ]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["name"], "selected.md")
+            self.assertEqual(Path(entries[0]["source_path"]).resolve(), document.resolve())
+            self.assertEqual(
+                {Path(item["path"]).name for item in result["manifest"]["source_fingerprint"]},
+                {"selected.md", "figure.jpg"},
+            )
+            self.assertFalse((stage / ".selected_sources").exists())
+            self.assertFalse(any("not-selected" in path.name for path in (stage / "processed").rglob("*.md")))
+            processed = next((stage / "processed").rglob("*.md"))
+            self.assertEqual(len(list(processed.parent.glob("*.assets-*/*.jpg"))), 1)
+
+    def test_multiple_selected_files_keep_a_stable_source_fingerprint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            stage = Path(temp) / "stage"
+            source.mkdir()
+            first = source / "first.md"
+            second = source / "second.md"
+            first.write_text("# First\n", encoding="utf-8")
+            second.write_text("# Second\n", encoding="utf-8")
+
+            result = importer.DocumentProcessor().prepare_files(
+                [str(second), str(first), str(second)],
+                stage_root=str(stage),
+                kb_id="kb-test",
+            )
+
+            entries = [
+                item for item in result["manifest"]["files"]
+                if item.get("kind") == "document"
+            ]
+            self.assertEqual({item["name"] for item in entries}, {"first.md", "second.md"})
+            fingerprints = result["manifest"]["source_fingerprint"]
+            self.assertEqual(
+                [item["path"] for item in fingerprints],
+                sorted([str(first.resolve()), str(second.resolve())], key=str.casefold),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

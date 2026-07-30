@@ -244,6 +244,23 @@ class DocumentResultTests(unittest.TestCase):
         self.assertEqual(failures[0]["source_document"], "books/alpha.pdf")
         self.assertEqual(failures[1]["source_document"], "books/beta.pdf")
 
+    def test_selected_document_result_uses_original_filename(self):
+        results, _failures = IngestPipeline._document_results(
+            {
+                "files": [{
+                    "kind": "document",
+                    "source": "files/abc-selected.md",
+                    "source_path": "C:/documents/selected.md",
+                    "name": "selected.md",
+                    "processed": ["documents/selected.md"],
+                }],
+            },
+            [{"kind": "text", "file_name": "documents/selected.md"}],
+            [],
+        )
+
+        self.assertEqual(results[0]["name"], "selected.md")
+
 
 class MutationLockTests(unittest.TestCase):
     def test_lock_is_reentrant_and_rejects_competing_thread(self):

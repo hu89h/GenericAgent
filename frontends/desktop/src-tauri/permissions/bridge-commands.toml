@@ -24,6 +24,11 @@ description = "Pick a source directory via native folder dialog (import memory).
 commands.allow = ["pick_directory"]
 
 [[permission]]
+identifier = "allow-pick-files"
+description = "Pick one or more source documents via the native file dialog."
+commands.allow = ["pick_files"]
+
+[[permission]]
 identifier = "allow-get-ga-source"
 description = "Read the user-set external GenericAgent source directory."
 commands.allow = ["get_ga_source"]

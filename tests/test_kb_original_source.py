@@ -126,6 +126,46 @@ class OriginalSourceTests(unittest.TestCase):
             )
         )
 
+    def test_selected_document_can_resolve_original_without_shared_source_root(self):
+        entry = {
+            "source": "files/abc-selected.md",
+            "name": "selected.md",
+            "source_path": str(self.source_document),
+            "kind": "document",
+            "processed": ["documents/normalized.md"],
+        }
+        (self.active_root / "manifest.json").write_text(
+            json.dumps({"files": [entry]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.retriever._registry.kb["source_path"] = ""
+
+        result = self.retriever.resolve_source_document(data_id=self.data_id)
+
+        self.assertTrue(result["is_original"])
+        self.assertEqual(Path(result["path"]).resolve(), self.source_document.resolve())
+        self.assertEqual(result["source_file_name"], "selected.md")
+
+    def test_selected_document_listing_keeps_original_display_name(self):
+        entry = {
+            "source": "files/abc-selected.md",
+            "name": "selected.md",
+            "source_path": str(self.source_document),
+            "kind": "document",
+            "processed": ["documents/normalized.md"],
+        }
+        (self.active_root / "manifest.json").write_text(
+            json.dumps({"files": [entry]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.retriever._registry.kb["source_path"] = ""
+
+        documents = self.retriever.list_documents(kb_id="kb-test")
+
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0]["source_file_name"], "selected.md")
+        self.assertTrue(documents[0]["source_exists"])
+
 
 if __name__ == "__main__":
     unittest.main()

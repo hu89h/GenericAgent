@@ -996,6 +996,28 @@ fn pick_directory(title: Option<String>) -> Option<String> {
     dlg.pick_folder().map(|p| p.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn pick_files(title: Option<String>) -> Vec<String> {
+    let mut dlg = rfd::FileDialog::new();
+    if let Some(t) = title {
+        if !t.is_empty() {
+            dlg = dlg.set_title(&t);
+        }
+    }
+    dlg = dlg.add_filter(
+        "Knowledge-base documents",
+        &[
+            "md", "markdown", "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx",
+            "png", "jpg", "jpeg", "jp2", "webp", "gif", "bmp",
+        ],
+    );
+    dlg.pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
 /// Stop the current bridge (ours or a stale one) and free :14168 before respawning.
 fn stop_current_bridge() {
     request_bridge_shutdown();
@@ -1151,7 +1173,7 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
-        .invoke_handler(tauri::generate_handler![start_bridge_with_config, start_bridge, get_config, export_mykey, pick_directory, get_ga_source, set_ga_source, clear_ga_source, shortcut_should_ask, shortcut_decide, get_prepare_error])
+        .invoke_handler(tauri::generate_handler![start_bridge_with_config, start_bridge, get_config, export_mykey, pick_directory, pick_files, get_ga_source, set_ga_source, clear_ga_source, shortcut_should_ask, shortcut_decide, get_prepare_error])
         .setup(move |app| {
             // Show the loading window immediately so the first-run prepare isn't a blank screen.
             // The window starts on loading.html (a local page), so no "connection refused" flash.

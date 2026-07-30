@@ -1,10 +1,10 @@
 """Unified knowledge-base import pipeline.
 
-The importer keeps the public operation intentionally small: import one source
-directory.  Markdown is copied directly, while supported non-Markdown files
-go through MinerU.  PDFs larger than the service limit are rejected before any
-remote job is submitted; the importer deliberately does not split or merge
-PDFs.
+The importer keeps the processing contract small: prepare either one source
+directory or an explicitly selected set of files. Markdown is copied directly,
+while supported non-Markdown files go through MinerU. PDFs larger than the
+service limit are rejected before any remote job is submitted; the importer
+deliberately does not split or merge PDFs.
 """
 from __future__ import annotations
 
@@ -691,6 +691,180 @@ class DocumentProcessor:
         finally:
             for path in (downloads_root, extract_root):
                 shutil.rmtree(path, ignore_errors=True)
+
+    @staticmethod
+    def _selection_label(path: Path) -> str:
+        digest = hashlib.sha256(
+            os.path.normcase(str(path)).encode("utf-8", "replace")
+        ).hexdigest()[:12]
+        return f"files/{digest}-{_safe_component(path.name, 64)}"
+
+    def _prepare_selection_workspace(
+        self,
+        source_files: list[str],
+        workspace: Path,
+    ) -> dict[str, Path]:
+        """Create a small, private source tree for selected external files.
+
+        MinerU still receives a directory, but the directory is assembled only
+        from the files the user selected. Markdown image references are copied
+        into a per-document assets folder and rewritten, so selecting one file
+        does not accidentally ingest its whole parent directory.
+        """
+        workspace.mkdir(parents=True, exist_ok=True)
+        mapping: dict[str, Path] = {}
+        seen: set[str] = set()
+        for raw in source_files:
+            path = Path(str(raw or "")).expanduser().resolve()
+            if not path.is_file():
+                raise ValueError(f"source file not found: {path}")
+            identity = os.path.normcase(str(path))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            key = hashlib.sha256(identity.encode("utf-8", "replace")).hexdigest()[:16]
+            doc_dir = workspace / key
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            target = doc_dir / _safe_component(path.name, 96)
+            if path.suffix.lower() in MARKDOWN_EXTS:
+                body = read_textfile(str(path))
+                body = _normalize_mineru_image_links(path, path.parent, body)
+                replacements: list[tuple[int, int, str]] = []
+                for match, raw_ref in _image_refs(body):
+                    local = _local_image_path(path, raw_ref)
+                    if local is None:
+                        continue
+                    _path_part, image = local
+                    if not image.is_file():
+                        continue
+                    image_name = (
+                        hashlib.sha256(str(image).encode("utf-8", "replace"))
+                        .hexdigest()[:16]
+                        + (image.suffix.lower() or ".bin")
+                    )
+                    image_target = doc_dir / "assets" / image_name
+                    image_target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(image, image_target)
+                    relative = quote(
+                        os.path.relpath(image_target, target.parent)
+                        .replace(os.sep, "/"),
+                        safe="/-._~",
+                    )
+                    replacements.append((match.start(2), match.end(2), relative))
+                for start, end, replacement in reversed(replacements):
+                    body = body[:start] + replacement + body[end:]
+                target.write_text(body, encoding="utf-8")
+            else:
+                shutil.copy2(path, target)
+            mapping[f"{key}/{target.name}"] = path
+        if not mapping:
+            raise ValueError("no source files selected")
+        return mapping
+
+    def prepare_files(
+        self,
+        source_files: list[str],
+        *,
+        stage_root: str,
+        kb_id: str,
+        name: str = "",
+        progress: Callable[[dict], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Prepare a user-selected set of files without importing a parent folder."""
+        selected_paths: list[Path] = []
+        seen: set[str] = set()
+        for raw in source_files or []:
+            path = Path(str(raw or "")).expanduser().resolve()
+            if not path.is_file():
+                raise ValueError(f"source file not found: {path}")
+            identity = os.path.normcase(str(path))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            selected_paths.append(path)
+        if not selected_paths:
+            raise ValueError("no source files selected")
+
+        fingerprint_paths = list(selected_paths)
+        fingerprint_seen = {os.path.normcase(str(path)) for path in fingerprint_paths}
+        for path in selected_paths:
+            if path.suffix.lower() not in MARKDOWN_EXTS:
+                continue
+            try:
+                body = _normalize_mineru_image_links(
+                    path, path.parent, read_textfile(str(path))
+                )
+            except Exception:
+                continue
+            for _match, raw_ref in _image_refs(body):
+                local = _local_image_path(path, raw_ref)
+                if local is None:
+                    continue
+                _path_part, image = local
+                if not image.is_file():
+                    continue
+                identity = os.path.normcase(str(image))
+                if identity not in fingerprint_seen:
+                    fingerprint_seen.add(identity)
+                    fingerprint_paths.append(image)
+
+        stage = Path(stage_root).resolve()
+        workspace = stage / ".selected_sources"
+        shutil.rmtree(workspace, ignore_errors=True)
+        try:
+            mapping = self._prepare_selection_workspace(
+                [str(path) for path in selected_paths], workspace
+            )
+            result = self.prepare(
+                str(workspace),
+                stage_root=str(stage),
+                kb_id=kb_id,
+                name=name,
+                progress=progress,
+                cancelled=cancelled,
+            )
+            manifest = dict(result.get("manifest") or {})
+            source_by_temp = mapping
+            for entry in manifest.get("files") or []:
+                temp_source = str(entry.get("source") or "").replace("\\", "/")
+                original = source_by_temp.get(temp_source)
+                if original is None:
+                    continue
+                entry["source"] = self._selection_label(original)
+                entry["source_path"] = str(original)
+                entry["name"] = original.name
+            for failure in manifest.get("failures") or []:
+                temp_source = str(failure.get("source") or "").replace("\\", "/")
+                for temp_rel, original in source_by_temp.items():
+                    if temp_source == temp_rel or temp_source.startswith(f"{temp_rel}:"):
+                        failure["source"] = self._selection_label(original)
+                        failure["source_path"] = str(original)
+                        break
+            manifest["source_path"] = ""
+            manifest["source_fingerprint"] = sorted(
+                [
+                    {
+                        "source": self._selection_label(path),
+                        "path": str(path),
+                        "size": path.stat().st_size,
+                        "mtime_ns": path.stat().st_mtime_ns,
+                    }
+                    for path in fingerprint_paths
+                ],
+                key=lambda item: item["path"].casefold(),
+            )
+            result["manifest"] = manifest
+            result["source_path"] = ""
+            result["files"] = [
+                entry
+                for entry in manifest.get("files") or []
+                if entry.get("kind") == "document"
+            ]
+            result["failures"] = list(manifest.get("failures") or [])
+            return result
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 __all__ = ["DocumentProcessor", "MAX_PDF_PAGES"]

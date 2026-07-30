@@ -13,9 +13,10 @@ HTTP API:
   POST   /config
   GET    /model-profiles  (+ POST / PUT / DELETE by id)
   GET    /kb
+  POST   /kb/create
   GET    /kb/config
   POST   /kb/config
-  POST   /kb/import
+  POST   /kb/import       body: {sourceDir} or {kbId, sourceFiles[]}
   GET    /kb/jobs
   GET    /kb/jobs/{job_id}
   POST   /kb/jobs/{job_id}/cancel
@@ -2321,8 +2322,24 @@ def _kb_error_code(error) -> str:
         return "file_too_large"
     if "timeout" in text or "timed out" in text or "超时" in text:
         return "processing_timeout"
+    if any(
+        marker in text
+        for marker in (
+            "sslerror",
+            "ssleoferror",
+            "unexpected_eof",
+            "connection reset",
+            "connection aborted",
+            "connectionerror",
+            "proxyerror",
+            "max retries exceeded",
+        )
+    ):
+        return "network_error"
     if "already exists" in text or "已存在" in text:
         return "already_exists"
+    if "unsupported_file_type" in text or "不支持的文件类型" in str(error or ""):
+        return "unsupported_file_type"
     if (
         "visionunsupported" in text
         or "不支持图片" in str(error or "")
@@ -2577,6 +2594,18 @@ async def kb_list_handler(request):
         return json_ok({"ok": False, "error": str(error)}, status=500)
 
 
+async def kb_create_handler(request):
+    data = await read_json(request)
+    name = str(data.get("name") or "").strip()
+    if not name:
+        return json_ok({"ok": False, "error": "knowledge_base_name_required"}, status=400)
+    try:
+        kb = _kb_backend().create_kb(name)
+        return json_ok({"ok": True, "knowledge_base": kb}, status=201)
+    except Exception as error:
+        return json_ok({"ok": False, "error": _kb_error_detail(error)}, status=400)
+
+
 async def kb_config_handler(request):
     try:
         if request.method == "GET":
@@ -2677,7 +2706,41 @@ async def kb_source_asset_handler(request):
 async def kb_import_handler(request):
     data = await read_json(request)
     source_dir = str(data.get("sourceDir") or data.get("path") or "").strip()
-    if not source_dir or not os.path.isdir(source_dir):
+    raw_files = data.get("sourceFiles") or data.get("files") or []
+    if isinstance(raw_files, str):
+        raw_files = [raw_files]
+    source_files = []
+    for raw in raw_files if isinstance(raw_files, list) else []:
+        path = os.path.realpath(os.path.expanduser(str(raw or "").strip()))
+        if not path or not os.path.isfile(path):
+            return json_ok({"ok": False, "error": "source_file_not_found"}, status=400)
+        if path not in source_files:
+            source_files.append(path)
+    kb_id = str(data.get("kbId") or data.get("kb_id") or "").strip()
+    if source_files:
+        from knowledge_base.importer import MARKDOWN_EXTS, SUPPORTED_EXTS
+
+        supported_extensions = MARKDOWN_EXTS | SUPPORTED_EXTS
+        unsupported = [
+            os.path.basename(path)
+            for path in source_files
+            if Path(path).suffix.lower() not in supported_extensions
+        ]
+        if unsupported:
+            return json_ok(
+                {
+                    "ok": False,
+                    "error": "unsupported_file_type",
+                    "files": unsupported,
+                },
+                status=400,
+            )
+        if not kb_id:
+            return json_ok({"ok": False, "error": "knowledge_base_required"}, status=400)
+        detail = _kb_backend().status(kb_id).get("knowledge_bases") or []
+        if not detail:
+            return json_ok({"ok": False, "error": "knowledge_base_not_found"}, status=404)
+    elif not source_dir or not os.path.isdir(source_dir):
         return json_ok({"ok": False, "error": "source_directory_not_found"}, status=400)
     backend = _kb_backend()
     with _kb_jobs_lock:
@@ -2690,7 +2753,8 @@ async def kb_import_handler(request):
         "phase": "queued",
         "mode": "import",
         "sourceDir": source_dir,
-        "kbId": backend.kb_id_for_source(source_dir),
+        "sourceFiles": source_files,
+        "kbId": kb_id or backend.kb_id_for_source(source_dir),
         "counts": {
             "scanned": 0,
             "total": 0,
@@ -2843,12 +2907,20 @@ async def kb_import_handler(request):
                 updatedAt=int(time.time()),
             )
         try:
-            result = backend.import_kb(
-                source_dir,
-                name=str(data.get("name") or ""),
-                progress=update_progress,
-                cancelled=job["cancelEvent"].is_set,
-            )
+            if source_files:
+                result = backend.add_documents(
+                    kb_id,
+                    source_files,
+                    progress=update_progress,
+                    cancelled=job["cancelEvent"].is_set,
+                )
+            else:
+                result = backend.import_kb(
+                    source_dir,
+                    name=str(data.get("name") or ""),
+                    progress=update_progress,
+                    cancelled=job["cancelEvent"].is_set,
+                )
             summary = result.get("summary") or {}
             failures = result.get("failures") or []
             state = "completed_with_failures" if failures else "completed"
@@ -2913,7 +2985,7 @@ async def kb_import_handler(request):
                     phase="failed",
                     error=str(error),
                     updatedAt=int(time.time()),
-                    current=_kb_display_name(source_dir),
+                    current=_kb_display_name(source_dir or (source_files[0] if source_files else "")),
                     documents=[],
                     progress={
                         "completed": 0,
@@ -3717,6 +3789,7 @@ def create_app():
     app.router.add_post("/session/{sid}/restore", restore_handler)
     app.router.add_post("/session/{sid}/model", session_model_handler)
     app.router.add_get("/kb", kb_list_handler)
+    app.router.add_post("/kb/create", kb_create_handler)
     app.router.add_get("/kb/config", kb_config_handler)
     app.router.add_post("/kb/config", kb_config_handler)
     app.router.add_post("/kb/import", kb_import_handler)

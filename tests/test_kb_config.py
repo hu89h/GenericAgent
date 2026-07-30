@@ -36,6 +36,20 @@ class KnowledgeBaseConfigTests(unittest.TestCase):
             self.assertNotIn("    path:", text)
             self.assertIn("source_path:", text)
 
+    def test_empty_named_knowledge_base_can_be_created_before_documents(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config_path = os.path.join(temp, "kb.yaml")
+            data_root = os.path.join(temp, "kbs")
+            with mock.patch.object(config, "CONFIG_PATH", config_path), mock.patch.object(
+                config, "DATA_ROOT", data_root
+            ):
+                row = config.create_kb("研究资料")
+                self.assertTrue(row["id"].startswith("kb-"))
+                self.assertEqual(row["name"], "研究资料")
+                self.assertEqual(row["source_path"], "")
+                self.assertFalse(row["exists"])
+                self.assertEqual(config.load_config(config_path)[0]["name"], "研究资料")
+
 
 if __name__ == "__main__":
     unittest.main()
