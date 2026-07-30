@@ -1,4 +1,6 @@
 import os
+import hashlib
+import json
 import tempfile
 import threading
 import unittest
@@ -94,6 +96,123 @@ class _CancellingDocuments(_PreparedDocuments):
         result = super().prepare(*args, **kwargs)
         self.cancel_event.set()
         return result
+
+
+class _DeleteRecords:
+    @staticmethod
+    def read_records(path):
+        with open(path, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    @staticmethod
+    def write_records(path, records, *, kb_id):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def records_sha256(path):
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            digest.update(handle.read())
+        return digest.hexdigest()
+
+
+class _DeleteIndexBuilder:
+    def begin_build(self):
+        return None
+
+    def build(self, kb, *, records, sources, progress=None, logfn=None, cancelled=None):
+        index_path = os.path.join(kb["path"], ".kb_index", "zvec")
+        os.makedirs(index_path, exist_ok=True)
+        if callable(progress):
+            progress({"phase": "validated", "processed": len(records), "total": len(records)})
+        docs = {record.get("file_name") for record in records}
+        return {
+            "n_docs": len(docs),
+            "n_chunks": len(records),
+            "text_chunks": len(records),
+            "image_chunks": 0,
+            "image_assets": 0,
+        }
+
+
+class _DeleteIndex:
+    @staticmethod
+    def probe(path):
+        return {
+            "present": os.path.isdir(os.path.join(path, ".kb_index", "zvec")),
+            "openable": True,
+            "schema_valid": True,
+            "embedding_matches": True,
+        }
+
+
+class DocumentDeletionTests(unittest.TestCase):
+    def test_delete_publishes_remaining_documents_and_records(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data_root = os.path.join(temp, "kbs")
+            config_path = os.path.join(temp, "kb.yaml")
+            source = os.path.join(temp, "source")
+            os.makedirs(source)
+            with mock.patch.object(config, "DATA_ROOT", data_root), mock.patch.object(
+                config, "CONFIG_PATH", config_path
+            ):
+                kb_id = "kb-delete-test"
+                config.upsert_kb(kb_id, name="Delete test", source_path=source)
+                active = config.active_root(kb_id)
+                processed = config.processed_path(kb_id)
+                os.makedirs(os.path.join(processed, "documents", "one.assets-x"))
+                os.makedirs(os.path.join(processed, "documents"), exist_ok=True)
+                with open(os.path.join(processed, "documents", "one.md"), "w", encoding="utf-8") as handle:
+                    handle.write("one")
+                with open(os.path.join(processed, "documents", "two.md"), "w", encoding="utf-8") as handle:
+                    handle.write("two")
+                with open(os.path.join(processed, "documents", "one.assets-x", "figure.png"), "wb") as handle:
+                    handle.write(b"asset")
+                manifest = {
+                    "kb_id": kb_id,
+                    "name": "Delete test",
+                    "source_path": source,
+                    "files": [
+                        {"kind": "document", "source": "one.pdf", "name": "one.pdf", "processed": ["documents/one.md"]},
+                        {"kind": "document", "source": "two.pdf", "name": "two.pdf", "processed": ["documents/two.md"]},
+                    ],
+                    "summary": {"n_docs": 2},
+                    "failures": [],
+                    "index_sources": {},
+                }
+                with open(os.path.join(active, "manifest.json"), "w", encoding="utf-8") as handle:
+                    json.dump(manifest, handle)
+                _DeleteRecords.write_records(
+                    os.path.join(active, "records.jsonl"),
+                    [
+                        {"data_id": f"{kb_id}::documents/one.md", "file_name": "documents/one.md", "kind": "text", "body": "one"},
+                        {"data_id": f"{kb_id}::documents/two.md", "file_name": "documents/two.md", "kind": "text", "body": "two"},
+                    ],
+                    kb_id=kb_id,
+                )
+                os.makedirs(os.path.join(processed, ".kb_index", "zvec"), exist_ok=True)
+                pipeline = IngestPipeline(
+                    document_processor=None,
+                    record_builder=_DeleteRecords(),
+                    index_builder=_DeleteIndexBuilder(),
+                    publisher=Publisher(),
+                    index=_DeleteIndex(),
+                )
+
+                result = pipeline.delete_document(
+                    kb_id,
+                    data_id=f"{kb_id}::documents/one.md",
+                )
+
+                self.assertTrue(result["ok"])
+                self.assertFalse(os.path.exists(os.path.join(processed, "documents", "one.md")))
+                self.assertFalse(os.path.exists(os.path.join(processed, "documents", "one.assets-x")))
+                self.assertTrue(os.path.isfile(os.path.join(processed, "documents", "two.md")))
+                remaining = _DeleteRecords.read_records(os.path.join(active, "records.jsonl"))
+                self.assertEqual([item["file_name"] for item in remaining], ["documents/two.md"])
 
 
 class PublisherTests(unittest.TestCase):

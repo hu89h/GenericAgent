@@ -177,6 +177,30 @@ def add_documents(
         _mark_processing(value, False)
 
 
+def delete_document(
+    kb_id: str,
+    *,
+    data_id: str = "",
+    file_name: str = "",
+    ref: str = "",
+    progress=None,
+    logfn=None,
+) -> dict:
+    value = str(kb_id or "").strip()
+    _mark_processing(value, True)
+    try:
+        return _runtime().pipeline.delete_document(
+            value,
+            data_id=data_id,
+            file_name=file_name,
+            ref=ref,
+            progress=progress,
+            logfn=logfn,
+        )
+    finally:
+        _mark_processing(value, False)
+
+
 def reindex(kb_id: str, *, progress=None, logfn=None) -> dict:
     value = str(kb_id or "").strip()
     _mark_processing(value, True)
@@ -435,6 +459,15 @@ def read_document(
 
 def resolve_source_document(kb_id=None, data_id=None, file_name=None, ref=None):
     return _runtime().retrieval.resolve_source_document(
+        kb_id=kb_id,
+        data_id=data_id,
+        file_name=file_name,
+        ref=ref,
+    )
+
+
+def resolve_processed_document(kb_id=None, data_id=None, file_name=None, ref=None):
+    return _runtime().retrieval.resolve_processed_document(
         kb_id=kb_id,
         data_id=data_id,
         file_name=file_name,

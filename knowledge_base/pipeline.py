@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import glob
 import json
 import os
 import shutil
@@ -111,6 +112,38 @@ class IngestPipeline:
     @staticmethod
     def _relative_key(value) -> str:
         return str(value or "").replace("\\", "/").lstrip("/")
+
+    @classmethod
+    def _manifest_document_target(
+        cls,
+        manifest: dict,
+        *,
+        kb_id: str,
+        data_id: str = "",
+        file_name: str = "",
+        ref: str = "",
+    ) -> tuple[dict | None, str]:
+        value = str(data_id or "").strip()
+        if "::" in value:
+            value = value.split("::", 1)[1].split("::image::", 1)[0]
+        if not value:
+            value = str(file_name or "").strip()
+        if not value:
+            ref_value = cls._relative_key(ref)
+            prefix = f"{kb_id}/"
+            value = ref_value[len(prefix):] if ref_value.startswith(prefix) else ref_value
+        value = cls._relative_key(value)
+        if value.startswith("processed/"):
+            value = value[len("processed/"):]
+        if not value:
+            return None, ""
+        for entry in manifest.get("files") or []:
+            if not isinstance(entry, dict) or entry.get("kind") != "document":
+                continue
+            processed = [cls._relative_key(item) for item in entry.get("processed") or []]
+            if value in processed or f"processed/{value}" in processed:
+                return entry, value
+        return None, value
 
     @classmethod
     def _document_results(
@@ -549,6 +582,196 @@ class IngestPipeline:
             manifest["reindexed_at"] = int(time.time())
             _write_json_atomic(kb["manifest_path"], manifest)
             return {"ok": True, "kb_id": kb_id, "stats": stats}
+
+    def delete_document(
+        self,
+        kb_id: str,
+        *,
+        data_id: str = "",
+        file_name: str = "",
+        ref: str = "",
+        progress: Callable[[dict], None] | None = None,
+        logfn: Callable[[str], None] | None = None,
+    ) -> dict:
+        """Remove one processed document and publish a rebuilt index atomically."""
+        value = str(kb_id or "").strip()
+        with mutation_lock:
+            kb = config.kb_by_id(value)
+            if kb is None or not kb.get("exists"):
+                raise KeyError("knowledge_base_not_found")
+            with open(kb["manifest_path"], encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            entry, target_rel = self._manifest_document_target(
+                manifest,
+                kb_id=value,
+                data_id=data_id,
+                file_name=file_name,
+                ref=ref,
+            )
+            if entry is None:
+                raise KeyError("document_not_found")
+
+            removed_name = str(entry.get("name") or "")
+            removed_source = self._relative_key(entry.get("source"))
+            removed_processed = {
+                self._relative_key(item)
+                for item in (entry.get("processed") or [])
+                if self._relative_key(item)
+            }
+            remaining_files = [
+                item for item in (manifest.get("files") or [])
+                if item is not entry
+            ]
+            remaining_documents = [
+                item for item in remaining_files
+                if isinstance(item, dict)
+                and item.get("kind") == "document"
+                and item.get("processed")
+            ]
+            root = config.kb_root(value)
+            if not remaining_documents:
+                deleting = f"{root}.deleting-{os.getpid()}-{time.time_ns()}"
+                if os.path.lexists(root):
+                    if os.path.islink(root):
+                        raise RuntimeError("拒绝删除符号链接知识库目录")
+                    Publisher._rename_with_retry(root, deleting)
+                    shutil.rmtree(deleting, ignore_errors=True)
+                self._emit(progress, phase="completed", processed=1, total=1)
+                return {
+                    "ok": True,
+                    "kb_id": value,
+                    "data_id": data_id or f"{value}::{target_rel}",
+                    "document_name": removed_name or target_rel,
+                    "empty": True,
+                }
+
+            stage = config.staging_root(value)
+            shutil.rmtree(stage, ignore_errors=True)
+            try:
+                active = config.active_root(value)
+                if not os.path.isdir(active):
+                    raise KeyError("knowledge_base_not_found")
+                shutil.copytree(active, stage, dirs_exist_ok=True)
+                stage_processed = os.path.join(stage, "processed")
+                for relative in removed_processed:
+                    target = os.path.realpath(os.path.join(stage_processed, relative))
+                    processed_root = os.path.realpath(stage_processed)
+                    if os.path.commonpath((processed_root, target)) != processed_root:
+                        raise ValueError("非法处理后文档路径")
+                    if os.path.isfile(target):
+                        os.remove(target)
+                    parent = os.path.dirname(target)
+                    stem = os.path.splitext(os.path.basename(target))[0]
+                    for asset_dir in glob.glob(os.path.join(parent, f"{stem}.assets-*")):
+                        if os.path.isdir(asset_dir):
+                            shutil.rmtree(asset_dir, ignore_errors=True)
+
+                records = self.records.read_records(kb["records_path"])
+                kept_records = []
+                for record in records:
+                    record_rel = self._relative_key(record.get("file_name"))
+                    if record_rel.startswith("processed/"):
+                        record_rel = record_rel[len("processed/"):]
+                    if record_rel not in removed_processed:
+                        kept_records.append(record)
+                if not kept_records:
+                    raise RuntimeError("删除后没有可检索的文档记录")
+                records_path = os.path.join(stage, "records.jsonl")
+                self.records.write_records(records_path, kept_records, kb_id=value)
+
+                failures = []
+                for failure in manifest.get("failures") or []:
+                    values = (
+                        self._relative_key(failure.get("source")),
+                        self._relative_key(failure.get("document")),
+                        self._relative_key(failure.get("source_document")),
+                    )
+                    owned = any(
+                        item and (
+                            item == removed_source
+                            or (removed_source and item.startswith(f"{removed_source}:"))
+                            or item == removed_name
+                        )
+                        for item in values
+                    )
+                    if not owned:
+                        failures.append(dict(failure))
+
+                sources = dict(manifest.get("index_sources") or {})
+                sources["records_sha256"] = self.records.records_sha256(records_path)
+                stage_kb = {
+                    **kb,
+                    "path": stage_processed,
+                    "exists": True,
+                }
+                self.index_builder.begin_build()
+                self._emit(progress, phase="indexing", processed=0, total=len(kept_records))
+                stats = self.index_builder.build(
+                    stage_kb,
+                    records=kept_records,
+                    sources=sources,
+                    progress=progress,
+                    logfn=logfn,
+                )
+                next_manifest = dict(manifest)
+                next_manifest["files"] = remaining_files
+                next_manifest["failures"] = failures
+                next_manifest["index_sources"] = sources
+                next_manifest["index_stats"] = stats
+                next_manifest["state"] = "ready_with_warnings" if failures else "ready"
+                next_manifest["published_at"] = int(time.time())
+                document_results, decorated_failures = self._document_results(
+                    next_manifest, kept_records, failures
+                )
+                next_manifest["failures"] = decorated_failures
+                next_manifest["document_results"] = document_results
+                next_manifest["summary"] = {
+                    **dict(manifest.get("summary") or {}),
+                    "n_docs": int(stats.get("n_docs") or 0),
+                    "n_chunks": int(stats.get("n_chunks") or 0),
+                    "text_chunks": int(stats.get("text_chunks") or 0),
+                    "image_chunks": int(stats.get("image_chunks") or 0),
+                    "image_assets": int(stats.get("image_assets") or 0),
+                    "documents_total": len(document_results),
+                    "documents_succeeded": sum(
+                        item["status"] in {"succeeded", "succeeded_with_warnings"}
+                        for item in document_results
+                    ),
+                    "documents_with_warnings": sum(
+                        item["status"] == "succeeded_with_warnings"
+                        for item in document_results
+                    ),
+                    "documents_failed": sum(
+                        item["status"] == "failed" for item in document_results
+                    ),
+                }
+                _write_json_atomic(os.path.join(stage, "manifest.json"), next_manifest)
+                probe = self.index.probe(stage_processed)
+                if not all(
+                    probe[key]
+                    for key in ("present", "openable", "schema_valid", "embedding_matches")
+                ):
+                    raise RuntimeError("删除文档后的索引校验失败")
+                self._emit(progress, phase="publishing", current=removed_name)
+                published = self.publisher.publish(
+                    kb_id=value,
+                    name=kb.get("name") or value,
+                    source_path=kb.get("source_path") or "",
+                )
+                self._emit(progress, phase="completed", processed=1, total=1)
+                return {
+                    "ok": True,
+                    "kb_id": value,
+                    "data_id": data_id or f"{value}::{target_rel}",
+                    "document_name": removed_name or target_rel,
+                    "empty": False,
+                    "summary": next_manifest["summary"],
+                    "stats": stats,
+                    "kb": published,
+                }
+            except Exception:
+                shutil.rmtree(stage, ignore_errors=True)
+                raise
 
     def delete(self, kb_id: str) -> dict:
         with mutation_lock:

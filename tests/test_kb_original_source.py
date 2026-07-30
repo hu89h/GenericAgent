@@ -96,6 +96,13 @@ class OriginalSourceTests(unittest.TestCase):
         )
         self.assertEqual(result["source_file_name"], "original.md")
 
+    def test_processed_document_resolution_returns_normalized_markdown(self):
+        result = self.retriever.resolve_processed_document(data_id=self.data_id)
+
+        self.assertTrue(result["is_processed"])
+        self.assertEqual(Path(result["path"]).resolve(), self.processed_document.resolve())
+        self.assertEqual(result["file_name"], "documents/normalized.md")
+
     def test_missing_original_never_falls_back_to_processed(self):
         self.source_document.unlink()
 

@@ -1150,6 +1150,66 @@ class KnowledgeBaseRetriever:
             "ref": f"{kb['id']}/{processed_rel}",
         }, kind="document")
 
+    def resolve_processed_document(
+        self,
+        kb_id: str | None = None,
+        data_id: str | None = None,
+        file_name: str | None = None,
+        ref: str | None = None,
+    ) -> dict:
+        """Resolve the normalized Markdown generated for one imported document."""
+        kb, processed_rel, error = self._document_locator(
+            kb_id=kb_id,
+            data_id=data_id,
+            file_name=file_name,
+            ref=ref,
+        )
+        if error:
+            return error
+        target = os.path.realpath(os.path.join(kb["path"], processed_rel))
+        if not self._path_is_within(kb["path"], target) or not os.path.isfile(target):
+            return {
+                "error_code": "processed_document_not_found",
+                "error": "[未找到处理后文档]",
+            }
+        if os.path.splitext(target)[1].lower() not in {".md", ".markdown"}:
+            return {
+                "error_code": "processed_document_not_markdown",
+                "error": "[处理后文档不是 Markdown]",
+            }
+        manifest_path = os.path.join(os.path.realpath(os.path.dirname(kb["path"])), "manifest.json")
+        try:
+            with open(manifest_path, encoding="utf-8") as handle:
+                entries = (json.load(handle) or {}).get("files") or []
+        except Exception as manifest_error:
+            return {
+                "error_code": "processed_manifest_invalid",
+                "error": f"[处理后文档清单不可用] {manifest_error}",
+            }
+        registered = any(
+            isinstance(entry, dict)
+            and entry.get("kind") == "document"
+            and processed_rel in {
+                str(item).replace("\\", "/").lstrip("/").removeprefix("processed/")
+                for item in (entry.get("processed") or [])
+            }
+            for entry in entries
+        )
+        if not registered:
+            return {
+                "error_code": "processed_document_not_registered",
+                "error": "[未登记处理后文档]",
+            }
+        return with_reference({
+            "kb_id": kb["id"],
+            "data_id": f"{kb['id']}::{processed_rel}",
+            "file_name": processed_rel,
+            "title": os.path.basename(processed_rel),
+            "path": target,
+            "is_processed": True,
+            "ref": f"{kb['id']}/{processed_rel}",
+        }, kind="document")
+
     def resolve_source_asset(
         self,
         *,
