@@ -246,6 +246,11 @@ let bridgeUiOffline = false;
         if (!id) throw new Error('kb/reindex missing kbId');
         return http(`/kb/${encodeURIComponent(id)}/reindex`, { method: 'POST' });
       }
+      case 'kb/delete-document': {
+        const id = params.kbId || params.id || '';
+        if (!id) throw new Error('kb/delete-document missing kbId');
+        return http(`/kb/${encodeURIComponent(id)}/documents/delete`, { method: 'POST', body: params || {} });
+      }
       case 'kb/delete': {
         const id = params.kbId || params.id;
         if (!id) throw new Error('kb/delete missing kbId');
@@ -372,6 +377,7 @@ let bridgeUiOffline = false;
     kbJob: (jobId) => rpc('kb/job', { jobId }),
     kbCancelJob: (jobId) => rpc('kb/job/cancel', { jobId }),
     kbReindex: (kbId) => rpc('kb/reindex', { kbId }),
+    kbDeleteDocument: (kbId, params = {}) => rpc('kb/delete-document', Object.assign({}, params, { kbId })),
     kbDelete: (kbId, params = {}) => rpc('kb/delete', Object.assign({}, params, { kbId })),
     getGaSource: () => tauriInvoke('get_ga_source'),
     setGaSource: (dir) => tauriInvoke('set_ga_source', { dir }),
@@ -898,11 +904,11 @@ const kbPageEls = {
   library: kbEl('kb-library-view'), grid: kbEl('kb-library-grid'),
   documents: kbEl('kb-documents-view'), docTitle: kbEl('kb-active-kb-title'), docs: kbEl('kb-doc-list'),
   reader: kbEl('kb-reader-view'), title: kbEl('kb-doc-title'), source: kbEl('kb-md-view'),
-  browser: kbEl('kb-browser'), workspace: document.querySelector('.kb-workspace'),
+  browser: kbEl('kb-browser'), browserSplitter: kbEl('kb-browser-splitter'), workspace: document.querySelector('.kb-workspace'),
   workspaceSplitter: kbEl('kb-workspace-splitter'), browserToggle: kbEl('kb-browser-toggle'), readerPane: kbEl('kb-reader-pane'), readerLayout: kbEl('kb-reader-layout'),
   splitter: kbEl('kb-reader-splitter'), qaPane: kbEl('kb-qa-pane'), qaTitle: kbEl('kb-qa-title'),
   qaToggle: kbEl('kb-qa-toggle'),
-  qaLog: kbEl('kb-qa-log'), question: kbEl('kb-question'), ask: kbEl('kb-ask-btn'), open: kbEl('kb-open-doc'),
+  qaLog: kbEl('kb-qa-log'), question: kbEl('kb-question'), ask: kbEl('kb-ask-btn'), open: kbEl('kb-open-doc'), openProcessed: kbEl('kb-open-processed'),
   task: kbEl('kb-task-modal'), taskTitle: kbEl('kb-task-title'), taskPhase: kbEl('kb-task-phase'),
   taskProgress: kbEl('kb-task-progress-bar'), taskProgressValue: kbEl('kb-task-progress-value'),
   taskCurrent: kbEl('kb-task-current'), taskCounts: kbEl('kb-task-counts'), taskSuccess: kbEl('kb-task-successes'),
@@ -1051,6 +1057,12 @@ function kbDocumentSourceType(doc) {
   return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
 }
 
+function kbDocumentHasProcessedPreview(doc) {
+  if (!doc) return false;
+  const sourceType = kbDocumentSourceType(doc);
+  return !['md', 'markdown'].includes(sourceType);
+}
+
 function kbOriginalImageUrl(doc, source) {
   const value = kbText(source).trim();
   if (!value || /^(?:https?:|data:|blob:)/i.test(value)) return value;
@@ -1107,10 +1119,12 @@ function kbErrorText(code) {
 function kbRenderLibraries() {
   const grid = kbPageEls.grid;
   if (!grid) return;
-  const kbs = kbStatusKbs();
+  const query = kbText(kbEl('kb-library-search')?.value).trim().toLowerCase();
+  const allKbs = kbStatusKbs();
+  const kbs = allKbs.filter(kb => !query || `${kb.name || ''} ${kb.id || ''}`.toLowerCase().includes(query));
   grid.innerHTML = '';
   if (!kbs.length) {
-    grid.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.noData'))}</div>`;
+    grid.innerHTML = `<div class="kb-empty">${escapeHtml(query && allKbs.length ? t('kb.noSearchResults') : t('kb.noData'))}</div>`;
     return;
   }
   for (const kb of kbs) {
@@ -1123,15 +1137,20 @@ function kbRenderLibraries() {
       <div class="kb-card-top"><span class="kb-status ${isReady ? 'ready' : 'pending'}">${escapeHtml(stateText)}</span></div>
       <h3 class="kb-card-title"></h3>
       <div class="kb-card-meta"></div>
-      <div class="kb-card-actions"><button type="button" class="kb-link-btn kb-open-library">${escapeHtml(t('kb.open'))}</button><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
+      <div class="kb-card-actions"><button type="button" class="kb-link-btn kb-reindex-library" title="${escapeHtml(t('kb.reindexHint'))}">${escapeHtml(t('kb.reindexAction'))}</button><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
     card.querySelector('.kb-card-title').textContent = kb.name || kb.id || '';
     card.querySelector('.kb-card-meta').textContent = kbFormat(t('kb.libraryMeta'), {
       documents: kb.counts?.documents || 0,
       images: kb.counts?.images || 0,
     });
     card.addEventListener('click', event => {
-      if (event.target.closest('.kb-delete-library')) return;
+      if (event.target.closest('.kb-card-actions')) return;
       void kbOpenDocuments(kb);
+    });
+    card.querySelector('.kb-reindex-library').addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      void kbOpenBuildModal(kb.id);
     });
     card.querySelector('.kb-delete-library').addEventListener('click', () => void kbDeleteLibrary(kb));
     grid.appendChild(card);
@@ -1153,12 +1172,31 @@ function kbRenderDocuments() {
     return;
   }
   for (const doc of rows) {
-    const row = document.createElement('button');
-    row.type = 'button'; row.className = `kb-doc-card${kbState.activeDoc?.data_id === doc.data_id ? ' active' : ''}`;
-    row.innerHTML = '<span class="kb-doc-icon" data-ga-icon="fileText"></span><span class="kb-doc-meta"><b></b><small></small></span>';
+    const row = document.createElement('article');
+    row.className = `kb-doc-card${kbState.activeDoc?.data_id === doc.data_id ? ' active' : ''}`;
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.setAttribute('aria-label', kbDocumentName(doc));
+    row.innerHTML = '<span class="kb-doc-icon" data-ga-icon="fileText"></span><span class="kb-doc-meta"><b></b><small></small></span><span class="kb-doc-actions"><button type="button" class="kb-link-btn danger kb-delete-document"></button></span>';
     row.querySelector('b').textContent = kbDocumentName(doc);
     row.querySelector('small').textContent = kbDocumentMeta(doc);
-    row.addEventListener('click', () => void kbOpenDocument(doc));
+    row.querySelector('.kb-delete-document').textContent = t('kb.deleteDocument');
+    row.querySelector('.kb-delete-document').title = t('kb.deleteDocument');
+    row.addEventListener('click', event => {
+      if (event.target.closest('.kb-doc-actions')) return;
+      void kbOpenDocument(doc);
+    });
+    row.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      if (event.target.closest('.kb-doc-actions')) return;
+      event.preventDefault();
+      void kbOpenDocument(doc);
+    });
+    row.querySelector('.kb-delete-document').addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      void kbDeleteDocument(doc);
+    });
     docs.appendChild(row);
     row.querySelectorAll('[data-ga-icon]').forEach(el => { if (typeof window.gaIcon === 'function') el.outerHTML = window.gaIcon(el.dataset.gaIcon, el.className || ''); });
   }
@@ -1167,12 +1205,17 @@ function kbRenderDocuments() {
 function kbRenderScopeState() {
   if (!kbPageEls.source) return;
   const hasDocument = !!kbState.activeDoc;
+  const showProcessed = hasDocument && kbDocumentHasProcessedPreview(kbState.activeDoc);
   const documentTitle = hasDocument ? kbDocumentName(kbState.activeDoc) : '';
   if (kbPageEls.title) kbPageEls.title.textContent = documentTitle;
   if (kbPageEls.readerPane) kbPageEls.readerPane.hidden = !hasDocument;
   if (kbPageEls.splitter) kbPageEls.splitter.hidden = !hasDocument;
   if (kbPageEls.readerLayout) kbPageEls.readerLayout.classList.toggle('scope-only', !hasDocument);
   if (kbPageEls.open) kbPageEls.open.disabled = !hasDocument;
+  if (kbPageEls.openProcessed) {
+    kbPageEls.openProcessed.hidden = !showProcessed;
+    kbPageEls.openProcessed.disabled = !showProcessed;
+  }
   if (kbPageEls.qaTitle) kbPageEls.qaTitle.textContent = hasDocument
     ? t('kb.docQa')
     : (kbState.activeKb ? t('kb.kbQa') : t('kb.allQa'));
@@ -1190,7 +1233,7 @@ function kbRenderView() {
   if (kbPageEls.documents) kbPageEls.documents.hidden = !kbState.activeKb;
   if (kbPageEls.reader) kbPageEls.reader.hidden = false;
   if (kbPageEls.browser) kbPageEls.browser.classList.toggle('has-active-kb', !!kbState.activeKb);
-  ['kb-import-btn', 'kb-add-docs-btn'].forEach(id => {
+  ['kb-add-docs-btn'].forEach(id => {
     const button = kbEl(id);
     if (button) button.disabled = !kbState.activeKb;
   });
@@ -1226,9 +1269,11 @@ async function kbRefresh({ force = false } = {}) {
       }
     }
     kbRenderView();
+    refreshQuickstartStates();
   } catch (error) {
     kbState.status = { knowledge_bases: [] };
     kbRenderView();
+    refreshQuickstartStates();
     showError(`${t('err.kbLoad')}: ${error.message || error}`);
   }
 }
@@ -1281,7 +1326,12 @@ async function kbOpenDocument(doc, { session = null } = {}) {
       kbPageEls.source.innerHTML = `<div class="kb-empty">${escapeHtml(t('kb.loading'))}</div>`;
       kbPageEls.source.classList.remove('kb-original-source');
     }
-    if (kbPageEls.open) kbPageEls.open.disabled = false;
+    if (kbPageEls.open) kbPageEls.open.disabled = !doc.source_exists;
+    if (kbPageEls.openProcessed) {
+      const showProcessed = kbDocumentHasProcessedPreview(doc);
+      kbPageEls.openProcessed.hidden = !showProcessed;
+      kbPageEls.openProcessed.disabled = !showProcessed;
+    }
     kbRenderView();
     const current = activeSess();
     if (kbSessionMatchesScope(current, scope)) kbRenderQa(current);
@@ -1328,6 +1378,23 @@ async function kbOpenDocument(doc, { session = null } = {}) {
       kbPageEls.source.innerHTML = `<div class="kb-empty kb-error">${escapeHtml(error.message || error)}</div>`;
       kbPageEls.source.classList.remove('kb-original-source');
     }
+    showError(`${t('err.kbLoad')}: ${error.message || error}`);
+  }
+}
+
+async function kbOpenProcessedDocument() {
+  const doc = kbState.activeDoc;
+  if (!doc) return;
+  try {
+    const result = await window.ga.kbOpen({
+      kbId: doc.kb_id,
+      dataId: doc.data_id,
+      fileName: doc.file_name,
+      ref: doc.ref,
+      processed: true,
+    });
+    if (result?.error) throw new Error(result.error);
+  } catch (error) {
     showError(`${t('err.kbLoad')}: ${error.message || error}`);
   }
 }
@@ -1549,7 +1616,9 @@ function kbJobTerminal(job) {
 }
 
 function kbJobKind(job, fallback = '') {
-  return kbText(job?.mode || fallback || 'import') === 'reindex' ? 'reindex' : 'import';
+  const mode = kbText(job?.mode || fallback || 'import');
+  if (mode === 'delete_document' || mode === 'delete') return 'delete';
+  return mode === 'reindex' ? 'reindex' : 'import';
 }
 
 function kbClampCapsulePosition(left, top, width, height) {
@@ -1580,7 +1649,7 @@ function kbPlaceTaskCapsule() {
     if (saved) {
       ({ left, top } = saved);
     } else {
-      const anchor = kbEl('kb-import-btn')?.getBoundingClientRect();
+      const anchor = kbEl('kb-folder-import-btn')?.getBoundingClientRect();
       if (anchor && anchor.width > 0 && anchor.height > 0) {
         left = anchor.right - rect.width;
         top = anchor.top - rect.height - 10;
@@ -1682,7 +1751,10 @@ function kbRenderTaskCapsule() {
   capsule.classList.toggle('completed', terminal && !['failed', 'cancelled'].includes(job.state));
   capsule.classList.toggle('failed', ['failed', 'cancelled'].includes(job.state));
   if (kbPageEls.taskCapsuleTitle) {
-    kbPageEls.taskCapsuleTitle.textContent = t(kind === 'import' ? 'kb.taskCapsuleImport' : 'kb.taskCapsuleReindex');
+    const titleKey = kind === 'import'
+      ? 'kb.taskCapsuleImport'
+      : (kind === 'delete' ? 'kb.taskCapsuleDelete' : 'kb.taskCapsuleReindex');
+    kbPageEls.taskCapsuleTitle.textContent = t(titleKey);
   }
   if (kbPageEls.taskCapsulePhase) kbPageEls.taskCapsulePhase.textContent = kbPhaseText(job);
   if (kbPageEls.taskCapsuleValue) {
@@ -1749,9 +1821,12 @@ function kbSetTask(job, kind) {
     : (successfulTerminal ? 100 : 0);
 
   if (kbPageEls.taskTitle) {
-    kbPageEls.taskTitle.textContent = terminal
-      ? t(kind === 'import' ? 'kb.importResult' : 'kb.reindexResult')
-      : t(kind === 'import' ? 'kb.importing' : 'kb.building');
+    const titleKey = kind === 'import'
+      ? (terminal ? 'kb.importResult' : 'kb.importing')
+      : (kind === 'delete'
+        ? (terminal ? 'kb.deleteDocumentResult' : 'kb.deletingDocument')
+        : (terminal ? 'kb.reindexResult' : 'kb.building'));
+    kbPageEls.taskTitle.textContent = t(titleKey);
   }
   if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = kbPhaseText(job);
   if (kbPageEls.taskCurrent) {
@@ -1808,6 +1883,11 @@ function kbSetTask(job, kind) {
       }
       kbPageEls.taskCounts.textContent = lines.join('\n');
       kbPageEls.taskCounts.hidden = !lines.length;
+    } else if (kind === 'delete') {
+      kbPageEls.taskCounts.textContent = kbFormat(t('kb.deleteCounts'), {
+        name: job.documentName || '',
+      });
+      kbPageEls.taskCounts.hidden = false;
     } else {
       kbPageEls.taskCounts.textContent = kbFormat(t('kb.buildCounts'), {
         completed: job.done || 0,
@@ -1893,7 +1973,15 @@ async function kbPollTrackedJob() {
     if (kbJobTerminal(job)) {
       kbStopJobPolling();
       kbState.documentLists.clear();
+      const terminalKind = kbJobKind(job, kbState.jobKind);
+      if (terminalKind === 'delete' && kbState.activeDoc?.data_id === job.dataId) {
+        kbState.activeDoc = null;
+        if (kbPageEls.title) kbPageEls.title.textContent = '';
+      }
       await kbRefresh({ force: true }).catch(() => {});
+      if (terminalKind === 'delete' && kbState.activeKb) {
+        await kbOpenDocuments(kbState.activeKb, { force: true }).catch(() => {});
+      }
       return;
     }
     kbScheduleJobPoll();
@@ -2081,10 +2169,37 @@ async function kbPickAndImport() {
     return;
   }
   try {
-    const sourceDir = await window.ga.pickDirectory(t('kb.import'));
+    const sourceDir = await window.ga.pickDirectory(t('kb.importFolder'));
     if (sourceDir) await kbImport(sourceDir);
   } catch (error) {
     showError(`${t('err.kbImport')}: ${error.message || error}`);
+  }
+}
+
+async function kbDeleteDocument(doc) {
+  if (!doc || !kbState.activeKb) return;
+  const name = kbDocumentName(doc);
+  const confirmed = await showConfirmDialog({
+    title: t('kb.deleteDocument'),
+    message: kbFormat(t('kb.deleteDocumentConfirm'), { name }),
+    okText: t('kb.deleteDocument'),
+    okKind: 'danger',
+  });
+  if (!confirmed) return;
+  if (kbState.job && !kbJobTerminal(kbState.job)) {
+    kbOpenTrackedTask();
+    return;
+  }
+  try {
+    const result = await window.ga.kbDeleteDocument(kbState.activeKb.id, {
+      dataId: doc.data_id,
+      fileName: doc.file_name,
+      ref: doc.ref,
+    });
+    if (!result.jobId) throw new Error(result.error || t('err.kbDeleteDocument'));
+    await kbTrackJob('delete', result.jobId);
+  } catch (error) {
+    showError(`${t('err.kbDeleteDocument')}: ${error.message || error}`);
   }
 }
 
@@ -2104,12 +2219,15 @@ async function kbDeleteLibrary(kb) {
   catch (error) { showError(`${t('err.kbDelete')}: ${error.message || error}`); }
 }
 
-async function kbOpenBuildModal() {
+async function kbOpenBuildModal(preselectedKbId = '') {
   if (!kbPageEls.buildScope) return;
   await kbRefresh();
   kbPageEls.buildScope.innerHTML = '';
   for (const kb of kbStatusKbs()) {
-    const option = document.createElement('option'); option.value = kb.id; option.textContent = kb.name || kb.id;
+    const option = document.createElement('option');
+    option.value = kb.id;
+    option.textContent = kb.name || kb.id;
+    option.selected = Boolean(preselectedKbId && kb.id === preselectedKbId);
     kbPageEls.buildScope.appendChild(option);
   }
   openModal('kb-build-modal');
@@ -2128,7 +2246,6 @@ function initKbPage() {
   kbBindTaskCapsule();
   bindClick('kb-refresh-btn', () => void kbRefresh({ force: true }));
   bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb, { force: true }));
-  bindClick('kb-import-btn', () => void kbPickAndAddDocuments());
   bindClick('kb-add-docs-btn', () => void kbPickAndAddDocuments());
   bindClick('kb-folder-import-btn', () => void kbPickAndImport());
   bindClick('kb-create-btn', () => {
@@ -2141,16 +2258,17 @@ function initKbPage() {
     event.preventDefault();
     void kbCreateLibrary(kbEl('kb-create-name')?.value);
   });
-  bindClick('kb-build-btn', kbOpenBuildModal);
   bindClick('kb-open-doc', async () => {
     const doc = kbState.activeDoc;
     if (!doc) return;
     try { await window.ga.kbOpen({ kbId: doc.kb_id, dataId: doc.data_id, ref: doc.ref }); }
     catch (error) { showError(`${t('file.openFailed')}: ${error.message || error}`); }
   });
+  bindClick('kb-open-processed', () => void kbOpenProcessedDocument());
   bindClick('kb-task-background', kbBackgroundTask);
   bindClick('kb-task-cancel', () => void kbCancelTrackedJob());
   bindClick('kb-task-close', kbDismissTask);
+  kbEl('kb-library-search')?.addEventListener('input', kbRenderLibraries);
   kbEl('kb-doc-search')?.addEventListener('input', kbRenderDocuments);
   kbPageEls.buildForm?.addEventListener('submit', async event => {
     event.preventDefault();
@@ -2167,6 +2285,7 @@ function initKbPage() {
       await kbTrackJob('reindex', result.jobId);
     } catch (error) { showError(`${t('err.kbBuild')}: ${error.message || error}`); }
   });
+  bindKbBrowserSplitter();
   kbRefresh();
   void kbRestoreJobs();
 }
@@ -2637,9 +2756,18 @@ function refreshQuickstartStates() {
   const modelReady = (state.modelProfiles || []).some(p =>
     p.kind === 'native' && p.apiKeyConfigured === true
   );
+  const embeddingReady = !!quickstartKbConfig?.embedding?.apiKeyConfigured;
+  const mineruReady = !!quickstartKbConfig?.mineru?.apiKeyConfigured;
   setQuickstartState('pq-model-state', modelReady);
-  setQuickstartState('pq-embedding-state', !!quickstartKbConfig?.embedding?.apiKeyConfigured);
-  setQuickstartState('pq-mineru-state', !!quickstartKbConfig?.mineru?.apiKeyConfigured);
+  setQuickstartState('pq-embedding-state', embeddingReady);
+  setQuickstartState('pq-mineru-state', mineruReady);
+  const knowledgeGroup = document.querySelector('[data-pq-group="knowledge"]');
+  const hasKnowledgeBase = kbStatusKbs().length > 0;
+  if (knowledgeGroup && hasKnowledgeBase && (!embeddingReady || !mineruReady)) {
+    let userChoice = null;
+    try { userChoice = localStorage.getItem('ga_pq_knowledge_collapsed'); } catch (_) {}
+    if (userChoice == null) applyPqGroupState(knowledgeGroup, false);
+  }
 }
 if (pqEl) pqEl.addEventListener('click', (e) => {
   const btn = e.target.closest('.pq-btn[data-provider], .pq-btn[data-setup]');
@@ -2669,6 +2797,37 @@ if (pqEl && pqToggle) {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); togglePq(); }
   });
 }
+// 两个配置分组独立折叠；问答模型默认展开，知识库默认收起。
+function applyPqGroupState(group, collapsed) {
+  if (!group) return;
+  group.classList.toggle('collapsed', !!collapsed);
+  const toggle = group.querySelector('[data-pq-group-toggle]');
+  if (toggle) toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+document.querySelectorAll('[data-pq-group]').forEach(group => {
+  const key = group.dataset.pqGroup || '';
+  if (!key) return;
+  const storageKey = `ga_pq_${key}_collapsed`;
+  let collapsed = key === 'knowledge';
+  try {
+    const saved = localStorage.getItem(storageKey);
+    if (saved === '0' || saved === '1') collapsed = saved === '1';
+  } catch (_) {}
+  applyPqGroupState(group, collapsed);
+  const toggle = group.querySelector('[data-pq-group-toggle]');
+  if (!toggle) return;
+  const toggleGroup = event => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    const next = !group.classList.contains('collapsed');
+    applyPqGroupState(group, next);
+    try { localStorage.setItem(storageKey, next ? '1' : '0'); } catch (_) {}
+  };
+  toggle.addEventListener('click', toggleGroup);
+  toggle.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') toggleGroup(event);
+  });
+});
 // 接入指引：复制获取 API Key 的链接
 bindClick('model-guide-copy', (e) => {
   e.preventDefault(); e.stopPropagation();
@@ -2676,6 +2835,18 @@ bindClick('model-guide-copy', (e) => {
   const url = link ? link.href : '';
   if (!url || !navigator.clipboard) return;
   navigator.clipboard.writeText(url).then(() => showChanToast(t('guide.copied'), '', 'ok')).catch(() => {});
+});
+document.querySelectorAll('[data-external-link]').forEach(link => {
+  link.addEventListener('click', async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const url = link.href;
+    if (!url || url === window.location.href || url === '#') return;
+    try {
+      await bridgeFetch('/open-external', { method: 'POST', body: { url } });
+    } catch (error) {
+      showChanToast(t('err.externalOpen'), error.message || String(error), 'err');
+    }
+  });
 });
 bindClick('preset-btn',    (e) => { e.stopPropagation(); openModal('preset-modal'); });
 document.querySelectorAll('.modal').forEach(m =>
@@ -3710,6 +3881,81 @@ function bindKbWorkspaceResize() {
   });
   window.addEventListener('resize', clampToWorkspace, { passive: true });
   window.__gaClampKbWorkspace = clampToWorkspace;
+}
+
+function bindKbBrowserSplitter() {
+  const splitter = document.getElementById('kb-browser-splitter');
+  const browser = document.getElementById('kb-browser');
+  const library = document.getElementById('kb-library-view');
+  if (!splitter || !browser || !library || splitter.dataset.bound) return;
+  splitter.dataset.bound = '1';
+  const storeKey = 'ga_kb_browser_library_height_v1';
+  let dragging = false;
+  let startY = 0;
+  let startHeight = 0;
+
+  try {
+    const saved = Number(localStorage.getItem(storeKey));
+    if (Number.isFinite(saved) && saved > 0) browser.style.setProperty('--kb-library-height', `${Math.round(saved)}px`);
+  } catch (_) {}
+
+  const currentHeight = () => {
+    const configured = parseFloat(getComputedStyle(browser).getPropertyValue('--kb-library-height'));
+    if (Number.isFinite(configured) && configured > 0) return configured;
+    return library.getBoundingClientRect().height;
+  };
+  const bounds = () => {
+    const browserRect = browser.getBoundingClientRect();
+    const splitterHeight = splitter.getBoundingClientRect().height || 12;
+    if (browserRect.height <= 0) return null;
+    const min = Math.min(180, Math.max(120, Math.floor((browserRect.height - splitterHeight) / 3)));
+    const max = Math.max(min, browserRect.height - splitterHeight - min);
+    return { min, max };
+  };
+  const setHeight = height => {
+    const range = bounds();
+    if (!range) return;
+    const value = Math.round(Math.min(range.max, Math.max(range.min, height)));
+    browser.style.setProperty('--kb-library-height', `${value}px`);
+    splitter.setAttribute('aria-valuenow', String(value));
+  };
+  const clamp = () => setHeight(currentHeight());
+  const stop = event => {
+    if (!dragging) return;
+    dragging = false;
+    splitter.classList.remove('dragging');
+    try { splitter.releasePointerCapture(event.pointerId); } catch (_) {}
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    try { localStorage.setItem(storeKey, String(Math.round(currentHeight()))); } catch (_) {}
+  };
+
+  splitter.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    dragging = true;
+    startY = event.clientY;
+    startHeight = currentHeight();
+    splitter.classList.add('dragging');
+    try { splitter.setPointerCapture(event.pointerId); } catch (_) {}
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    event.preventDefault();
+  });
+  splitter.addEventListener('pointermove', event => {
+    if (!dragging) return;
+    setHeight(startHeight + event.clientY - startY);
+    event.preventDefault();
+  });
+  splitter.addEventListener('pointerup', stop);
+  splitter.addEventListener('pointercancel', stop);
+  splitter.addEventListener('keydown', event => {
+    if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    setHeight(currentHeight() + (event.key === 'ArrowDown' ? 16 : -16));
+    event.preventDefault();
+  });
+  window.addEventListener('resize', clamp, { passive: true });
+  window.__gaClampKbBrowser = clamp;
+  clamp();
 }
 
 function bindKbReaderResize() {
@@ -5947,7 +6193,7 @@ function setModelApikeyMode(isAdd) {
 }
 
 /* ═══════════════ 官方模型快速接入（DeepSeek / 通义千问）═══════════════ */
-// 预填 API 地址 / 协议 / 模型，用户只需粘贴 API Key。apibase 末尾的 /v1 会被
+// 预填 API 地址 / 模型，用户只需粘贴 API Key。apibase 末尾的 /v1 会被
 // 后端自动补成 /v1/chat/completions（见 mykey_template.py 的拼接规则）。
 const PROVIDER_PRESETS = {
   deepseek: {
@@ -5961,13 +6207,161 @@ const PROVIDER_PRESETS = {
   qwen: {
     label: '通义千问', descKey: 'pq.qwenDesc',
     protocol: 'oai', apibase: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    model: 'qwen3.6-max-preview', name: '通义千问', vision: true,
-    keyUrl: 'https://bailian.console.aliyun.com/?apiKey=1',
+    model: 'qwen3.7-plus', name: '通义千问', vision: false,
+    keyUrl: 'https://bailian.console.aliyun.com/cn-beijing?tab=model#/api-key',
     color: '#615CED', tint: 'rgba(97,92,237,.12)',
     logo: '<svg viewBox="0 0 24 24" fill="#615CED" xmlns="http://www.w3.org/2000/svg"><path d="M23.919 14.545 20.817 9.17l1.47-2.544a.56.56 0 0 0 0-.566l-1.633-2.83a.57.57 0 0 0-.49-.283h-6.207L12.487.402a.57.57 0 0 0-.49-.284H8.732a.56.56 0 0 0-.49.284L5.139 5.775h-2.94a.56.56 0 0 0-.49.284L.077 8.887a.56.56 0 0 0 0 .567L3.18 14.83l-1.47 2.545a.56.56 0 0 0 0 .566l1.634 2.83a.57.57 0 0 0 .49.283h6.205l1.47 2.545a.57.57 0 0 0 .49.284h3.266a.57.57 0 0 0 .49-.284l3.104-5.375h2.94a.57.57 0 0 0 .49-.283l1.634-2.828a.55.55 0 0 0-.004-.568M8.733.686l1.634 2.828-1.634 2.828H21.8L20.164 9.17H7.425L5.63 6.06Zm1.306 19.801-6.205-.002 1.634-2.83h3.265L2.201 6.344h3.267q3.182 5.517 6.367 11.032zm10.124-5.66L18.53 12l-6.532 11.315-1.634-2.83c2.129-3.673 4.25-7.351 6.373-11.028h3.592l3.102 5.374z"/></svg>',
   },
 };
 window.gaProviderPresets = PROVIDER_PRESETS;
+const PROVIDER_MODEL_OPTIONS = {
+  deepseek: [
+    ['deepseek-v4-pro', 'model.deepseekV4Pro'],
+    ['deepseek-v4-flash', 'model.deepseekV4Flash'],
+  ],
+  qwen: [
+    ['qwen3.7-plus', 'model.qwen37Plus'],
+    ['qwen3.7-flash', 'model.qwen37Flash'],
+  ],
+};
+
+function modelVisionValue(form) {
+  return form?.querySelector('#model-vision-value');
+}
+
+function setModelVisionState({ success = false, unsupported = false, error = false, busy = false } = {}) {
+  const form = document.getElementById('add-model-form');
+  const button = document.getElementById('model-vision-probe');
+  const status = document.getElementById('model-vision-status');
+  const value = modelVisionValue(form);
+  if (!form || !button || !status) return;
+  if (value) value.value = success ? 'true' : 'false';
+  button.disabled = busy || unsupported;
+  button.hidden = unsupported;
+  button.classList.toggle('is-success', success);
+  button.classList.toggle('is-error', error);
+  button.textContent = busy
+    ? t('model.visionTesting')
+    : t('model.visionProbe');
+  status.textContent = unsupported
+    ? t('model.visionUnsupported')
+    : (error ? t('model.visionProbeFailed') : (success ? t('model.visionSuccess') : t('model.visionPending')));
+  status.dataset.state = unsupported ? 'unsupported' : (error ? 'error' : (success ? 'success' : 'pending'));
+}
+
+function populateProviderModelOptions(provider, selected = '') {
+  const suggestions = document.getElementById('model-preset-options');
+  if (!suggestions) return;
+  const options = PROVIDER_MODEL_OPTIONS[provider] || [];
+  suggestions.innerHTML = options
+    .map(([value, key]) => `<button type="button" class="model-model-suggestion" role="option" data-model-option="${escapeHtml(value)}"><span>${escapeHtml(value)}</span>${value === 'qwen3.7-plus' ? `<small>${escapeHtml(t(key))}</small>` : ''}</button>`)
+    .join('');
+  const input = document.querySelector('#add-model-form input[name="model"]');
+  if (input && selected) input.value = selected;
+}
+
+function setModelSuggestionsOpen(open) {
+  const form = document.getElementById('add-model-form');
+  const input = document.querySelector('#add-model-form input[name="model"]');
+  const suggestions = document.getElementById('model-preset-options');
+  const provider = form?.dataset.provider || '';
+  if (!input || !suggestions || !suggestions.childElementCount || !PROVIDER_MODEL_OPTIONS[provider]) return;
+  suggestions.hidden = !open;
+  input.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function setModelFormMode(provider = '') {
+  const form = document.getElementById('add-model-form');
+  const input = form?.querySelector('input[name="model"]');
+  const apibase = document.getElementById('model-apibase-input');
+  const suggestions = document.getElementById('model-preset-options');
+  const capability = document.getElementById('model-capability-row');
+  if (!form) return;
+  const key = String(provider || '').trim().toLowerCase();
+  form.dataset.provider = key;
+  form.dataset.protocol = PROVIDER_PRESETS[key]?.protocol || '';
+  if (apibase) apibase.readOnly = !!key;
+  if (key && PROVIDER_MODEL_OPTIONS[key]) {
+    populateProviderModelOptions(key, input?.value || PROVIDER_PRESETS[key]?.model || '');
+    if (input) {
+      input.setAttribute('aria-expanded', 'false');
+    }
+    if (suggestions) suggestions.hidden = true;
+  } else if (suggestions) {
+    suggestions.replaceChildren();
+    suggestions.hidden = true;
+  }
+  if (input) input.hidden = false;
+  if (capability) capability.hidden = key === 'deepseek';
+  setModelVisionState({ success: false, unsupported: key === 'deepseek' });
+  if (capability) capability.dataset.provider = key;
+}
+
+function invalidateModelVision() {
+  const provider = document.getElementById('add-model-form')?.dataset.provider || '';
+  setModelVisionState(provider === 'deepseek' ? { unsupported: true } : {});
+}
+
+async function probeModelVision() {
+  const form = document.getElementById('add-model-form');
+  const button = document.getElementById('model-vision-probe');
+  const errorEl = document.getElementById('add-model-err');
+  if (!form || !button || button.disabled) return;
+  const payload = Object.fromEntries(new FormData(form).entries());
+  if (!payload.model?.trim() || !payload.apibase?.trim()) {
+    if (errorEl) { errorEl.textContent = t('err.modelRequired'); errorEl.hidden = false; }
+    return;
+  }
+  payload.protocol = payload.protocol || form.dataset.protocol || 'oai';
+  payload.vision = true;
+  if (editingModelId != null) payload.profileId = editingModelId;
+  setModelVisionState({ busy: true });
+  if (errorEl) errorEl.hidden = true;
+  try {
+    await bridgeFetch('/model-profiles/vision-probe', { method: 'POST', body: payload });
+    setModelVisionState({ success: true });
+  } catch (error) {
+    setModelVisionState({ error: true });
+    if (errorEl) {
+      const message = error.message || String(error);
+      errorEl.textContent = message.includes('vision_probe_failed')
+        ? `${t('err.visionProbe')}: ${message.replace(/^vision_probe_failed:\s*/, '')}`
+        : message;
+      errorEl.hidden = false;
+    }
+  }
+}
+
+document.getElementById('model-vision-probe')?.addEventListener('click', () => {
+  void probeModelVision();
+});
+const modelInput = document.querySelector('#add-model-form input[name="model"]');
+const modelSuggestions = document.getElementById('model-preset-options');
+modelInput?.addEventListener('focus', () => setModelSuggestionsOpen(true));
+modelInput?.addEventListener('click', () => setModelSuggestionsOpen(true));
+modelInput?.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    setModelSuggestionsOpen(false);
+  } else if (event.key === 'ArrowDown') {
+    const first = modelSuggestions?.querySelector('[data-model-option]');
+    if (first) { event.preventDefault(); first.focus(); }
+  }
+});
+modelSuggestions?.addEventListener('click', event => {
+  const option = event.target.closest('[data-model-option]');
+  if (!option || !modelInput) return;
+  modelInput.value = option.dataset.modelOption || '';
+  modelInput.dispatchEvent(new Event('input', { bubbles: true }));
+  modelInput.focus();
+  setModelSuggestionsOpen(false);
+});
+document.addEventListener('pointerdown', event => {
+  if (!event.target.closest('.model-input-shell')) setModelSuggestionsOpen(false);
+});
+document.querySelectorAll('#add-model-form input[name="model"], #add-model-form input[name="apikey"], #add-model-form input[name="apibase"]')
+  .forEach(input => input.addEventListener('input', () => {
+    invalidateModelVision();
+  }));
 
 // 在「添加模型」弹窗顶部显示/隐藏接入指引横幅。key 为 null 时隐藏。
 function setModelGuide(key) {
@@ -5981,6 +6375,8 @@ function setModelGuide(key) {
   if (logo) { logo.innerHTML = p.logo || ''; logo.style.background = p.tint || ''; }
   const nameEl = document.getElementById('model-guide-name');
   if (nameEl) nameEl.textContent = p.label;
+  const step3 = box.querySelector('.model-guide-steps li:last-child');
+  if (step3) step3.dataset.i18n = key === 'deepseek' ? 'guide.deepseekStep3' : 'guide.step3';
   const link = document.getElementById('model-guide-link');
   if (link) { link.href = p.keyUrl; link.textContent = t('guide.getKey').replace('{name}', p.label); }
 }
@@ -6002,11 +6398,9 @@ function openAddModelFormForProvider(key) {
     form.model.value = p.model || '';
     form.apibase.value = p.apibase || '';
     form.name.value = p.name || '';
-    const vision = form.querySelector('input[name="vision"]');
-    if (vision) vision.checked = p.vision !== false;
-    const pr = form.querySelector(`input[name="protocol"][value="${p.protocol}"]`);
-    if (pr) pr.checked = true;
   }
+  setModelFormMode(key);
+  if (key === 'deepseek') setModelVisionState({ unsupported: true });
   setModelApikeyMode(true);
   if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
   setModelGuide(key);
@@ -6023,6 +6417,8 @@ function openAddModelForm() {
   const errEl = document.getElementById('add-model-err');
   if (title) title.dataset.i18n = 'modal.addModel';
   if (form) form.reset();
+  setModelFormMode('');
+  setModelVisionState({});
   setModelApikeyMode(true);
   setModelGuide(null);
   if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
@@ -6032,6 +6428,7 @@ function openAddModelForm() {
 async function openEditModelForm(id) {
   editingModelId = id;
   setModelGuide(null);
+  setModelFormMode('');
   const errEl = document.getElementById('add-model-err');
   if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
   try {
@@ -6045,20 +6442,13 @@ async function openEditModelForm(id) {
       form.model.value = p.model || '';
       form.apibase.value = p.apibase || '';
       form.name.value = p.name || '';
-      const vision = form.querySelector('input[name="vision"]');
-      if (vision) vision.checked = !!p.vision;
-      form.max_retries.value = p.max_retries ?? 5;
-      form.connect_timeout.value = p.connect_timeout ?? 15;
-      form.read_timeout.value = p.read_timeout ?? 300;
-      // 编辑模式:按 varName 回填协议分段控件
-      const pv = /claude/i.test(p.varName || '') ? 'claude' : 'oai';
-      const pr = form.querySelector(`input[name="protocol"][value="${pv}"]`);
-      if (pr) pr.checked = true;
-      // 回填流式开关(默认流式)
-      const sv = (p.stream === false) ? 'false' : 'true';
-      const sr = form.querySelector(`input[name="stream"][value="${sv}"]`);
-      if (sr) sr.checked = true;
+      const vision = modelVisionValue(form);
+      if (vision) vision.value = p.vision ? 'true' : 'false';
     }
+    const deepseek = /deepseek/i.test(`${p.model || ''} ${p.apibase || ''}`);
+    const capability = document.getElementById('model-capability-row');
+    if (capability) capability.hidden = deepseek;
+    setModelVisionState({ success: !deepseek && !!p.vision && !!p.visionVerified, unsupported: deepseek });
     setModelApikeyMode(false);
     openModal('add-model-modal');
     applyI18n();
@@ -6195,12 +6585,10 @@ function setKbConfigForm(kind, values, targetForm = null) {
   if (!form || !values) return;
   const baseUrl = form.elements.namedItem('baseUrl');
   const model = form.elements.namedItem(kind === 'embedding' ? 'model' : 'modelVersion');
-  const dimension = form.elements.namedItem('dimension');
   if (baseUrl) baseUrl.value = values.baseUrl || '';
   if (model) model.value = kind === 'embedding'
     ? (values.model || '')
     : (values.modelVersion || '');
-  if (dimension) dimension.value = values.dimension || '';
   const secret = form.elements.namedItem('apiKey');
   if (secret) secret.value = '';
   setKbConfigStatus(form, !!values.apiKeyConfigured);
@@ -6211,6 +6599,8 @@ async function loadKbServiceConfigs() {
   const forms = [
     document.getElementById('kb-embedding-config-form'),
     document.getElementById('mineru-config-form'),
+    document.getElementById('kb-quickstart-embedding-form'),
+    document.getElementById('kb-quickstart-mineru-form'),
   ].filter(Boolean);
   if (!forms.length) return;
   kbConfigLoading = (async () => {
@@ -6298,6 +6688,8 @@ const KB_QUICKSTART_GUIDES = {
     color: '#0284C7', tint: 'rgba(14,165,233,.12)',
     steps: ['pq.embeddingGuide1', 'pq.embeddingGuide2', 'pq.embeddingGuide3'],
     tip: 'pq.embeddingGuideTip',
+    link: 'https://bailian.console.aliyun.com/cn-beijing?tab=model#/api-key',
+    linkText: 'pq.embeddingRegister',
   },
   mineru: {
     title: 'pq.mineruModalTitle', name: 'pq.mineruAction', icon: 'fileText',
@@ -6520,6 +6912,7 @@ if (addModelForm) addModelForm.addEventListener('submit', async (e) => {
   const errEl = document.getElementById('add-model-err');
   const fd = new FormData(addModelForm);
   const payload = Object.fromEntries(fd.entries());
+  payload.protocol = payload.protocol || addModelForm.dataset.protocol || 'oai';
   const isEdit = editingModelId != null;
   if (!payload.apibase?.trim() || !payload.model?.trim()) {
     if (errEl) { errEl.textContent = t('err.modelRequired'); errEl.hidden = false; }
@@ -7753,9 +8146,6 @@ function showChanToast(title, detail, kind) {
     if (form) {
       ['model', 'apikey', 'apibase', 'name'].forEach(name => {
         bindFieldInlineLimit(form.querySelector(`[name="${name}"]`));
-      });
-      ['max_retries', 'connect_timeout', 'read_timeout'].forEach(name => {
-        bindNumberClamp(form.querySelector(`[name="${name}"]`));
       });
     }
 

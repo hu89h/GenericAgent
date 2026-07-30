@@ -12,6 +12,8 @@ HTTP API:
   GET    /config
   POST   /config
   GET    /model-profiles  (+ POST / PUT / DELETE by id)
+  POST   /model-profiles/vision-probe
+  POST   /open-external       body: {"url":"https://..."}
   GET    /kb
   POST   /kb/create
   GET    /kb/config
@@ -23,6 +25,7 @@ HTTP API:
   GET    /kb/{kb_id}/status
   GET    /kb/{kb_id}/source
   GET    /kb/{kb_id}/source/asset
+  POST   /kb/{kb_id}/documents/delete
   POST   /kb/{kb_id}/reindex
   DELETE /kb/{kb_id}
   POST   /kb/{kb_id}/open
@@ -50,16 +53,37 @@ WS API (state sync):
 """
 from __future__ import annotations
 
-import asyncio, atexit, base64, contextlib, hashlib, importlib, json, os, re, shutil, signal, subprocess, sys
+import asyncio, atexit, base64, contextlib, hashlib, importlib, json, os, re, shutil, signal, subprocess, sys, tempfile, webbrowser
 from collections import Counter, deque
 import threading, time, traceback, uuid
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlparse
 from aiohttp import web, WSMsgType
 
 APP_DIR = Path(__file__).resolve().parent
+
+
+def _serialize_mykey_mutation(method):
+    """Serialize read-modify-write operations against the active ``mykey.py``.
+
+    Configuration cards can submit independently, so a model save and a KB
+    service save may overlap.  Without one shared lock, both operations can
+    read the same old file and the later write silently discard the earlier
+    change.  The fallback keeps lightweight tests that construct AgentManager
+    with ``object.__new__`` working without bypassing the lock in production.
+    """
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        lock = getattr(self, "_mykey_write_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._mykey_write_lock = lock
+        with lock:
+            return method(self, *args, **kwargs)
+    return guarded
 
 
 def _hot_reload_enabled() -> bool:
@@ -381,6 +405,7 @@ def _sanitize_desktop_plan_path(session_id: str, plan_path: str) -> str:
 class AgentManager:
     def __init__(self):
         self.lock = threading.RLock()
+        self._mykey_write_lock = threading.RLock()
         self.ga_root = str(DEFAULT_GA_ROOT)
         self.config: Dict[str, Any] = {}
         self.sessions: Dict[str, Session] = {}
@@ -720,8 +745,23 @@ class AgentManager:
                 cfg["stream"] = False
         return cfg
 
+    @_serialize_mykey_mutation
     def _save_mykey_text(self, text: str) -> list:
-        self._mykey_file().write_text(text, encoding="utf-8")
+        target = self._mykey_file()
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=str(target.parent),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(str(text))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
         self._invalidate_mykey_cache()
         self._reload_live_agents()
         return self.list_model_profiles()
@@ -783,6 +823,7 @@ class AgentManager:
             },
         }
 
+    @_serialize_mykey_mutation
     def save_kb_service_configs(self, data: dict) -> dict:
         if not isinstance(data, dict):
             raise ValueError("knowledge-base configuration must be an object")
@@ -926,15 +967,38 @@ class AgentManager:
             except Exception as e:
                 print(f"[bridge] reload live agent failed: {e}", file=sys.stderr)
 
+    @_serialize_mykey_mutation
     def add_model_profile(self, data: dict) -> dict:
         cfg = self._build_cfg(data)
         text = self._mykey_file().read_text(encoding="utf-8")
         var = self._next_native_var(text, data.get("protocol", ""))
-        self.ensure_ga_import_path()
-        from llmcore import probe_model_vision
-        probe_model_vision(cfg, "claude" if "claude" in var else "oai")
         profiles = self._save_mykey_text(text.rstrip() + f"\n{var} = {self._format_py_dict(cfg)}\n")
         return {"varName": var, "profileId": profiles[-1]["id"] if profiles else 0, "profiles": profiles}
+
+    def probe_model_profile_vision(self, data: dict) -> dict:
+        """Probe a pending model without writing it to ``mykey.py``."""
+        if not isinstance(data, dict):
+            raise ValueError("model configuration must be an object")
+        profile_id = data.get("profileId")
+        existing: Optional[dict] = None
+        var = ""
+        if profile_id is not None and str(profile_id).strip() != "":
+            try:
+                var, existing = self._profile_at(int(profile_id))
+            except (TypeError, ValueError):
+                raise ValueError("profile not found") from None
+        probe_data = dict(data)
+        probe_data["vision"] = True
+        cfg = self._build_cfg(probe_data, existing, require_key=False)
+        if not str(cfg.get("apikey") or "").strip():
+            raise ValueError("apikey is required")
+        self.ensure_ga_import_path()
+        from llmcore import probe_model_vision
+        protocol = str(data.get("protocol") or "").strip().lower()
+        if protocol not in {"oai", "openai", "claude", "anthropic"}:
+            protocol = "claude" if "claude" in var.lower() else "oai"
+        probe_model_vision(cfg, protocol)
+        return {"ok": True, "vision": True, "visionVerified": True}
 
     def get_model_profile(self, profile_id: int) -> dict:
         var, cfg = self._profile_at(profile_id)
@@ -945,16 +1009,15 @@ class AgentManager:
         out["visionVerified"] = "vision" in cfg
         return out
 
+    @_serialize_mykey_mutation
     def update_model_profile(self, profile_id: int, data: dict) -> dict:
         var, existing = self._profile_at(profile_id)
         text = self._mykey_file().read_text(encoding="utf-8")
         cfg = self._build_cfg(data, existing, require_key=False)
-        self.ensure_ga_import_path()
-        from llmcore import probe_model_vision
-        probe_model_vision(cfg, "claude" if "claude" in var else "oai")
         profiles = self._save_mykey_text(self._patch_var_block(text, var, cfg))
         return {"varName": var, "profileId": profile_id, "profiles": profiles}
 
+    @_serialize_mykey_mutation
     def delete_model_profile(self, profile_id: int) -> dict:
         if len(self._profile_keys()) <= 1:
             raise ValueError("cannot delete the last profile")
@@ -1073,6 +1136,7 @@ class AgentManager:
                             "inMixin": name in all_mixin_members, "active": i == active})
         return out
 
+    @_serialize_mykey_mutation
     def add_to_mixin(self, profile_id: int) -> dict:
         """把一个基本模型加入主聚合渠道：把它的 name 追加进 mixin_config['llm_nos']。
         坑1：校验 Native 一致性（聚合内必须全 Native 或全非 Native）。
@@ -1105,6 +1169,7 @@ class AgentManager:
             text = text.rstrip() + f"\n{mvar} = {self._format_py_dict(mcfg)}\n"
         return {"profiles": self._save_mykey_text(text)}
 
+    @_serialize_mykey_mutation
     def remove_from_mixin(self, profile_id: int) -> dict:
         """把一个基本模型移出主聚合渠道。"""
         var, cfg = self._profile_at(profile_id)
@@ -1118,6 +1183,7 @@ class AgentManager:
         text = self._patch_var_block(self._mykey_file().read_text(encoding="utf-8"), mvar, mcfg)
         return {"profiles": self._save_mykey_text(text)}
 
+    @_serialize_mykey_mutation
     def reorder_mixin(self, members: list) -> dict:
         """按前端拖拽后的顺序重写主渠道组 llm_nos。只接受当前成员的重排，不增删。"""
         keys, mk = self._mykey_vars()
@@ -2130,6 +2196,18 @@ async def model_profiles_handler(request):
         return json_ok({"ok": False, "error": str(e)}, status=500)
 
 
+async def model_vision_probe_handler(request):
+    try:
+        return json_ok({
+            "ok": True,
+            **manager.probe_model_profile_vision(await read_json(request)),
+        })
+    except ValueError as e:
+        return json_ok({"ok": False, "error": str(e)}, status=400)
+    except Exception as e:
+        return json_ok({"ok": False, "error": str(e)}, status=400)
+
+
 async def mixin_handler(request):
     """聚合渠道成员管理：POST 加入 / DELETE 移出 主聚合渠道。"""
     try:
@@ -2286,6 +2364,26 @@ async def path_open_handler(request):
     except OSError as e:
         return json_ok({"ok": False, "error": str(e), "path": str(target)}, status=500)
     return json_ok({"ok": True, "path": str(target)})
+
+
+async def external_url_handler(request):
+    """Open an HTTP(S) link in the user's system browser.
+
+    The desktop WebView does not reliably permit ``target=_blank``. Keeping
+    this operation in the local bridge avoids popup interception while still
+    refusing non-web schemes from the renderer.
+    """
+    data = await read_json(request)
+    raw = str(data.get("url") or "").strip()
+    parsed = urlparse(raw)
+    if len(raw) > 2048 or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return json_ok({"ok": False, "error": "invalid_external_url"}, status=400)
+    try:
+        if not webbrowser.open(raw, new=2, autoraise=True):
+            raise OSError("system browser rejected the URL")
+    except Exception as error:
+        return json_ok({"ok": False, "error": f"open_external_failed: {error}"}, status=500)
+    return json_ok({"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -2538,6 +2636,8 @@ def _kb_job_snapshot(job: dict) -> dict:
         ],
         "startedAt": job.get("startedAt"),
         "updatedAt": job.get("updatedAt"),
+        "dataId": str(job.get("dataId") or ""),
+        "documentName": str(job.get("documentName") or ""),
         "cancelRequested": bool(job.get("cancelRequested")),
         "cancellable": (
             isinstance(job.get("cancelEvent"), threading.Event)
@@ -2639,12 +2739,30 @@ async def kb_open_handler(request):
     kb_id = str(request.match_info.get("kb_id") or "").strip()
     try:
         data = await read_json(request)
-        path = _kb_backend().resolve_open_target(
-            kb_id=kb_id,
-            data_id=data.get("dataId", data.get("data_id")) or "",
-            ref=data.get("ref") or "",
-            ref_key=data.get("refKey", data.get("ref_key")) or "",
-        )
+        backend = _kb_backend()
+        data_id = data.get("dataId", data.get("data_id")) or ""
+        ref = data.get("ref") or ""
+        is_processed = data.get("processed") is True or str(data.get("processed") or "").lower() in {"1", "true", "yes"}
+        if is_processed:
+            resolved = backend.resolve_processed_document(
+                kb_id=kb_id,
+                data_id=data_id,
+                file_name=data.get("fileName", data.get("file_name")) or "",
+                ref=ref,
+            )
+            if resolved.get("error"):
+                return json_ok(
+                    {"ok": False, "error": resolved.get("error_code") or "processed_document_not_found"},
+                    status=404,
+                )
+            path = resolved.get("path")
+        else:
+            path = backend.resolve_open_target(
+                kb_id=kb_id,
+                data_id=data_id,
+                ref=ref,
+                ref_key=data.get("refKey", data.get("ref_key")) or "",
+            )
         if not path:
             return json_ok({"ok": False, "error": "target_not_found"}, status=404)
         _open_path_default(Path(path))
@@ -3053,6 +3171,132 @@ async def kb_delete_handler(request):
         return json_ok({"ok": False, "error": str(error)}, status=409)
     except Exception as error:
         return json_ok({"ok": False, "error": str(error)}, status=400)
+
+
+async def kb_document_delete_handler(request):
+    kb_id = str(request.match_info.get("kb_id") or "").strip()
+    if not kb_id:
+        return json_ok({"ok": False, "error": "missing_kb_id"}, status=400)
+    data = await read_json(request)
+    requested_data_id = str(data.get("dataId", data.get("data_id")) or "").strip()
+    requested_file = str(data.get("fileName", data.get("file_name")) or "").replace("\\", "/").strip()
+    requested_ref = str(data.get("ref") or "").replace("\\", "/").strip()
+    backend = _kb_backend()
+    detail = backend.status(kb_id).get("knowledge_bases") or []
+    if not detail:
+        return json_ok({"ok": False, "error": "knowledge_base_not_found"}, status=404)
+    documents = detail[0].get("documents") or []
+    target = next(
+        (
+            document for document in documents
+            if requested_data_id and document.get("data_id") == requested_data_id
+        ),
+        None,
+    )
+    if target is None and requested_file:
+        target = next(
+            (document for document in documents if document.get("file_name") == requested_file),
+            None,
+        )
+    if target is None and requested_ref:
+        target = next(
+            (document for document in documents if document.get("ref") == requested_ref),
+            None,
+        )
+    if target is None:
+        return json_ok({"ok": False, "error": "document_not_found"}, status=404)
+
+    with _kb_jobs_lock:
+        _kb_prune_jobs_locked()
+    job_id = f"kbdelete-{uuid.uuid4().hex[:16]}"
+    now = int(time.time())
+    job = {
+        "ok": True,
+        "jobId": job_id,
+        "state": "queued",
+        "phase": "queued",
+        "mode": "delete_document",
+        "kbId": kb_id,
+        "dataId": target.get("data_id") or "",
+        "documentName": target.get("source_file_name") or target.get("title") or target.get("file_name") or "",
+        "scope": "selected",
+        "targets": [{"id": kb_id, "name": detail[0].get("name") or kb_id}],
+        "done": 0,
+        "total": 1,
+        "currentKb": "",
+        "current": target.get("source_file_name") or target.get("file_name") or "",
+        "progress": {"completed": 0, "total": 0, "unit": "records", "indeterminate": True},
+        "logs": [],
+        "result": None,
+        "error": "",
+        "startedAt": now,
+        "updatedAt": now,
+    }
+    with _kb_jobs_lock:
+        _kb_jobs[job_id] = job
+
+    def log(message):
+        text = str(message or "").strip()
+        if not text:
+            return
+        with _kb_jobs_lock:
+            current = _kb_jobs.get(job_id)
+            if current is None:
+                return
+            current["logs"] = (current.get("logs") or []) + [text]
+            current["logs"] = current["logs"][-100:]
+            current["updatedAt"] = int(time.time())
+
+    def update_progress(event):
+        if not isinstance(event, dict):
+            return
+        with _kb_jobs_lock:
+            current = _kb_jobs.get(job_id)
+            if current is None:
+                return
+            current["phase"] = str(event.get("phase") or current.get("phase") or "indexing")
+            current["done"] = int(event.get("processed") or current.get("done") or 0)
+            current["total"] = int(event.get("total") or current.get("total") or 1)
+            current["progress"] = _kb_progress_from_event(event)
+            current["updatedAt"] = int(time.time())
+
+    def run_delete():
+        with _kb_jobs_lock:
+            current = _kb_jobs[job_id]
+            current.update(state="running", phase="indexing", updatedAt=int(time.time()))
+        try:
+            result = backend.delete_document(
+                kb_id,
+                data_id=target.get("data_id") or "",
+                progress=update_progress,
+                logfn=log,
+            )
+            with _kb_jobs_lock:
+                current = _kb_jobs[job_id]
+                current.update(
+                    state="completed",
+                    phase="completed",
+                    result=result,
+                    updatedAt=int(time.time()),
+                    done=1,
+                    total=1,
+                    current="",
+                    summary=result.get("summary") or {},
+                    progress={"completed": 1, "total": 1, "unit": "documents", "indeterminate": False},
+                )
+        except Exception as error:
+            with _kb_jobs_lock:
+                _kb_jobs[job_id].update(
+                    ok=False,
+                    state="failed",
+                    phase="failed",
+                    error=str(error),
+                    updatedAt=int(time.time()),
+                    progress={"completed": 0, "total": 1, "unit": "documents", "indeterminate": False},
+                )
+
+    threading.Thread(target=run_delete, name=job_id, daemon=True).start()
+    return json_ok({"ok": True, "jobId": job_id, "state": "queued"}, status=202)
 
 
 async def kb_reindex_handler(request):
@@ -3769,8 +4013,10 @@ def create_app():
     app.router.add_get("/status", status_handler)
     app.router.add_get("/config", get_config_handler)
     app.router.add_post("/config", save_config_handler)
+    app.router.add_post("/open-external", external_url_handler)
     app.router.add_get("/model-profiles", model_profiles_handler)
     app.router.add_post("/model-profiles", model_profiles_handler)
+    app.router.add_post("/model-profiles/vision-probe", model_vision_probe_handler)
     app.router.add_put("/model-profiles/mixin/order", mixin_order_handler)
     app.router.add_post("/model-profiles/{id}/mixin", mixin_handler)
     app.router.add_delete("/model-profiles/{id}/mixin", mixin_handler)
@@ -3799,6 +4045,7 @@ def create_app():
     app.router.add_get("/kb/{kb_id}/status", kb_detail_status_handler)
     app.router.add_get("/kb/{kb_id}/source/asset", kb_source_asset_handler)
     app.router.add_get("/kb/{kb_id}/source", kb_source_handler)
+    app.router.add_post("/kb/{kb_id}/documents/delete", kb_document_delete_handler)
     app.router.add_post("/kb/{kb_id}/reindex", kb_reindex_handler)
     app.router.add_post("/kb/{kb_id}/open", kb_open_handler)
     app.router.add_delete("/kb/{kb_id}", kb_delete_handler)

@@ -1,6 +1,8 @@
 import runpy
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -119,6 +121,63 @@ class KnowledgeBaseServiceConfigTests(unittest.TestCase):
                 with self.subTest(payload=payload):
                     with self.assertRaises(ValueError):
                         self.manager.save_kb_service_configs(payload)
+
+    def test_concurrent_card_saves_do_not_discard_each_other(self):
+        """Two UI cards may submit at once; both changes must survive."""
+        raw = runpy.run_path(str(self.mykey))
+
+        def slow_save(text):
+            # Make an unguarded read-modify-write race observable without
+            # relying on a particular machine or filesystem timing.
+            time.sleep(0.02)
+            self.mykey.write_text(text, encoding="utf-8")
+            return []
+
+        self.manager._save_mykey_text = slow_save
+        barrier = threading.Barrier(3)
+        errors = []
+        payloads = [
+            {
+                "embedding": {
+                    "baseUrl": "https://embedding.concurrent/v1",
+                    "model": "text-embedding-v4",
+                    "dimension": "1024",
+                },
+            },
+            {
+                "mineru": {
+                    "baseUrl": "https://mineru.concurrent/api/v4",
+                    "modelVersion": "vlm",
+                },
+            },
+        ]
+
+        def save(payload):
+            try:
+                barrier.wait(timeout=2)
+                self.manager.save_kb_service_configs(payload)
+            except Exception as error:  # pragma: no cover - assertion below
+                errors.append(error)
+
+        with mock.patch("llmcore.reload_mykeys", return_value=(raw, False)):
+            threads = [threading.Thread(target=save, args=(payload,)) for payload in payloads]
+            for thread in threads:
+                thread.start()
+            barrier.wait(timeout=2)
+            for thread in threads:
+                thread.join(timeout=5)
+
+        self.assertFalse(errors)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        saved = runpy.run_path(str(self.mykey))
+        self.assertEqual(
+            saved["kb_embedding_config"]["apibase"],
+            "https://embedding.concurrent/v1",
+        )
+        self.assertEqual(
+            saved["mineru_config"]["base_url"],
+            "https://mineru.concurrent/api/v4",
+        )
 
 
 if __name__ == "__main__":

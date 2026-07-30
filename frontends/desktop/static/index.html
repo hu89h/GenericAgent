@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>GenericAgent</title>
 <link rel="stylesheet" href="assets/fonts/fonts.css?v=2">
-  <link rel="stylesheet" href="styles.css?v=198">
+  <link rel="stylesheet" href="styles.css?v=207">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
@@ -90,7 +90,7 @@
         </a>
       </nav>
 
-      <!-- 配置向导：按顺序完成对话模型，以及按需配置知识库服务 -->
+      <!-- 配置向导：对话模型是必选配置，知识库服务按需配置 -->
       <div class="provider-quickstart" id="provider-quickstart">
         <div class="pq-head" id="pq-toggle" role="button" tabindex="0" aria-expanded="true">
           <span class="fr-l">
@@ -100,13 +100,15 @@
           <span class="pq-collapse chev" data-ga-icon="caretRight" aria-hidden="true"></span>
         </div>
         <div class="pq-body">
-          <div class="pq-step-head pq-model-step-head">
-            <span class="pq-step-no">1</span>
-            <span class="pq-step-copy">
-              <span class="pq-step-title" data-i18n="pq.modelTitle"></span>
-            </span>
-            <span class="pq-step-state" id="pq-model-state" aria-live="polite"></span>
-          </div>
+          <section class="pq-group" data-pq-group="model">
+            <div class="pq-group-head" data-pq-group-toggle role="button" tabindex="0" aria-expanded="true">
+              <span class="pq-group-copy">
+                <span class="pq-group-title" data-i18n="pq.modelTitle"></span>
+              </span>
+              <span class="pq-group-state pq-step-state" id="pq-model-state" aria-live="polite"></span>
+              <span class="pq-group-collapse chev" data-ga-icon="caretRight" aria-hidden="true"></span>
+            </div>
+            <div class="pq-group-body">
           <button type="button" class="pq-btn" data-provider="deepseek">
             <span class="pq-logo" style="background:rgba(77,107,254,.12)" aria-hidden="true"><svg viewBox="0 0 24 24" fill="#4D6BFE" xmlns="http://www.w3.org/2000/svg"><path d="M23.748 4.651c-.254-.124-.364.113-.512.233-.051.04-.094.09-.137.137-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.155-.708-.311-.955-.65-.172-.24-.219-.509-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.094.172.187.129.323-.082.28-.18.553-.266.833-.055.179-.137.218-.328.14a5.5 5.5 0 0 1-1.737-1.179c-.857-.828-1.631-1.743-2.597-2.46a12 12 0 0 0-.689-.47c-.985-.957.13-1.743.387-1.836.27-.098.094-.433-.778-.428-.872.003-1.67.295-2.687.685a3 3 0 0 1-.465.136 9.6 9.6 0 0 0-2.883-.101c-1.885.21-3.39 1.1-4.497 2.622C.082 8.776-.231 10.854.152 13.02c.403 2.284 1.568 4.175 3.36 5.653 1.857 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.132-.284 4.994-1.86.47.234.962.328 1.78.398.629.058 1.235-.031 1.705-.129.735-.155.684-.836.418-.961-2.155-1.004-1.682-.595-2.112-.926 1.095-1.295 2.768-3.598 3.284-6.733.05-.346.115-.834.108-1.114-.004-.171.035-.238.23-.257a4.2 4.2 0 0 0 1.545-.475c1.397-.763 1.96-2.016 2.093-3.517.02-.23-.004-.467-.247-.588M11.58 18.168c-2.088-1.642-3.101-2.183-3.52-2.16-.39.024-.32.472-.234.763.09.288.207.487.371.74.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.168-1.361-.801-2.5-1.86-3.301-3.306-.775-1.393-1.225-2.888-1.299-4.482-.02-.385.094-.522.477-.592a4.7 4.7 0 0 1 1.53-.038c2.131.311 3.946 1.264 5.467 2.774.868.86 1.525 1.887 2.202 2.89.72 1.066 1.494 2.082 2.48 2.915.348.291.626.513.892.677-.802.09-2.14.109-3.055-.615zm1.001-6.44a.306.306 0 0 1 .415-.287.3.3 0 0 1 .113.074.3.3 0 0 1 .086.214c0 .17-.136.307-.308.307a.303.303 0 0 1-.306-.307m3.11 1.596c-.2.081-.4.151-.591.16a1.25 1.25 0 0 1-.798-.254c-.274-.23-.47-.358-.551-.758a1.7 1.7 0 0 1 .015-.588c.07-.327-.007-.537-.238-.727-.188-.156-.426-.199-.689-.199a.6.6 0 0 1-.254-.078.253.253 0 0 1-.114-.358 1 1 0 0 1 .192-.21c.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.392.451.462.576.685.915.176.264.336.536.446.848.066.194-.02.353-.25.45"/></svg></span>
             <span class="pq-btn-text">
@@ -123,33 +125,30 @@
             </span>
             <span class="pq-arrow" data-ga-icon="caretRight"></span>
           </button>
-          <section class="pq-step" data-step="embedding">
-            <div class="pq-step-head">
-              <span class="pq-step-no">2</span>
-              <span class="pq-step-copy">
-                <span class="pq-step-title" data-i18n="pq.embeddingTitle"></span>
-              </span>
-              <span class="pq-step-state" id="pq-embedding-state" aria-live="polite"></span>
             </div>
-            <button type="button" class="pq-btn pq-setup-btn" data-setup="embedding">
-              <span class="pq-logo pq-logo-embedding" aria-hidden="true"><span data-ga-icon="books"></span></span>
-              <span class="pq-btn-text"><span class="pq-btn-name" data-i18n="pq.embeddingAction"></span><span class="pq-btn-desc" data-i18n="pq.embeddingActionDesc"></span></span>
-              <span class="pq-arrow" data-ga-icon="caretRight"></span>
-            </button>
           </section>
-          <section class="pq-step" data-step="mineru">
-            <div class="pq-step-head">
-              <span class="pq-step-no">3</span>
-              <span class="pq-step-copy">
-                <span class="pq-step-title" data-i18n="pq.mineruTitle"></span>
+          <section class="pq-group pq-knowledge-group collapsed" data-pq-group="knowledge">
+            <div class="pq-group-head" data-pq-group-toggle role="button" tabindex="0" aria-expanded="false">
+              <span class="pq-group-copy">
+                <span class="pq-group-title" data-i18n="pq.knowledgeTitle"></span>
+                <span class="pq-group-desc" data-i18n="pq.knowledgeDesc"></span>
               </span>
-              <span class="pq-step-state" id="pq-mineru-state" aria-live="polite"></span>
+              <span class="pq-group-collapse chev" data-ga-icon="caretRight" aria-hidden="true"></span>
             </div>
-            <button type="button" class="pq-btn pq-setup-btn" data-setup="mineru">
-              <span class="pq-logo pq-logo-mineru" aria-hidden="true"><span data-ga-icon="fileText"></span></span>
-              <span class="pq-btn-text"><span class="pq-btn-name" data-i18n="pq.mineruAction"></span><span class="pq-btn-desc" data-i18n="pq.mineruActionDesc"></span></span>
-              <span class="pq-arrow" data-ga-icon="caretRight"></span>
-            </button>
+            <div class="pq-group-body">
+              <button type="button" class="pq-btn pq-setup-btn" data-setup="embedding">
+                <span class="pq-logo pq-logo-embedding" aria-hidden="true"><span data-ga-icon="books"></span></span>
+                <span class="pq-btn-text"><span class="pq-btn-name" data-i18n="pq.embeddingAction"></span><span class="pq-btn-desc" data-i18n="pq.embeddingActionDesc"></span></span>
+                <span class="pq-step-state" id="pq-embedding-state" aria-live="polite"></span>
+                <span class="pq-arrow" data-ga-icon="caretRight"></span>
+              </button>
+              <button type="button" class="pq-btn pq-setup-btn" data-setup="mineru">
+                <span class="pq-logo pq-logo-mineru" aria-hidden="true"><span data-ga-icon="fileText"></span></span>
+                <span class="pq-btn-text"><span class="pq-btn-name" data-i18n="pq.mineruAction"></span><span class="pq-btn-desc" data-i18n="pq.mineruActionDesc"></span></span>
+                <span class="pq-step-state" id="pq-mineru-state" aria-live="polite"></span>
+                <span class="pq-arrow" data-ga-icon="caretRight"></span>
+              </button>
+            </div>
           </section>
         </div>
       </div>
@@ -258,24 +257,26 @@
           </div>
           <div class="page-pad kb-page">
             <header class="kb-page-head">
-              <div class="page-title" data-i18n="page.kb.title"></div>
+              <div class="kb-page-copy">
+                <div class="page-title" data-i18n="page.kb.title"></div>
+                <p class="kb-page-hint" data-i18n="kb.pageHint"></p>
+              </div>
             </header>
             <div class="kb-workspace">
               <button type="button" class="kb-panel-toggle kb-browser-toggle" id="kb-browser-toggle" data-kb-panel-toggle="browser" data-i18n-title="kb.collapseBrowser" title="" aria-expanded="true"><span data-ga-icon="caretLeft" aria-hidden="true"></span></button>
               <aside class="kb-browser" id="kb-browser">
                 <div class="kb-view" id="kb-library-view">
                   <div class="kb-library-head">
-                    <div class="kb-section-title" data-i18n="kb.libraries"></div>
+                    <input class="kb-library-search" id="kb-library-search" data-i18n-ph="kb.searchKbs" placeholder="">
                     <div class="kb-library-actions">
-                      <button type="button" class="kb-btn kb-btn-compact" id="kb-create-btn" data-i18n-title="kb.create" title=""><span data-ga-icon="plus"></span><span data-i18n="kb.create"></span></button>
-                      <button type="button" class="kb-btn kb-btn-compact" id="kb-import-btn" data-i18n-title="kb.import" title=""><span data-ga-icon="folderSimplePlus"></span><span data-i18n="kb.import"></span></button>
+                      <button type="button" class="kb-btn kb-btn-compact primary" id="kb-create-btn" data-i18n-title="kb.create" title=""><span data-ga-icon="plus"></span><span data-i18n="kb.create"></span></button>
                       <button type="button" class="kb-btn kb-btn-compact" id="kb-folder-import-btn" data-i18n-title="kb.importFolder" title=""><span data-ga-icon="folderSimplePlus"></span><span data-i18n="kb.importFolder"></span></button>
-                      <button type="button" class="kb-btn kb-btn-compact" id="kb-build-btn" data-i18n-title="kb.build" title=""><span data-ga-icon="lightning"></span><span data-i18n="kb.build"></span></button>
                       <button type="button" class="ic-btn" id="kb-refresh-btn" data-i18n-title="kb.refresh" title=""><span data-ga-icon="arrowClockwise"></span></button>
                     </div>
                   </div>
                   <div class="kb-library-grid" id="kb-library-grid"></div>
                 </div>
+                <div class="kb-browser-splitter" id="kb-browser-splitter" role="separator" aria-orientation="horizontal" aria-label="调整知识库与文档列表高度" tabindex="0"></div>
                 <div class="kb-view" id="kb-documents-view" hidden>
                   <div class="kb-view-head"><div class="kb-view-title" id="kb-active-kb-title"></div><div class="kb-view-actions"><button type="button" class="kb-btn kb-btn-compact" id="kb-add-docs-btn" data-i18n-title="kb.import" title=""><span data-ga-icon="fileText"></span><span data-i18n="kb.import"></span></button><button type="button" class="ic-btn" id="kb-doc-refresh-btn" data-i18n-title="kb.refresh" title=""><span data-ga-icon="arrowClockwise"></span></button></div></div>
                   <input class="kb-doc-search" id="kb-doc-search" data-i18n-ph="kb.searchDocs" placeholder="">
@@ -286,7 +287,7 @@
               <main class="kb-view" id="kb-reader-view">
                 <div class="kb-reader-layout" id="kb-reader-layout">
                   <section class="kb-reader-pane" id="kb-reader-pane">
-                    <div class="kb-view-head"><div class="kb-view-title" id="kb-doc-title"></div><button type="button" class="kb-link-btn" id="kb-open-doc" data-i18n="kb.open" disabled></button></div>
+                    <div class="kb-view-head"><div class="kb-view-title" id="kb-doc-title"></div><div class="kb-view-actions"><button type="button" class="kb-link-btn" id="kb-open-doc" data-i18n="kb.open" disabled></button><button type="button" class="kb-link-btn" id="kb-open-processed" data-i18n="kb.openProcessed" disabled></button></div></div>
                     <div class="kb-source-view" id="kb-md-view"></div>
                   </section>
                   <div class="kb-reader-splitter" id="kb-reader-splitter" role="separator" aria-orientation="vertical" aria-label="调整阅读与对话宽度" tabindex="0"></div>
@@ -662,40 +663,22 @@
             <li data-i18n="guide.step3"></li>
           </ol>
           <div class="model-guide-link-row">
-            <a class="model-guide-link" id="model-guide-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+            <a class="model-guide-link" id="model-guide-link" href="#" data-external-link></a>
             <button type="button" class="model-guide-copy" id="model-guide-copy" data-i18n-title="guide.copy" title="" aria-label="copy">
               <span data-ga-icon="copy"></span>
             </button>
           </div>
-          <p class="model-guide-tip" data-i18n="guide.prefillTip"></p>
         </div>
         <form id="add-model-form" class="model-form" autocomplete="off">
-          <label><span class="field-label"><span data-i18n="model.model"></span><span class="field-req" aria-hidden="true">*</span></span><input name="model" required data-i18n-ph="model.modelPh" maxlength="50"><span class="field-hint" data-i18n="model.modelHint"></span></label>
-          <label class="model-vision-toggle">
-            <span class="model-vision-copy"><span data-i18n="model.vision"></span><span class="field-hint" data-i18n="model.visionHint"></span></span>
-            <input type="checkbox" name="vision" value="true" checked>
-            <span class="model-toggle-track" aria-hidden="true"><span></span></span>
-          </label>
+          <label><span class="field-label"><span data-i18n="model.name"></span></span><input name="name" data-i18n-ph="model.namePh" maxlength="50"></label>
+          <label class="model-model-field"><span class="field-label"><span data-i18n="model.model"></span><span class="field-req" aria-hidden="true">*</span></span><span class="model-input-shell"><input name="model" required data-i18n-ph="model.modelPh" maxlength="50" autocomplete="off" aria-autocomplete="list" aria-controls="model-preset-options" aria-expanded="false"><span class="model-model-suggestions" id="model-preset-options" role="listbox" hidden></span></span></label>
+          <div class="model-capability-row" id="model-capability-row">
+            <div class="model-capability-copy"><span class="field-label" data-i18n="model.vision"></span><span class="field-hint" id="model-vision-status"></span></div>
+            <input type="hidden" name="vision" value="false" id="model-vision-value">
+            <button type="button" class="model-vision-probe" id="model-vision-probe" data-i18n="model.visionProbe"></button>
+          </div>
           <label id="model-apikey-label"><span class="field-label"><span data-i18n="model.apikey"></span><span class="field-req" aria-hidden="true">*</span></span><input name="apikey" type="password" data-i18n-ph="model.apikeyPh" id="model-apikey-input" maxlength="200"></label>
-          <label><span class="field-label"><span data-i18n="model.apibase"></span><span class="field-req" aria-hidden="true">*</span></span><input name="apibase" required data-i18n-ph="model.apibasePh" maxlength="200"></label>
-          <div class="model-form-field"><span class="field-label"><span data-i18n="model.protocol"></span><span class="field-req" aria-hidden="true">*</span></span>
-            <div class="seg-group" role="radiogroup">
-              <label class="seg-opt"><input type="radio" name="protocol" value="oai" required><span data-i18n="model.protocolOai"></span></label>
-              <label class="seg-opt"><input type="radio" name="protocol" value="claude" required><span data-i18n="model.protocolClaude"></span></label>
-            </div>
-          </div>
-          <div class="model-form-field"><span class="field-label"><span data-i18n="model.stream"></span></span>
-            <div class="seg-group" role="radiogroup">
-              <label class="seg-opt"><input type="radio" name="stream" value="true" checked><span data-i18n="model.streamOn"></span></label>
-              <label class="seg-opt"><input type="radio" name="stream" value="false"><span data-i18n="model.streamOff"></span></label>
-            </div>
-          </div>
-          <label><span data-i18n="model.name"></span><input name="name" data-i18n-ph="model.namePh" data-optional-ph maxlength="50"></label>
-          <div class="model-form-row">
-            <label class="model-form-mini"><span data-i18n="model.retries"></span><input name="max_retries" type="text" inputmode="numeric" pattern="[0-9]*" min="1" max="20" value="5"></label>
-            <label class="model-form-mini"><span data-i18n="model.connTimeout"></span><input name="connect_timeout" type="text" inputmode="numeric" pattern="[0-9]*" min="1" max="300" value="15"></label>
-            <label class="model-form-mini"><span data-i18n="model.readTimeout"></span><input name="read_timeout" type="text" inputmode="numeric" pattern="[0-9]*" min="5" max="3600" value="300"></label>
-          </div>
+          <label><span class="field-label"><span data-i18n="model.apibase"></span><span class="field-req" aria-hidden="true">*</span></span><input name="apibase" required data-i18n-ph="model.apibasePh" id="model-apibase-input" maxlength="200"></label>
           <p class="model-form-err" id="add-model-err" hidden></p>
           <div class="model-form-actions">
             <button type="button" class="set-btn ghost" data-close data-i18n="common.cancel"></button>
@@ -724,7 +707,7 @@
           </div>
           <ol class="model-guide-steps" id="kb-quickstart-steps"></ol>
           <div class="model-guide-link-row" id="kb-quickstart-link-row" hidden>
-            <a class="model-guide-link" id="kb-quickstart-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+            <a class="model-guide-link" id="kb-quickstart-link" href="#" data-external-link></a>
           </div>
           <p class="model-guide-tip" id="kb-quickstart-tip"></p>
         </div>
@@ -737,10 +720,7 @@
             <span data-i18n="model.apibase"></span>
             <input name="baseUrl" type="url" autocomplete="off" required>
           </label>
-          <div class="kb-config-row">
-            <label class="kb-config-field"><span data-i18n="model.model"></span><input name="model" autocomplete="off" required></label>
-            <label class="kb-config-field"><span data-i18n="set.kbDimension"></span><input name="dimension" type="number" min="1" step="1" required></label>
-          </div>
+          <label class="kb-config-field"><span data-i18n="model.model"></span><input name="model" autocomplete="off" required></label>
           <div class="kb-config-foot"><span class="kb-config-status" id="kb-quickstart-embedding-status"></span><button class="set-btn primary" type="submit" data-i18n="common.save"></button></div>
         </form>
         <form class="kb-config-form kb-quickstart-form" id="kb-quickstart-mineru-form" data-kind="mineru" hidden>
@@ -936,16 +916,10 @@
               <span data-i18n="model.apibase"></span>
               <input name="baseUrl" type="url" autocomplete="off" required>
             </label>
-            <div class="kb-config-row">
-              <label class="kb-config-field">
-                <span data-i18n="model.model"></span>
-                <input name="model" autocomplete="off" required>
-              </label>
-              <label class="kb-config-field">
-                <span data-i18n="set.kbDimension"></span>
-                <input name="dimension" type="number" min="1" step="1" required>
-              </label>
-            </div>
+            <label class="kb-config-field">
+              <span data-i18n="model.model"></span>
+              <input name="model" autocomplete="off" required>
+            </label>
             <div class="kb-config-foot">
               <span class="kb-config-status" id="kb-embedding-config-status"></span>
               <button class="set-btn primary" type="submit" data-i18n="common.save"></button>
@@ -967,7 +941,7 @@
               <span data-i18n="set.kbParserModel"></span>
               <input name="modelVersion" autocomplete="off" required>
             </label>
-            <a class="kb-config-link" href="https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&amp;source=minerU" target="_blank" rel="noopener noreferrer" data-i18n="set.kbMineruRegister"></a>
+            <a class="kb-config-link" href="https://sso.openxlab.org.cn/mineru-login?redirect=https://mineru.net/apiManage/token?clientId=lkzdx57nvy22jkpq9x2w&amp;source=minerU" data-external-link data-i18n="set.kbMineruRegister"></a>
             <div class="kb-config-foot">
               <span class="kb-config-status" id="mineru-config-status"></span>
               <button class="set-btn primary" type="submit" data-i18n="common.save"></button>
@@ -1023,7 +997,7 @@
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
 <script src="phosphor-icons.js?v=2"></script>
-<script src="i18n.js?v=11"></script>
-  <script src="app.js?v=233"></script>
+<script src="i18n.js?v=25"></script>
+  <script src="app.js?v=248"></script>
 </body>
 </html>
