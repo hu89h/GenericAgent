@@ -74,6 +74,15 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         self.assertTrue(payload["cancelRequested"])
         self.assertTrue(payload["cancellable"])
 
+    def test_classifies_transient_mineru_download_failures_as_network_errors(self):
+        error = (
+            "下载 MinerU 解析结果失败：HTTPSConnectionPool(host='cdn.example', "
+            "port=443): Max retries exceeded (Caused by "
+            "SSLEOFError(8, 'UNEXPECTED_EOF_WHILE_READING'))"
+        )
+
+        self.assertEqual(desktop_bridge._kb_error_code(error), "network_error")
+
     def test_cancel_is_rejected_after_publishing_starts(self):
         cancel_event = threading.Event()
         with desktop_bridge._kb_jobs_lock:

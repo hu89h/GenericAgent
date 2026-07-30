@@ -6,6 +6,7 @@ remote job is submitted.
 """
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -283,32 +284,60 @@ def _download(
     target: Path,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
+    # CDN downloads are more prone to a transient TLS EOF than the API calls
+    # above.  Never expose a partial ZIP as the final artifact: every attempt
+    # writes to its own temporary file and only replaces ``target`` after the
+    # complete response has been consumed.
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
+
     def operation() -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
+        temporary.unlink(missing_ok=True)
+        received = 0
         try:
-            response = requests.get(url, stream=True, timeout=DEFAULT_TIMEOUT)
-        except requests.RequestException:
+            with requests.get(
+                url,
+                stream=True,
+                timeout=DEFAULT_TIMEOUT,
+                headers={"Accept": "application/zip", "User-Agent": "GenericAgent/KB"},
+            ) as response:
+                status = int(response.status_code)
+                if status in (408, 409, 425, 429) or status >= 500:
+                    raise _RetryableMinerUError(f"下载解析结果 HTTP {status}")
+                if status >= 400:
+                    raise MinerUError(f"下载解析结果失败（HTTP {status}）")
+                expected = str(response.headers.get("Content-Length") or "").strip()
+                with temporary.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        check_cancelled(cancelled)
+                        if chunk:
+                            handle.write(chunk)
+                            received += len(chunk)
+                if expected and not str(response.headers.get("Content-Encoding") or "").strip():
+                    try:
+                        if received != int(expected):
+                            raise requests.exceptions.ConnectionError(
+                                f"下载结果不完整：收到 {received} / {expected} bytes"
+                            )
+                    except ValueError:
+                        pass
+                if received <= 0:
+                    raise requests.exceptions.ConnectionError("下载结果为空")
+            check_cancelled(cancelled)
+            os.replace(temporary, target)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
             raise
-        status = int(response.status_code)
-        if status in (408, 409, 425, 429) or status >= 500:
-            response.close()
-            raise _RetryableMinerUError(f"下载解析结果 HTTP {status}")
-        if status >= 400:
-            response.close()
-            raise MinerUError(f"下载解析结果失败（HTTP {status}）")
-        try:
-            with target.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        handle.write(chunk)
-        finally:
-            response.close()
 
-    _retry(
-        "下载 MinerU 解析结果",
-        operation,
-        cancelled=cancelled,
-    )
+    try:
+        _retry(
+            "下载 MinerU 解析结果",
+            operation,
+            attempts=5,
+            cancelled=cancelled,
+        )
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def process_batches(
