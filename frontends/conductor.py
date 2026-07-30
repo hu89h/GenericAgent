@@ -9,8 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 def _resolve_ga_root() -> str:
-    """External core dir when launched as the bundle's conductor (design 三).
-    Prefer GA_ROOT env (set by the desktop bridge), else derive from own location."""
+    """Resolve the project root supplied by the desktop bridge.
+
+    The bridge sets ``GA_ROOT`` for subprocesses so the bundled conductor and
+    the rest of the app share one import root. Direct launches still derive it
+    from this file's location.
+    """
     val = (os.environ.get("GA_ROOT", "") or "").strip()
     if val:
         root = os.path.abspath(os.path.expanduser(val))
@@ -497,12 +501,11 @@ conductor = Conductor()
 
 # ---- IM poller: 探测conductor_im_plugins/下各插件,信号变化→唤醒总管 ----
 def _resolve_im_dir() -> str:
-    # 方案三: conductor.py itself is bundle-owned, but IM plugins are user/environment
-    # integrations. Prefer the external core's plugins when GA_ROOT points at one; fall back
-    # to the bundle templates/examples when the external core has no plugin directory.
-    external = os.path.join(ROOT, "frontends", "conductor_im_plugins")
-    if os.path.isdir(external):
-        return external
+    # Keep plugin discovery aligned with the resolved project root while
+    # retaining the local fallback for direct conductor launches.
+    project_plugins = os.path.join(ROOT, "frontends", "conductor_im_plugins")
+    if os.path.isdir(project_plugins):
+        return project_plugins
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "conductor_im_plugins")
 
 

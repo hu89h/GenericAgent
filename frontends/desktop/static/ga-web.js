@@ -104,8 +104,6 @@
       }
       case 'app/path/open':
         return http('/path/open', { method: 'POST', body: params || {} });
-      case 'app/path/selectGaRoot':
-        return http('/config');
       case 'list_continuable_sessions':
         return { sessions: [] };
       case 'restore_session':
@@ -123,7 +121,6 @@
     getConfig: () => rpc('app/config/get', {}),
     saveConfig: (cfg) => rpc('app/config/save', cfg || {}),
     getModelProfiles: () => rpc('get/model-profiles', {}),
-    selectGaRoot: () => rpc('app/path/selectGaRoot', {}),
     openMykeyTemplate: () => rpc('app/path/open', { kind: 'mykeyTemplate' }),
     openMykey: () => rpc('app/path/open', { kind: 'mykey' }),
     pollSession: (sessionId, afterId = 0) => rpc('session/poll', { sessionId, afterId }),

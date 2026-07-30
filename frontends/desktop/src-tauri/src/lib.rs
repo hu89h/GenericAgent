@@ -410,38 +410,6 @@ fn running_inside_app_bundle() -> bool {
         .unwrap_or(false)
 }
 
-/// User-set external GenericAgent source directory (方案三: bundle shell + external core).
-/// Returns the path only when it still looks like a GA core checkout (agentmain.py exists).
-/// The bundle's own bridge/frontend/conductor are used; the saved source only becomes GA_ROOT.
-/// An invalid/missing override returns None so callers fall back to the bundle runtime/app.
-fn valid_ga_source_override() -> Option<String> {
-    let s = read_settings()
-        .get("ga_source_override")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if s.is_empty() {
-        return None;
-    }
-    let p = PathBuf::from(&s);
-    if p.join("agentmain.py").exists() {
-        Some(p.to_string_lossy().to_string())
-    } else {
-        None
-    }
-}
-
-/// Remove a single key from the settings file (merge_settings can only add/overwrite).
-fn remove_setting(key: &str) {
-    let mut obj = read_settings();
-    obj.remove(key);
-    let val = serde_json::Value::Object(obj);
-    if let Ok(text) = serde_json::to_string_pretty(&val) {
-        let _ = std::fs::write(settings_path(), text);
-    }
-}
-
 /// Read config from settings file, or auto-discover and save.
 /// Self-contained bundles always prefer their own runtime/app over stale user settings,
 /// otherwise an old ~/.ga_desktop_settings.json can silently point the UI at a different checkout.
@@ -459,10 +427,6 @@ pub fn get_or_discover_config() -> (String, String) {
             return (python, project);
         }
     }
-
-    // NOTE: the external GA source override does NOT change which project_dir/bridge we run.
-    // 方案三: we always run the bundle's own bridge + frontend, and inject the external核 via
-    // the GA_ROOT env (see sanitize_bundle_env). So project_dir stays the bundle here.
 
     if bundle_root().is_some() {
         let python = find_python();
@@ -555,13 +519,6 @@ fn sanitize_bundle_env(cmd: &mut Command) {
     // Stamp the bridge we spawn with this build's id so a later app launch can tell whether the
     // bridge holding :14168 is ours (see bridge_identity_matches / GET /services/identity).
     cmd.env("GA_BUILD_ID", env!("GA_BUILD_ID"));
-    // 方案三: when the user has set a valid external GA source, inject it as GA_ROOT so the
-    // (bundle's own) bridge + conductor import the external核 and read/write its data. When
-    // unset/invalid we leave GA_ROOT unset → the bridge falls back to its own bundle runtime.
-    match valid_ga_source_override() {
-        Some(src) => { cmd.env("GA_ROOT", src); }
-        None => { cmd.env_remove("GA_ROOT"); }
-    }
 }
 
 /// Tie every bridge process to this native shell so the bridge can clean up if the
@@ -1038,110 +995,18 @@ fn stop_current_bridge() {
     }
 }
 
-/// Restart the bridge with whatever get_or_discover_config() now resolves to, then reload the
-/// webview so it reconnects. Shared by set_ga_source / clear_ga_source.
-fn switch_bridge(app_handle: &tauri::AppHandle) -> Result<String, String> {
-    stop_current_bridge();
-    let (py, project) = get_or_discover_config();
-    if project.is_empty() {
-        return Err("no GenericAgent source resolved".into());
-    }
-    spawn_bridge_process(&py, &project)?;
-    if !wait_for_port(14168, Duration::from_secs(20)) {
-        return Err("bridge did not become ready within 20s".into());
-    }
-    show_bridge_window(app_handle);
-    Ok(project)
-}
-
-#[tauri::command]
-fn get_ga_source() -> String {
-    read_settings()
-        .get("ga_source_override")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-/// Run the contract probe (frontends/ga_contract_probe.py, shipped with the bundle) against a
-/// target ga_root using the bundle python. Returns Ok(()) if the核 satisfies the bridge/conductor
-/// contract, or Err(message) listing what's missing / why it's incompatible.
-fn probe_ga_source(dir: &str) -> Result<(), String> {
-    let (py, bundle_project) = get_or_discover_config();
-    if py.is_empty() {
-        return Err("no python available to run the compatibility probe".into());
-    }
-    let probe = PathBuf::from(&bundle_project).join("frontends").join("ga_contract_probe.py");
-    if !probe.exists() {
-        // No probe shipped → skip the check rather than block (backward compatible).
-        return Ok(());
-    }
-    let mut cmd = Command::new(&py);
-    cmd.arg(&probe).arg(dir);
-    sanitize_bundle_env(&mut cmd);
-    // If switching from one external core to another, validate the candidate core, not the
-    // previously saved GA_ROOT that sanitize_bundle_env may have injected.
-    cmd.env("GA_ROOT", dir);
-    #[cfg(windows)]
-    cmd.creation_flags(0x08000000);
-    let out = cmd.output().map_err(|e| format!("probe failed to run: {}", e))?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // The probe prints a JSON line: {"ok":bool,"missing":[..],"error":".."}.
-    if let Some(line) = stdout.lines().rev().find(|l| l.trim_start().starts_with('{')) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
-            if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
-                return Ok(());
-            }
-            let missing = v.get("missing")
-                .and_then(|m| m.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", "))
-                .unwrap_or_default();
-            let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
-            let mut msg = String::from("this GenericAgent core is not compatible");
-            if !missing.is_empty() { msg = format!("{}: missing {}", msg, missing); }
-            if !err.is_empty() { msg = format!("{} ({})", msg, err); }
-            return Err(msg);
-        }
-    }
-    Err(format!("compatibility probe returned no verdict: {}",
-        String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")))
-}
-
-#[tauri::command]
-fn set_ga_source(app_handle: tauri::AppHandle, dir: String) -> Result<String, String> {
-    let p = PathBuf::from(&dir);
-    if !p.join("agentmain.py").exists() {
-        return Err("not a GenericAgent source: agentmain.py not found".into());
-    }
-    // 方案三: we do NOT copy files into 本体. We run the bundle's own bridge/frontend and point
-    // its ga_root at this external核 via GA_ROOT. Verify the核 satisfies the contract first so a
-    // stale/incompatible核 fails up front with a clear message instead of a runtime crash.
-    probe_ga_source(&dir)?;
-    merge_settings(serde_json::json!({ "ga_source_override": dir }));
-    switch_bridge(&app_handle)
-}
-
-#[tauri::command]
-fn clear_ga_source(app_handle: tauri::AppHandle) -> Result<String, String> {
-    remove_setting("ga_source_override");
-    switch_bridge(&app_handle)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let no_autostart = args.iter().any(|a| a == "--no-autostart");
     let dev_mode = args.iter().any(|a| a == "--dev");
 
-    // Resolve the effective config once. project_dir is ALWAYS the bundle's own (方案三: we run
-    // our own bridge/frontend); the external核, if any, is injected via GA_ROOT in
-    // sanitize_bundle_env. Identity/takeover must compare against the EFFECTIVE ga_root (what the
-    // bridge will report), not the bundle script dir.
+    // Resolve the project-owned runtime once. Identity/takeover compares against the same root
+    // that the bridge process will report.
     let (eff_py, eff_project) = get_or_discover_config();
-    let effective_ga_root = valid_ga_source_override().unwrap_or_else(|| eff_project.clone());
     let needs_prepare = needs_first_run_prepare(&eff_project);
 
-    takeover_stale_bridge(&effective_ga_root, &eff_py);
+    takeover_stale_bridge(&eff_project, &eff_py);
 
     let bridge_ok = is_bridge_running();
     let mut spawned_bridge = false;
@@ -1173,7 +1038,7 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
-        .invoke_handler(tauri::generate_handler![start_bridge_with_config, start_bridge, get_config, export_mykey, pick_directory, pick_files, get_ga_source, set_ga_source, clear_ga_source, shortcut_should_ask, shortcut_decide, get_prepare_error])
+        .invoke_handler(tauri::generate_handler![start_bridge_with_config, start_bridge, get_config, export_mykey, pick_directory, pick_files, shortcut_should_ask, shortcut_decide, get_prepare_error])
         .setup(move |app| {
             // Show the loading window immediately so the first-run prepare isn't a blank screen.
             // The window starts on loading.html (a local page), so no "connection refused" flash.

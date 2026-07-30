@@ -125,8 +125,8 @@ def _hot_reload_paths(*, frontend: bool) -> tuple[Path, ...]:
     # services, including newly added ones, but never watch static assets here.
     paths.extend(_walk_source_files(APP_DIR, recursive=True))
 
-    # The effective GA core may be an external checkout. Include its top-level
-    # modules and the code/plugin directories that can be imported at runtime.
+    # Include the project core's top-level modules and the code/plugin
+    # directories that can be imported at runtime.
     paths.extend(_walk_source_files(DEFAULT_GA_ROOT, recursive=False))
     for name in ("ga_cli", "reflect", "plugins", "knowledge_base"):
         paths.extend(_walk_source_files(DEFAULT_GA_ROOT / name, recursive=True))
@@ -164,29 +164,7 @@ def _reload_token() -> str:
     ).hexdigest()[:16]
 
 
-def _ga_root_override() -> Optional[Path]:
-    """External core dir injected by the desktop shell (design 三: bundle bridge + external核).
-    Priority: --ga-root <path> arg, then GA_ROOT env. Only honored when it holds agentmain.py;
-    an invalid/missing value returns None so we fall back to the bundle's own derivation."""
-    val = ""
-    for i, a in enumerate(sys.argv):
-        if a == "--ga-root" and i + 1 < len(sys.argv):
-            val = sys.argv[i + 1]
-        elif a.startswith("--ga-root="):
-            val = a.split("=", 1)[1]
-    if not val:
-        val = os.environ.get("GA_ROOT", "")
-    val = (val or "").strip()
-    if not val:
-        return None
-    root = Path(val).expanduser().resolve()
-    return root if (root / "agentmain.py").exists() else None
-
-
 def find_default_ga_root() -> Path:
-    override = _ga_root_override()
-    if override is not None:
-        return override
     candidates = [
         APP_DIR / "..",
         APP_DIR / ".." / "..",
@@ -203,8 +181,7 @@ def find_default_ga_root() -> Path:
 DEFAULT_GA_ROOT = find_default_ga_root()
 
 # The knowledge-base package resolves its registry from this environment
-# variable.  Keep it aligned with the effective GA source tree when Desktop
-# is pointed at an external checkout.
+# variable. Keep it aligned with the project-owned source tree.
 os.environ.setdefault("GA_KB_CONFIG", str(DEFAULT_GA_ROOT / "data" / "kb.yaml"))
 os.environ.setdefault("GA_KB_DATA_ROOT", str(DEFAULT_GA_ROOT / "data" / "kbs"))
 
@@ -1889,8 +1866,8 @@ def discover_extra_services(ga_root: Path) -> List[dict]:
     # conductor 跟 scheduler 一样,bridge 启动时自动拉起。--no-browser 是关键:
     # conductor.py 默认会用 webbrowser.open 在用户浏览器弹一个 8900 端口 UI,
     # 桌面版自启时不需要这个独立 UI(用户从「指挥家」页直接访问)。
-    # 方案三:conductor 深度桌面耦合,恒用 bundle 自带的那份(APP_DIR 侧),
-    # 通过 GA_ROOT(见 start_service env)让它 import 外部核。
+    # conductor 深度桌面耦合，使用项目内置的那份；start_service 会显式传入
+    # 项目根目录，确保其导入路径与 Bridge 一致。
     conductor = APP_DIR / "conductor.py"
     if conductor.is_file():
         out.append({

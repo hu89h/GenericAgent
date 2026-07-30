@@ -280,7 +280,6 @@ let bridgeUiOffline = false;
       case 'services/conductor/model/get': return http('/services/conductor/model');
       case 'services/conductor/model/save': return http('/services/conductor/model', { method: 'POST', body: params || {} });
       case 'memory/import': return http('/memory/import', { method: 'POST', body: params || {} });
-      case 'app/path/selectGaRoot': return http('/config');
       case 'list_continuable_sessions': return { sessions: [] };
       case 'restore_session': throw new Error('restore_session is not implemented in web2 bridge');
       default: throw new Error(`Unknown RPC method: ${method}`);
@@ -337,7 +336,6 @@ let bridgeUiOffline = false;
     getConfig: () => rpc('app/config/get', {}),
     saveConfig: (cfg) => rpc('app/config/save', cfg || {}),
     getModelProfiles: () => rpc('get/model-profiles', {}),
-    selectGaRoot: () => rpc('app/path/selectGaRoot', {}),
     openMykeyTemplate: () => rpc('app/path/open', { kind: 'mykeyTemplate' }),
     openMykey: () => rpc('app/path/open', { kind: 'mykey' }),
     startService,
@@ -379,9 +377,6 @@ let bridgeUiOffline = false;
     kbReindex: (kbId) => rpc('kb/reindex', { kbId }),
     kbDeleteDocument: (kbId, params = {}) => rpc('kb/delete-document', Object.assign({}, params, { kbId })),
     kbDelete: (kbId, params = {}) => rpc('kb/delete', Object.assign({}, params, { kbId })),
-    getGaSource: () => tauriInvoke('get_ga_source'),
-    setGaSource: (dir) => tauriInvoke('set_ga_source', { dir }),
-    clearGaSource: () => tauriInvoke('clear_ga_source'),
     getConductorModel: () => rpc('services/conductor/model/get', {}),
     saveConductorModel: (llmNo) => rpc('services/conductor/model/save', { llmNo }),
     tauriInvoke,
@@ -1131,10 +1126,13 @@ function kbRenderLibraries() {
     const card = document.createElement('article');
     card.className = `kb-library-card${kbState.activeKb?.id === kb.id ? ' active' : ''}`;
     card.dataset.kbId = kb.id || '';
+    const hasWarnings = kb.state === 'ready_with_warnings';
     const isReady = ['ready', 'ready_with_warnings'].includes(kb.state);
-    const stateText = isReady ? t('kb.ready') : t('kb.notReady');
+    const stateText = hasWarnings ? t('kb.readyWithWarnings') : isReady ? t('kb.ready') : t('kb.notReady');
+    const statusClass = hasWarnings ? 'ready warnings' : isReady ? 'ready' : 'pending';
+    const stateIcon = isReady ? GA_ICON('check') : '';
     card.innerHTML = `
-      <div class="kb-card-top"><span class="kb-status ${isReady ? 'ready' : 'pending'}">${escapeHtml(stateText)}</span></div>
+      <div class="kb-card-top"><span class="kb-status ${statusClass}">${stateIcon}<span>${escapeHtml(stateText)}</span></span></div>
       <h3 class="kb-card-title"></h3>
       <div class="kb-card-meta"></div>
       <div class="kb-card-actions"><button type="button" class="kb-link-btn kb-reindex-library" title="${escapeHtml(t('kb.reindexHint'))}">${escapeHtml(t('kb.reindexAction'))}</button><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
@@ -2664,7 +2662,7 @@ bindClick('export-mykey-btn', async (e) => {
     showChanToast(t('err.mykeyExport'), err.message || String(err), 'err');
   }
 });
-// 记忆/session 导入与外接 GA 源码。
+// 记忆/session 导入。
 async function importMemoryFromDir() {
   let sourceDir = '';
   if (window.__TAURI__?.core?.invoke) {
@@ -2692,57 +2690,6 @@ bindClick('import-memory-btn', async (e) => {
     showChanToast(t('err.memoryImport'), err.message || String(err), 'err');
   }
 });
-const gaSourceCurrentEl = document.getElementById('ga-source-current');
-const gaSourceClearBtn = document.getElementById('ga-source-clear-btn');
-async function refreshGaSource() {
-  if (!window.__TAURI__?.core?.invoke) return;
-  let cur = '';
-  try { cur = await window.ga.getGaSource(); } catch (_) { cur = ''; }
-  if (gaSourceCurrentEl) {
-    if (cur) {
-      gaSourceCurrentEl.textContent = `${t('set.gaSourceCurrent')}: ${cur}`;
-      gaSourceCurrentEl.hidden = false;
-    } else {
-      gaSourceCurrentEl.hidden = true;
-    }
-  }
-  if (gaSourceClearBtn) gaSourceClearBtn.hidden = !cur;
-}
-bindClick('ga-source-btn', async (e) => {
-  e.stopPropagation();
-  if (!window.__TAURI__?.core?.invoke) {
-    showChanToast(t('err.gaSourceDesktopOnly'), '', 'err');
-    return;
-  }
-  try {
-    const dir = await window.ga.tauriInvoke('pick_directory', { title: t('sys.gaSourcePickTitle') });
-    if (!dir) return;
-    showChanToast(t('sys.gaSourceSwitching'), dir, 'ok');
-    const project = await window.ga.setGaSource(dir);
-    await refreshGaSource();
-    showChanToast(t('sys.gaSourceSet'), project || dir, 'ok');
-  } catch (err) {
-    showChanToast(t('err.gaSourceSet'), err.message || String(err), 'err');
-  }
-});
-bindClick('ga-source-clear-btn', async (e) => {
-  e.stopPropagation();
-  const confirmed = await showConfirmDialog({
-    title: t('confirm.gaSourceClearTitle'),
-    message: t('confirm.gaSourceClear'),
-    okText: t('set.gaSourceClear'),
-  });
-  if (!confirmed) return;
-  try {
-    showChanToast(t('sys.gaSourceSwitching'), '', 'ok');
-    await window.ga.clearGaSource();
-    await refreshGaSource();
-    showChanToast(t('sys.gaSourceCleared'), '', 'ok');
-  } catch (err) {
-    showChanToast(t('err.gaSourceSet'), err.message || String(err), 'err');
-  }
-});
-refreshGaSource();
 // 侧边栏新用户引导：模型卡片和知识库服务卡片分别打开各自的引导弹窗。
 const pqEl = document.getElementById('provider-quickstart');
 let quickstartKbConfig = null;

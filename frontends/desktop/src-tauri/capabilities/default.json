@@ -28,9 +28,6 @@
     "allow-export-mykey",
     "allow-pick-directory",
     "allow-pick-files",
-    "allow-get-ga-source",
-    "allow-set-ga-source",
-    "allow-clear-ga-source",
     "allow-shortcut-should-ask",
     "allow-shortcut-decide"
   ]
