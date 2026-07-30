@@ -51,6 +51,15 @@ def _is_model_cfg(name: str, cfg: Any) -> bool:
     return bool(cfg.get("apikey") and cfg.get("apibase") and cfg.get("model"))
 
 
+def _is_verified_vision_cfg(name: str, cfg: Any) -> bool:
+    return bool(
+        _is_model_cfg(name, cfg)
+        and str(cfg.get("vision_mode") or "").strip().lower() == "multimodal"
+        and cfg.get("vision") is True
+        and cfg.get("vision_verified") is True
+    )
+
+
 def _preferred_llm_cfg(vars_: Dict[str, Any]) -> Dict[str, Any]:
     for name, cfg in vars_.items():
         if "native_oai" in name and _is_model_cfg(name, cfg):
@@ -66,17 +75,28 @@ def _preferred_vision_cfg(vars_: Dict[str, Any], protocol: str = "") -> Dict[str
     requested = str(protocol or "").strip().lower().replace("-", "_")
     if requested not in {"anthropic", "messages", "anthropic_messages", "claude"}:
         for name, cfg in vars_.items():
-            if "native_oai" in name and _is_model_cfg(name, cfg):
+            if "native_oai" in name and _is_verified_vision_cfg(name, cfg):
                 return {**dict(cfg), "protocol": "openai"}
     if requested in {"", "anthropic", "messages", "anthropic_messages", "claude"}:
         for name, cfg in vars_.items():
             if "native_claude" in name and isinstance(cfg, dict):
-                if cfg.get("apikey") and cfg.get("apibase") and cfg.get("model"):
+                if _is_verified_vision_cfg(name, cfg):
                     return {**dict(cfg), "protocol": "anthropic"}
     if requested in {"", "openai", "chat_completions", "oai"}:
         for name, cfg in vars_.items():
-            if "native_oai" in name and _is_model_cfg(name, cfg):
+            if "native_oai" in name and _is_verified_vision_cfg(name, cfg):
                 return {**dict(cfg), "protocol": "openai"}
+    return {}
+
+
+def _selected_vision_cfg(vars_: Dict[str, Any], selector: str) -> Dict[str, Any]:
+    selector = str(selector or "").strip()
+    if not selector:
+        return {}
+    for name, cfg in vars_.items():
+        if name == selector and _is_verified_vision_cfg(name, cfg):
+            protocol = "anthropic" if "claude" in name.lower() else "openai"
+            return {**dict(cfg), "protocol": protocol}
     return {}
 
 
@@ -119,27 +139,32 @@ def vision_config() -> Dict[str, Any]:
 
     Read fresh from mykey.py on every call (like :func:`embedding_config`),
     so editing mykey.py or the environment takes effect without restarting
-    the process.  A dedicated ``kb_vision_config`` block — or the
-    ``GA_KB_VISION_BASE_URL`` / ``GA_KB_VISION_API_KEY`` / ``GA_KB_VISION_MODEL``
-    environment overrides — lets image understanding use a vision-capable
-    model independent of the default chat model.  When none is present it
-    falls back to a configured ``native_oai_*`` or ``native_claude_*`` model,
-    preserving the historical "reuse the first native_oai model" behaviour
-    when both are present.
+    the process.  A dedicated ``kb_vision_config`` block selects an explicitly
+    verified multimodal model profile independent of the default chat model.
+    No unverified chat profile is used as an implicit image provider.
     """
     vars_ = _load_mykey_vars()
     raw = vars_.get("kb_vision_config")
     cfg = dict(raw) if isinstance(raw, dict) else {}
-    fallback = _preferred_vision_cfg(vars_, cfg.get("protocol") or cfg.get("api_mode"))
-    if not fallback:
-        fallback = _preferred_llm_cfg(vars_)
+    selected_profile = str(cfg.get("model_profile") or "").strip()
+    if selected_profile:
+        fallback = _selected_vision_cfg(vars_, selected_profile)
+    elif isinstance(raw, dict) and cfg.get("enabled") is True:
+        # An enabled KB image-analysis config must name the verified model
+        # group explicitly; never silently fall back to the chat model.
+        fallback = {}
+    else:
+        fallback = _preferred_vision_cfg(vars_, cfg.get("protocol") or cfg.get("api_mode"))
+    # Image understanding is explicitly opt-in.  Never turn an unverified chat
+    # profile into a KB vision provider merely because it happens to be present.
+    allow_env_overrides = not (isinstance(raw, dict) and cfg.get("enabled") is True)
 
     def pick(*keys, env: str = "", default: Any = "") -> Any:
         for key in keys:
             val = cfg.get(key)
             if val:
                 return val
-        if env:
+        if env and allow_env_overrides:
             val = os.environ.get(env, "").strip()
             if val:
                 return val
@@ -160,8 +185,8 @@ def vision_config() -> Dict[str, Any]:
     )
     # Durable image-analysis switch: mykey.py's kb_vision_config['enabled']
     # persists the "images on" decision across restarts and future builds.
-    # ``enabled`` is None here when the config does not mention it, so the
-    # env var can stay authoritative when set; see vision.enabled().
+    # ``enabled`` is None here when the config does not mention it; the
+    # provider may then consult the environment as an opt-in fallback.
     enabled = cfg.get("enabled") if isinstance(raw, dict) and "enabled" in cfg else None
     return {
         "apibase": apibase,
@@ -172,6 +197,7 @@ def vision_config() -> Dict[str, Any]:
         "max_retries": retries,
         "max_tokens": max(512, max_tokens),
         "enabled": enabled,
+        "model_profile": selected_profile,
     }
 
 

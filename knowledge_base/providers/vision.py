@@ -86,19 +86,29 @@ _FIGURE_FOCUS_RE = re.compile(
 def enabled() -> bool:
     """Whether build-time image analysis is on.
 
-    Precedence: an explicit ``GA_KB_IMAGE_ANALYSIS`` env var wins (so a one-off
-    build can force it on/off), otherwise the durable
-    ``kb_vision_config['enabled']`` flag in mykey.py decides, defaulting to
-    off when neither is set.
+    A saved ``kb_vision_config['enabled']`` decision wins over the environment,
+    so an explicit UI choice cannot be silently overridden by a stale process
+    variable.  The environment remains an opt-in fallback when no saved choice
+    exists, and the default is off.
     """
-    env_val = os.environ.get("GA_KB_IMAGE_ANALYSIS")
-    if env_val is not None and env_val.strip() != "":
-        return env_val.strip().lower() in ("1", "true", "yes", "on")
+    cfg = {}
     try:
-        cfg_enabled = provider_settings.vision_config().get("enabled")
+        cfg = provider_settings.vision_config()
+        cfg_enabled = cfg.get("enabled")
     except Exception:
         cfg_enabled = None
-    return bool(cfg_enabled)
+    if cfg_enabled is not None:
+        return bool(cfg_enabled) and all(
+            str(cfg.get(key) or "").strip()
+            for key in ("apibase", "apikey", "model")
+        )
+    env_val = os.environ.get("GA_KB_IMAGE_ANALYSIS")
+    if env_val is not None and env_val.strip() != "":
+        return env_val.strip().lower() in ("1", "true", "yes", "on") and all(
+            str(cfg.get(key) or "").strip()
+            for key in ("apibase", "apikey", "model")
+        )
+    return False
 
 
 def build_analysis_meta() -> Dict[str, object]:

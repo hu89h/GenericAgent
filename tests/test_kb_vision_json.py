@@ -68,7 +68,7 @@ class VisionJsonParsingTests(unittest.TestCase):
             self.assertEqual(content[1]["source"]["type"], "base64")
             self.assertEqual(content[1]["source"]["media_type"], "image/png")
 
-    def test_vision_config_can_fall_back_to_native_anthropic(self):
+    def test_vision_config_does_not_enable_unverified_native_anthropic(self):
         with mock.patch.object(
             vision.provider_settings,
             "_load_mykey_vars",
@@ -82,8 +82,58 @@ class VisionJsonParsingTests(unittest.TestCase):
         ):
             config = vision.provider_settings.vision_config()
 
-        self.assertEqual(config["protocol"], "anthropic")
-        self.assertEqual(config["model"], "claude-test")
+        self.assertIsNone(config["enabled"])
+        self.assertEqual(config["model"], "")
+
+    def test_vision_config_uses_selected_verified_profile_not_chat_profile(self):
+        with mock.patch.object(
+            vision.provider_settings,
+            "_load_mykey_vars",
+            return_value={
+                "native_oai_chat": {
+                    "apikey": "chat-key",
+                    "apibase": "https://chat.example/v1",
+                    "model": "text-only",
+                    "vision_mode": "text",
+                },
+                "native_oai_vision": {
+                    "apikey": "vision-key",
+                    "apibase": "https://vision.example/v1",
+                    "model": "vision-model",
+                    "vision_mode": "multimodal",
+                    "vision": True,
+                    "vision_verified": True,
+                },
+                "kb_vision_config": {
+                    "enabled": True,
+                    "model_profile": "native_oai_vision",
+                },
+            },
+        ), mock.patch.dict("os.environ", {
+            "GA_KB_VISION_BASE_URL": "https://wrong.example/v1",
+            "GA_KB_VISION_MODEL": "wrong-model",
+        }, clear=False):
+            config = vision.provider_settings.vision_config()
+
+        self.assertEqual(config["model"], "vision-model")
+        self.assertEqual(config["apikey"], "vision-key")
+        self.assertEqual(config["model_profile"], "native_oai_vision")
+
+    def test_saved_disable_wins_over_environment_override(self):
+        with mock.patch.object(
+            vision.provider_settings,
+            "vision_config",
+            return_value={"enabled": False},
+        ), mock.patch.dict("os.environ", {"GA_KB_IMAGE_ANALYSIS": "1"}, clear=False):
+            self.assertFalse(vision.enabled())
+
+    def test_enabled_without_a_resolved_verified_model_stays_off(self):
+        with mock.patch.object(
+            vision.provider_settings,
+            "vision_config",
+            return_value={"enabled": True, "apibase": "", "apikey": "", "model": ""},
+        ):
+            self.assertFalse(vision.enabled())
 
 
 if __name__ == "__main__":

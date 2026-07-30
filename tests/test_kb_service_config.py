@@ -50,11 +50,16 @@ class KnowledgeBaseServiceConfigTests(unittest.TestCase):
                 "base_url": "https://mineru.example/api/v4",
                 "model_version": "vlm",
             },
+            vision_config=lambda: {
+                "enabled": None,
+                "model_profile": "",
+            },
         )
         self.manager = object.__new__(desktop_bridge.AgentManager)
         self.manager.ensure_ga_import_path = lambda: Path(self.temp.name)
         self.manager._mykey_file = lambda: self.mykey
         self.manager._kb_provider_settings = lambda: self.provider_settings
+        self.manager.list_model_profiles = lambda: []
 
         def save_text(text):
             self.mykey.write_text(text, encoding="utf-8")
@@ -65,15 +70,35 @@ class KnowledgeBaseServiceConfigTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_public_config_reports_key_state_without_returning_secrets(self):
+    def test_config_cards_receive_keys_for_password_inputs(self):
         result = self.manager.get_kb_service_configs()
 
         self.assertTrue(result["embedding"]["apiKeyConfigured"])
         self.assertTrue(result["mineru"]["apiKeyConfigured"])
-        self.assertNotIn("apiKey", result["embedding"])
-        self.assertNotIn("apiKey", result["mineru"])
-        self.assertNotIn("embedding-secret", repr(result))
-        self.assertNotIn("mineru-secret", repr(result))
+        self.assertEqual(result["embedding"]["apiKey"], "embedding-secret")
+        self.assertEqual(result["mineru"]["apiKey"], "mineru-secret")
+
+    def test_vision_card_resolves_a_stale_numeric_profile_suffix(self):
+        verified = {
+            "id": 1,
+            "varName": "native_oai_config",
+            "kind": "native",
+            "name": "通义千问",
+            "model": "qwen3.7-plus",
+            "vision": True,
+            "visionVerified": True,
+            "apiMode": "chat_completions",
+        }
+        self.provider_settings.vision_config = lambda: {
+            "enabled": True,
+            "model_profile": "native_oai_config1",
+        }
+        self.manager.list_model_profiles = lambda: [verified]
+
+        result = self.manager.get_kb_service_configs()
+
+        self.assertEqual(result["vision"]["modelProfile"], "native_oai_config")
+        self.assertEqual(result["vision"]["modelProfileName"], "通义千问")
 
     def test_partial_embedding_save_keeps_both_existing_keys(self):
         raw = runpy.run_path(str(self.mykey))
@@ -121,6 +146,30 @@ class KnowledgeBaseServiceConfigTests(unittest.TestCase):
                 with self.subTest(payload=payload):
                     with self.assertRaises(ValueError):
                         self.manager.save_kb_service_configs(payload)
+
+    def test_vision_save_requires_and_persists_a_verified_profile(self):
+        verified = {
+            "id": 2,
+            "varName": "native_oai_aux",
+            "kind": "native",
+            "name": "视觉专用组",
+            "model": "qwen3.7-plus",
+            "vision": True,
+            "visionVerified": True,
+        }
+        self.manager.list_model_profiles = lambda: [verified]
+        raw = runpy.run_path(str(self.mykey))
+        with mock.patch("llmcore.reload_mykeys", return_value=(raw, False)):
+            with self.assertRaisesRegex(ValueError, "vision_model_required"):
+                self.manager.save_kb_service_configs({"vision": {"enabled": True}})
+            self.manager.save_kb_service_configs({
+                "vision": {"enabled": True, "modelProfile": "native_oai_aux"},
+            })
+        saved = runpy.run_path(str(self.mykey))
+        self.assertEqual(saved["kb_vision_config"], {
+            "enabled": True,
+            "model_profile": "native_oai_aux",
+        })
 
     def test_concurrent_card_saves_do_not_discard_each_other(self):
         """Two UI cards may submit at once; both changes must survive."""
