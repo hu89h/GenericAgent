@@ -430,9 +430,11 @@ body{ background:var(--bg); color:var(--txt); font-size:var(--ui-font); overflow
 .set-btn-follow{ margin-top:8px; }
 .model-form-body{ min-height:0; }
 .model-form{ padding:18px; display:flex; flex-direction:column; gap:12px; }
+.model-form[data-loading="true"]{ opacity:.68; pointer-events:none; }
 .model-form label{ display:flex; flex-direction:column; gap:5px; font-size:calc(12px * var(--ui-scale)); font-weight:500; color:var(--txt-2); }
 .model-form-field{ display:flex; flex-direction:column; gap:5px; font-size:calc(12px * var(--ui-scale)); font-weight:500; color:var(--txt-2); }
 .model-advanced-field[hidden]{ display:none; }
+#add-model-form[data-provider]:not([data-provider=""]) .model-advanced-field{ display:none !important; }
 .seg-group{ display:flex; gap:4px; padding:3px; border:1px solid var(--line); border-radius:4px; background:var(--field-bg); }
 .seg-opt{
   flex:1; display:flex; align-items:center; justify-content:center; padding:7px 10px; border-radius:4px;
@@ -717,11 +719,15 @@ body{ background:var(--bg); color:var(--txt); font-size:var(--ui-font); overflow
 .model-guide-steps{ margin:0 0 8px; padding-left:18px; display:flex; flex-direction:column; gap:3px; }
 .model-guide-steps li{ font-size:calc(12px * var(--ui-scale)); color:var(--txt-2); line-height:1.55; }
 .model-guide-link-row{ display:flex; align-items:center; gap:6px; }
+.model-guide-link-row[hidden]{ display:none; }
 .model-guide-link{
-  flex:1; min-width:0; font-size:calc(12px * var(--ui-scale)); font-weight:500; color:var(--accent);
-  text-decoration:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  flex:0 1 auto; min-width:0; max-width:100%; display:inline-flex; align-items:center; padding:7px 10px;
+  border:1px solid color-mix(in srgb,var(--accent) 34%,var(--line)); border-radius:6px;
+  background:color-mix(in srgb,var(--accent) 8%,var(--field-bg)); color:var(--accent);
+  font-size:calc(12px * var(--ui-scale)); font-weight:600; text-decoration:none;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; transition:background .15s,border-color .15s,color .15s;
 }
-.model-guide-link:hover{ text-decoration:underline; }
+.model-guide-link:hover,.model-guide-link:focus-visible{ background:color-mix(in srgb,var(--accent) 15%,var(--field-bg)); border-color:var(--accent); color:var(--accent); outline:none; }
 .model-guide-copy{
   flex:0 0 auto; width:26px; height:26px; border:1px solid var(--line);
   border-radius:6px; background:var(--panel); color:var(--muted);

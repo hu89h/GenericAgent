@@ -6138,6 +6138,7 @@ function bindMixinDrag(body, members) {
 const MODEL_ACT_EDIT = GA_ICON('pencilSimple');
 const MODEL_ACT_DEL = GA_ICON('trash');
 let editingModelId = null;
+let modelFormRequestSeq = 0;
 
 function setSecretInputVisible(input, visible) {
   if (!input) return;
@@ -6463,12 +6464,14 @@ async function openAddModelFormForProvider(key) {
     await openEditModelForm(existing.id, { revealApiKey: true, providerKey: key });
     return;
   }
+  modelFormRequestSeq += 1;
   editingModelId = null;
   const form = document.getElementById('add-model-form');
   const title = document.getElementById('model-form-title');
   const errEl = document.getElementById('add-model-err');
   if (title) title.dataset.i18n = 'modal.addModel';
   if (form) {
+    delete form.dataset.loading;
     form.reset();
     setModelVisionMode('');
     form.model.value = p.model || '';
@@ -6490,12 +6493,14 @@ async function openAddModelFormForProvider(key) {
 }
 
 function openAddModelForm() {
+  modelFormRequestSeq += 1;
   editingModelId = null;
   const form = document.getElementById('add-model-form');
   const title = document.getElementById('model-form-title');
   const errEl = document.getElementById('add-model-err');
   if (title) title.dataset.i18n = 'modal.addModel';
   if (form) {
+    delete form.dataset.loading;
     form.reset();
     setModelVisionMode('');
   }
@@ -6507,17 +6512,27 @@ function openAddModelForm() {
   applyI18n();
 }
 async function openEditModelForm(id, { revealApiKey = false, providerKey = '' } = {}) {
+  const requestId = ++modelFormRequestSeq;
   editingModelId = id;
-  setModelGuide(null);
+  const form = document.getElementById('add-model-form');
+  const title = document.getElementById('model-form-title');
+  const modal = document.getElementById('add-model-modal');
+  setModelGuide(providerKey || null);
   setModelFormMode(providerKey || '');
+  setModelApikeyMode(false);
+  if (title) title.dataset.i18n = 'modal.editModel';
+  if (form) form.dataset.loading = 'true';
   const errEl = document.getElementById('add-model-err');
   if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
+  // Show the shell immediately; fetching the saved profile should not make a
+  // provider card appear unresponsive.
+  openModal('add-model-modal');
+  applyI18n();
   try {
     const res = await bridgeFetch(`/model-profiles/${id}`);
+    if (requestId !== modelFormRequestSeq) return;
     const p = res.profile;
     if (!p) throw new Error(t('err.modelSave'));
-    const form = document.getElementById('add-model-form');
-    const title = document.getElementById('model-form-title');
     if (title) title.dataset.i18n = 'modal.editModel';
     if (form) {
       form.model.value = p.model || '';
@@ -6552,10 +6567,12 @@ async function openEditModelForm(id, { revealApiKey = false, providerKey = '' } 
       if (apikey) apikey.value = p.apiKey;
     }
     if (providerKey) setModelGuide(providerKey);
-    openModal('add-model-modal');
     applyI18n();
   } catch (ex) {
+    if (requestId === modelFormRequestSeq && modal) modal.hidden = true;
     showChanToast(t('err.modelSave'), ex.message || '', 'err');
+  } finally {
+    if (requestId === modelFormRequestSeq && form) delete form.dataset.loading;
   }
 }
 async function deleteModel(id, name) {
