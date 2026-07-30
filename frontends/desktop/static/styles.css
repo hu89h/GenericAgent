@@ -661,6 +661,7 @@ body{ background:var(--bg); color:var(--txt); font-size:var(--ui-font); overflow
 .pq-group-body{ display:flex; flex-direction:column; gap:5px; }
 .pq-group[data-pq-group="model"] .pq-btn[data-provider="qwen"]{ order:1; }
 .pq-group[data-pq-group="model"] .pq-btn[data-provider="deepseek"]{ order:2; }
+.pq-group[data-pq-group="model"] .pq-btn[data-provider="custom"]{ order:3; }
 .pq-step-state{
   margin-left:auto; flex:0 0 auto; color:var(--muted); font-size:calc(10px * var(--ui-scale)); line-height:1;
 }
@@ -672,6 +673,7 @@ body{ background:var(--bg); color:var(--txt); font-size:var(--ui-font); overflow
 .pq-logo > span{ width:15px; height:15px; display:block; }
 .pq-logo-embedding{ background:rgba(14,165,233,.12); color:#0284c7; }
 .pq-logo-mineru{ background:rgba(245,158,11,.14); color:#d97706; }
+.pq-logo-custom{ background:var(--accent-bg); color:var(--accent); }
 .pq-setup-btn{ margin:0; }
 /* 外层向导和两个配置分组都可独立折叠。 */
 .provider-quickstart:not(.collapsed) .pq-collapse{ transform:rotate(90deg); }

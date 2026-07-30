@@ -2732,6 +2732,7 @@ if (pqEl) pqEl.addEventListener('click', (e) => {
   if (!btn) return;
   e.preventDefault(); e.stopPropagation();
   if (btn.dataset.setup) return void openKbQuickstart(btn.dataset.setup);
+  if (btn.dataset.provider === 'custom') return void openAddModelForm();
   openAddModelFormForProvider(btn.dataset.provider);
 });
 // 「快速接入」卡片折叠/展开（向下箭头），状态记忆到 localStorage
@@ -6543,11 +6544,6 @@ async function openEditModelForm(id, { revealApiKey = false, providerKey = '' } 
       if (protocol) protocol.checked = true;
       const apiMode = form.querySelector(`input[name="api_mode"][value="${p.apiMode || 'chat_completions'}"]`);
       if (apiMode) apiMode.checked = true;
-      const stream = form.querySelector(`input[name="stream"][value="${p.stream === false ? 'false' : 'true'}"]`);
-      if (stream) stream.checked = true;
-      form.max_retries.value = p.max_retries ?? 5;
-      form.connect_timeout.value = p.connect_timeout ?? 15;
-      form.read_timeout.value = p.read_timeout ?? 300;
       setModelVisionMode(p.visionMode || '');
       const token = document.getElementById('model-vision-probe-token');
       if (token) token.value = '';
