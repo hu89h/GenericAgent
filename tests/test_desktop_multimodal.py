@@ -57,7 +57,7 @@ class DesktopMultimodalTests(unittest.TestCase):
                 "vision": True,
             }, "oai")
 
-    def test_failed_visual_probe_does_not_write_model_config(self):
+    def test_explicit_visual_probe_does_not_write_model_config(self):
         manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
         manager.ga_root = str(Path(__file__).resolve().parents[1])
         with tempfile.TemporaryDirectory() as temp:
@@ -66,6 +66,24 @@ class DesktopMultimodalTests(unittest.TestCase):
             manager._mykey_file = lambda: target
             with mock.patch("llmcore.probe_model_vision", side_effect=ValueError("vision_probe_failed: rejected")), \
                  self.assertRaisesRegex(ValueError, "vision_probe_failed"):
+                manager.probe_model_profile_vision({
+                    "protocol": "oai",
+                    "apikey": "pending-key",
+                    "apibase": "https://example.test/v1",
+                    "model": "pending-model",
+                })
+            self.assertEqual(target.read_text(encoding="utf-8"), "# unchanged\n")
+
+    def test_saving_model_does_not_probe_vision_implicitly(self):
+        manager = desktop_bridge.AgentManager.__new__(desktop_bridge.AgentManager)
+        manager.ga_root = str(Path(__file__).resolve().parents[1])
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "mykey.py"
+            target.write_text("# unchanged\n", encoding="utf-8")
+            manager._mykey_file = lambda: target
+            saved = []
+            manager._save_mykey_text = lambda text: (saved.append(text) or [{"id": 0, "name": "pending-model"}])
+            with mock.patch("llmcore.probe_model_vision") as probe:
                 manager.add_model_profile({
                     "protocol": "oai",
                     "apikey": "pending-key",
@@ -73,7 +91,12 @@ class DesktopMultimodalTests(unittest.TestCase):
                     "model": "pending-model",
                     "vision": True,
                 })
-            self.assertEqual(target.read_text(encoding="utf-8"), "# unchanged\n")
+            probe.assert_not_called()
+            self.assertEqual(len(saved), 1)
+            self.assertIn("pending-model", saved[0])
+            self.assertNotIn("max_retries", saved[0])
+            self.assertNotIn("connect_timeout", saved[0])
+            self.assertNotIn("read_timeout", saved[0])
 
     def test_desktop_prompt_contract_has_no_legacy_images_argument(self):
         parameters = inspect.signature(desktop_bridge.AgentManager.submit_prompt).parameters
