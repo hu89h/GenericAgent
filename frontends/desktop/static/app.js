@@ -401,6 +401,7 @@ const STORE = {
   appearance: 'ga_appearance',
   plain: 'ga_plain',
   fontSize: 'ga_font_size',
+  uiFontSize: 'ga_ui_font_size',
   expandThinking: 'ga_expand_thinking',
   expandTools: 'ga_expand_tools',
   defaultKbEnabled: 'ga_default_kb_enabled',
@@ -411,6 +412,9 @@ const CHAT_FONT_MIN = 10;
 const CHAT_FONT_MAX = 20;
 const CHAT_FONT_DEFAULT = 14;
 const CHAT_FONT_LEGACY = { sm: 12, md: 14, lg: 16 };
+const UI_FONT_MIN = 10;
+const UI_FONT_MAX = 20;
+const UI_FONT_DEFAULT = 13;
 const HLJS_THEME_BASE = 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/';
 
 function normalizeChatFontSize(value) {
@@ -428,6 +432,7 @@ function bootUiFromDom() {
     appearance: 'light',
     plainUi: false,
     chatFontSize: CHAT_FONT_DEFAULT,
+    uiFontSize: UI_FONT_DEFAULT,
     defaultExpandThinking: false,
     defaultExpandTools: false,
     defaultKbEnabled: true,
@@ -437,6 +442,10 @@ function bootUiFromDom() {
   if (APPEARANCE_IDS.includes(root.dataset.appearance)) out.appearance = root.dataset.appearance;
   if (out.appearance === 'light' && root.dataset.plain === '1') out.plainUi = true;
   if (root.dataset.chatFont) out.chatFontSize = normalizeChatFontSize(root.dataset.chatFont);
+  if (root.dataset.uiFont) {
+    const value = parseInt(root.dataset.uiFont, 10);
+    if (Number.isFinite(value)) out.uiFontSize = Math.min(UI_FONT_MAX, Math.max(UI_FONT_MIN, value));
+  }
   out.defaultExpandThinking = root.dataset.expandThinking === '1';
   out.defaultExpandTools = root.dataset.expandTools === '1';
   out.defaultKbEnabled = root.dataset.defaultKbEnabled !== '0';
@@ -448,6 +457,7 @@ let {
   appearance,
   plainUi,
   chatFontSize,
+  uiFontSize,
   defaultExpandThinking,
   defaultExpandTools,
   defaultKbEnabled,
@@ -467,6 +477,7 @@ function syncBootCache() {
   localStorage.setItem(STORE.theme, theme);
   localStorage.setItem(STORE.appearance, appearance);
   localStorage.setItem(STORE.fontSize, String(chatFontSize));
+  localStorage.setItem(STORE.uiFontSize, String(uiFontSize));
   if (defaultExpandThinking) localStorage.setItem(STORE.expandThinking, '1');
   else localStorage.removeItem(STORE.expandThinking);
   if (defaultExpandTools) localStorage.setItem(STORE.expandTools, '1');
@@ -475,23 +486,32 @@ function syncBootCache() {
   if (plainUi) localStorage.setItem(STORE.plain, '1');
   else localStorage.removeItem(STORE.plain);
 }
-async function persistUiPrefs() {
-  try {
-    await window.ga.saveConfig({
-      config: {
-        lang,
-        theme,
-        appearance,
-        plain: plainUi,
-        llmNo: state.llmNo,
-        fontSize: chatFontSize,
-        expandThinking: defaultExpandThinking,
-        expandTools: defaultExpandTools,
-        defaultKbEnabled,
-      },
-    });
-    syncBootCache();
-  } catch (_) {}
+let uiPrefsSaveQueue = Promise.resolve();
+let uiPrefsSaveVersion = 0;
+function persistUiPrefs() {
+  const version = ++uiPrefsSaveVersion;
+  const config = {
+    lang,
+    theme,
+    appearance,
+    plain: plainUi,
+    llmNo: state.llmNo,
+    fontSize: chatFontSize,
+    uiFontSize,
+    expandThinking: defaultExpandThinking,
+    expandTools: defaultExpandTools,
+    defaultKbEnabled,
+  };
+  // Serialize saves so rapidly changing the two font controls cannot let an
+  // older request finish last and overwrite the newest pair of values.
+  uiPrefsSaveQueue = uiPrefsSaveQueue
+    .catch(() => {})
+    .then(() => window.ga.saveConfig({ config }))
+    .then(() => {
+      if (version === uiPrefsSaveVersion) syncBootCache();
+    })
+    .catch(() => {});
+  return uiPrefsSaveQueue;
 }
 const bridgeHost = () => BRIDGE_ORIGIN;
 async function bridgeFetch(path, opts = {}) {
@@ -597,7 +617,7 @@ function selectLang(code) {
   void persistUiPrefs();
 }
 function syncChatFontSegments(value) {
-  document.querySelectorAll('.chat-font-seg').forEach(el => {
+  document.querySelectorAll('#chat-font-segments .chat-font-seg').forEach(el => {
     const v = parseInt(el.dataset.value, 10);
     el.classList.toggle('on', v <= value);
     el.classList.toggle('cur', v === value);
@@ -676,6 +696,92 @@ function applyChatFontSize(size, { persist } = { persist: true }) {
   const label = document.getElementById('chat-font-value');
   if (label) label.textContent = `${chatFontSize}px`;
   syncChatFontSegments(chatFontSize);
+  if (persist) void persistUiPrefs();
+}
+function syncUiFontSegments(value) {
+  document.querySelectorAll('#ui-font-segments .ui-font-seg').forEach(el => {
+    const v = parseInt(el.dataset.value, 10);
+    el.classList.toggle('on', v <= value);
+    el.classList.toggle('cur', v === value);
+  });
+  const stepper = document.getElementById('ui-font-stepper');
+  if (stepper) {
+    stepper.setAttribute('aria-valuenow', String(value));
+    stepper.setAttribute('aria-valuetext', `${value}px`);
+  }
+}
+function uiFontFromPointer(clientX) {
+  const segs = document.getElementById('ui-font-segments');
+  if (!segs) return uiFontSize;
+  const rect = segs.getBoundingClientRect();
+  const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  return UI_FONT_MIN + Math.round(ratio * (UI_FONT_MAX - UI_FONT_MIN));
+}
+function initUiFontStepper() {
+  const segs = document.getElementById('ui-font-segments');
+  if (!segs || segs.childElementCount) return;
+  for (let i = UI_FONT_MIN; i <= UI_FONT_MAX; i++) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chat-font-seg ui-font-seg';
+    btn.dataset.value = String(i);
+    btn.tabIndex = -1;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      applyUiFontSize(i);
+    });
+    segs.appendChild(btn);
+  }
+  const stepper = document.getElementById('ui-font-stepper');
+  if (!stepper || stepper.dataset.bound) return;
+  stepper.dataset.bound = '1';
+  let dragging = false;
+  const pick = (clientX, persist) => applyUiFontSize(uiFontFromPointer(clientX), { persist });
+  stepper.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    stepper.setPointerCapture(e.pointerId);
+    pick(e.clientX, false);
+  });
+  stepper.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    pick(e.clientX, false);
+  });
+  const endDrag = (e, persist) => {
+    if (!dragging) return;
+    dragging = false;
+    try { stepper.releasePointerCapture(e.pointerId); } catch (_) {}
+    pick(e.clientX, persist);
+  };
+  stepper.addEventListener('pointerup', (e) => endDrag(e, true));
+  stepper.addEventListener('pointercancel', (e) => endDrag(e, false));
+  stepper.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      applyUiFontSize(uiFontSize - 1);
+    } else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      applyUiFontSize(uiFontSize + 1);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      applyUiFontSize(UI_FONT_MIN);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      applyUiFontSize(UI_FONT_MAX);
+    }
+  });
+}
+function applyUiFontSize(size, { persist } = { persist: true }) {
+  const value = parseInt(size, 10);
+  uiFontSize = Number.isFinite(value)
+    ? Math.min(UI_FONT_MAX, Math.max(UI_FONT_MIN, value))
+    : UI_FONT_DEFAULT;
+  document.documentElement.dataset.uiFont = String(uiFontSize);
+  document.documentElement.style.setProperty('--ui-font', `${uiFontSize}px`);
+  document.documentElement.style.setProperty('--ui-scale', (uiFontSize / 13).toFixed(4));
+  const label = document.getElementById('ui-font-value');
+  if (label) label.textContent = `${uiFontSize}px`;
+  syncUiFontSegments(uiFontSize);
   if (persist) void persistUiPrefs();
 }
 function applyTheme(id, { persist } = { persist: true }) {
@@ -6316,6 +6422,7 @@ async function loadBridgeConfig() {
     if (cfg.theme != null) applyTheme(cfg.theme, { persist: false });
     if (cfg.appearance) applyAppearance(cfg.appearance, !!cfg.plain, { persist: false });
     if (cfg.fontSize != null) applyChatFontSize(cfg.fontSize, { persist: false });
+    if (cfg.uiFontSize != null) applyUiFontSize(cfg.uiFontSize, { persist: false });
     applyFoldDefaults(cfg.expandThinking === true, cfg.expandTools === true, { persist: false });
     applyDefaultKbEnabled(cfg.defaultKbEnabled !== false, { persist: false });
     if (cfg.llmNo != null && state.modelProfiles.length) {
@@ -7992,6 +8099,8 @@ applyAppearance(appearance, plainUi, { persist: false });
 applyTheme(theme, { persist: false });
 initChatFontStepper();
 applyChatFontSize(chatFontSize, { persist: false });
+initUiFontStepper();
+applyUiFontSize(uiFontSize, { persist: false });
 applyDefaultKbEnabled(defaultKbEnabled, { persist: false });
 syncHljsTheme();
 applyI18n();

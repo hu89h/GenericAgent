@@ -2041,6 +2041,7 @@ _UI_KEYS = (
     "plain",
     "llmNo",
     "fontSize",
+    "uiFontSize",
     "expandThinking",
     "expandTools",
     "defaultKbEnabled",

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>GenericAgent</title>
 <link rel="stylesheet" href="assets/fonts/fonts.css?v=2">
-  <link rel="stylesheet" href="styles.css?v=195">
+  <link rel="stylesheet" href="styles.css?v=197">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
@@ -38,6 +38,11 @@
   var cfp=chatFontPx(fs);
   document.documentElement.dataset.chatFont=String(cfp);
   document.documentElement.style.setProperty('--chat-font',cfp+'px');
+  var ufs=localStorage.getItem('ga_ui_font_size');
+  var ufp=parseInt(ufs,10); if(isNaN(ufp)||ufp<10||ufp>20) ufp=13;
+  document.documentElement.dataset.uiFont=String(ufp);
+  document.documentElement.style.setProperty('--ui-font',ufp+'px');
+  document.documentElement.style.setProperty('--ui-scale',(ufp/13).toFixed(4));
   if(localStorage.getItem('ga_expand_thinking')==='1') document.documentElement.dataset.expandThinking='1';
   if(localStorage.getItem('ga_expand_tools')==='1') document.documentElement.dataset.expandTools='1';
   document.documentElement.dataset.defaultKbEnabled=localStorage.getItem('ga_default_kb_enabled')==='0'?'0':'1';
@@ -85,7 +90,7 @@
         </a>
       </nav>
 
-      <!-- 新用户引导：按顺序完成对话模型、Embedding 和 MinerU 配置 -->
+      <!-- 配置向导：按顺序完成对话模型，以及按需配置知识库服务 -->
       <div class="provider-quickstart" id="provider-quickstart">
         <div class="pq-head" id="pq-toggle" role="button" tabindex="0" aria-expanded="true">
           <span class="fr-l">
@@ -841,6 +846,21 @@
           </div>
         </div>
         <div class="set-block">
+          <div class="set-sec-t" id="ui-font-label" data-i18n="set.uiFontSize"></div>
+          <div class="chat-font-panel ui-font-panel">
+            <div class="chat-font-stepper" id="ui-font-stepper" role="slider"
+              aria-valuemin="10" aria-valuemax="20" aria-valuenow="13"
+              aria-valuetext="13px" aria-labelledby="ui-font-label" tabindex="0">
+              <div class="chat-font-segments ui-font-segments" id="ui-font-segments"></div>
+            </div>
+            <span class="chat-font-value" id="ui-font-value" aria-hidden="true">13px</span>
+            <div class="chat-font-scale" aria-hidden="true">
+              <span class="chat-font-scale-min">10</span>
+              <span class="chat-font-scale-max">20</span>
+            </div>
+          </div>
+        </div>
+        <div class="set-block">
           <div class="set-sec-t" id="chat-font-label" data-i18n="set.fontSize"></div>
           <div class="chat-font-panel">
             <div class="chat-font-stepper" id="chat-font-stepper" role="slider"
@@ -886,7 +906,6 @@
         <div class="set-block">
           <div class="set-sec-t" data-i18n="set.model"></div>
           <div class="model-list" id="model-list"></div>
-          <p class="kb-vision-hint" data-i18n="set.kbVisionHint"></p>
           <button class="set-btn" id="add-model-btn" type="button">
             <span data-ga-icon="plus"></span>
             <span data-i18n="set.addModel"></span>
@@ -990,7 +1009,7 @@
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
 <script src="phosphor-icons.js?v=2"></script>
-<script src="i18n.js?v=7"></script>
-  <script src="app.js?v=229"></script>
+<script src="i18n.js?v=10"></script>
+  <script src="app.js?v=232"></script>
 </body>
 </html>
