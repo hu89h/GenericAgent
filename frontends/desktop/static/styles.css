@@ -2890,15 +2890,15 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
 .kb-library-card:hover,.kb-doc-card:hover{ border-color:var(--line-strong); background:var(--card); box-shadow:0 2px 8px rgba(0,0,0,.07); }
 .kb-library-card.active,.kb-doc-card.active{ border-color:color-mix(in srgb, var(--accent) 60%, var(--line)); background:color-mix(in srgb, var(--accent) 9%, var(--card)); box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 15%,transparent); }
 .kb-library-card{ position:relative; }
-.kb-card-top{ display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; }
 .kb-card-icon{ color:var(--accent); display:flex; }
 .kb-card-icon svg{ width:18px; height:18px; }
 .kb-status{ display:inline-flex; align-items:center; gap:5px; min-height:22px; padding:0 8px; border:1px solid transparent; border-radius:999px; background:var(--line-soft); font-size:calc(11px * var(--ui-scale)); font-weight:500; color:var(--muted); white-space:nowrap; }
 .kb-status svg{ width:12px; height:12px; flex:0 0 auto; stroke-width:2.4; }
 .kb-status.ready{ color:var(--ok); background:color-mix(in srgb,var(--ok) 10%,var(--line-soft)); border-color:color-mix(in srgb,var(--ok) 24%,transparent); }
-.kb-status.ready.warnings{ color:var(--amber); background:color-mix(in srgb,var(--amber) 11%,var(--line-soft)); border-color:color-mix(in srgb,var(--amber) 26%,transparent); }
 .kb-status.pending{ color:var(--amber); background:color-mix(in srgb,var(--amber) 11%,var(--line-soft)); border-color:color-mix(in srgb,var(--amber) 22%,transparent); }
-.kb-card-title{ margin:10px 0 0; color:var(--txt-strong); font-size:calc(13px * var(--ui-scale)); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+.kb-card-title-row{ display:flex; align-items:center; gap:8px; min-width:0; margin-top:10px; }
+.kb-card-title{ min-width:0; flex:1 1 auto; margin:0; color:var(--txt-strong); font-size:calc(13px * var(--ui-scale)); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+.kb-card-title-row .kb-status{ flex:0 0 auto; max-width:52%; overflow:hidden; text-overflow:ellipsis; }
 .kb-card-actions{ display:flex; align-items:center; flex-wrap:wrap; gap:5px; min-width:0; margin-top:10px; padding-top:8px; border-top:1px solid var(--line-soft); }
 .kb-link-btn.danger{ color:var(--danger); }
 .kb-doc-icon{ color:var(--accent); }

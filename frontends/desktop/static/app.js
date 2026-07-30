@@ -1126,14 +1126,12 @@ function kbRenderLibraries() {
     const card = document.createElement('article');
     card.className = `kb-library-card${kbState.activeKb?.id === kb.id ? ' active' : ''}`;
     card.dataset.kbId = kb.id || '';
-    const hasWarnings = kb.state === 'ready_with_warnings';
     const isReady = ['ready', 'ready_with_warnings'].includes(kb.state);
-    const stateText = hasWarnings ? t('kb.readyWithWarnings') : isReady ? t('kb.ready') : t('kb.notReady');
-    const statusClass = hasWarnings ? 'ready warnings' : isReady ? 'ready' : 'pending';
+    const stateText = isReady ? t('kb.ready') : t('kb.notReady');
+    const statusClass = isReady ? 'ready' : 'pending';
     const stateIcon = isReady ? GA_ICON('check') : '';
     card.innerHTML = `
-      <div class="kb-card-top"><span class="kb-status ${statusClass}">${stateIcon}<span>${escapeHtml(stateText)}</span></span></div>
-      <h3 class="kb-card-title"></h3>
+      <div class="kb-card-title-row"><h3 class="kb-card-title"></h3><span class="kb-status ${statusClass}">${stateIcon}<span>${escapeHtml(stateText)}</span></span></div>
       <div class="kb-card-meta"></div>
       <div class="kb-card-actions"><button type="button" class="kb-link-btn kb-reindex-library" title="${escapeHtml(t('kb.reindexHint'))}">${escapeHtml(t('kb.reindexAction'))}</button><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
     card.querySelector('.kb-card-title').textContent = kb.name || kb.id || '';
@@ -2723,7 +2721,10 @@ document.querySelectorAll('#kb-quickstart-vision-form').forEach(form => {
   const enabled = form.elements.namedItem('enabled');
   const select = form.elements.namedItem('modelProfile');
   enabled?.addEventListener('change', () => {
-    if (select) select.required = !!enabled.checked;
+    if (select) {
+      select.disabled = !enabled.checked;
+      select.required = !!enabled.checked;
+    }
   });
 });
 if (pqEl) pqEl.addEventListener('click', (e) => {
@@ -6688,13 +6689,14 @@ function setKbConfigForm(kind, values, targetForm = null) {
     if (enabled) enabled.checked = values.enabled === true;
     if (select) {
       const profiles = Array.isArray(values.availableProfiles) ? values.availableProfiles : [];
-      select.replaceChildren(new Option(t('set.kbVisionChooseModel'), ''));
+      select.replaceChildren();
       profiles.forEach(profile => {
         const option = new Option(profile.name || profile.varName || '', profile.varName || '');
         if (profile.model) option.textContent += ` · ${profile.model}`;
         select.appendChild(option);
       });
       select.value = values.modelProfile || '';
+      select.disabled = !enabled?.checked;
       select.required = !!enabled?.checked;
     }
     const status = form.querySelector('.kb-config-status');
