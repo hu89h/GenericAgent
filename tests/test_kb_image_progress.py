@@ -13,7 +13,7 @@ class ImageProgressTests(unittest.TestCase):
     def test_progress_is_grouped_by_original_document(self):
         processor = ImageAssetProcessor(usage_tracker=UsageTracker(), concurrency=1)
         processor._image_client = SimpleNamespace(enabled=lambda: True)
-        processor.analyze_image_job = lambda _path, _job: (
+        processor.analyze_image_job = lambda _path, _job, **_kwargs: (
             {"description": "ok"},
             {"calls": 1},
         )
@@ -66,7 +66,7 @@ class ImageProgressTests(unittest.TestCase):
         cancel_event = threading.Event()
         calls = []
 
-        def analyze(_path, job):
+        def analyze(_path, job, **_kwargs):
             calls.append(job.image_sha)
             cancel_event.set()
             return {"description": "unused"}, {"calls": 1}
@@ -103,7 +103,7 @@ class ImageProgressTests(unittest.TestCase):
         processor._image_client = SimpleNamespace(enabled=lambda: True)
         calls = []
 
-        def analyze(_path, job):
+        def analyze(_path, job, **_kwargs):
             calls.append(job.image_sha)
             if len(calls) == 1:
                 return {"error": "HTTP 400: model does not support image input"}, {"calls": 1}

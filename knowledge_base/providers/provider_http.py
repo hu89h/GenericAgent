@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import random
+import threading
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
+
+from ..cancellation import KnowledgeBaseCancelled, check_cancelled, wait_with_cancellation
 
 
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -71,6 +75,53 @@ def _retry_delay(attempt: int, retry_after: float | None = None) -> float:
     return base + random.uniform(0, min(1.0, base * 0.2))
 
 
+def _request_once(
+    request: urllib.request.Request,
+    *,
+    timeout: int,
+    cancelled: Callable[[], bool] | None = None,
+):
+    """Run one HTTP request, allowing the caller to stop waiting for it.
+
+    ``urllib`` cannot interrupt a blocking ``urlopen`` from another thread.
+    When cancellation is supplied, run that one network operation in a daemon
+    helper and poll it from the task thread.  Cancellation therefore stops
+    retries and releases the import worker immediately; the in-flight socket
+    is bounded by the normal request timeout and cannot keep the process alive.
+    """
+
+    def operation():
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    if not callable(cancelled):
+        return operation()
+
+    result: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            result.put((True, operation()))
+        except BaseException as error:  # propagate HTTPError and cancellation-safe errors
+            result.put((False, error))
+
+    thread = threading.Thread(
+        target=worker,
+        name="ga-kb-http",
+        daemon=True,
+    )
+    thread.start()
+    while True:
+        check_cancelled(cancelled)
+        try:
+            ok, value = result.get(timeout=0.2)
+        except queue.Empty:
+            continue
+        if ok:
+            return value
+        raise value
+
+
 def post_json(
     path: str,
     payload: Dict[str, Any],
@@ -86,6 +137,7 @@ def post_json(
     usage_tokens=None,
     auth_mode: str = "bearer",
     extra_headers: Optional[Dict[str, str]] = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Dict[str, Any]:
     base = (base or base_url()).rstrip("/")
     key = key if key is not None else api_key()
@@ -105,14 +157,20 @@ def post_json(
     last_error = None
     retry_after = None
     for attempt in range(1, max(1, int(retries)) + 1):
-        reservation = (
-            rate_limiter.acquire(estimated_tokens)
-            if rate_limiter is not None
-            else None
-        )
+        check_cancelled(cancelled)
+        if rate_limiter is None:
+            reservation = None
+        elif callable(cancelled):
+            reservation = rate_limiter.acquire(
+                estimated_tokens,
+                cancelled=cancelled,
+            )
+        else:
+            # Keep third-party/test limiter implementations that only expose
+            # the original one-argument acquire() contract working.
+            reservation = rate_limiter.acquire(estimated_tokens)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
+            body = _request_once(req, timeout=timeout, cancelled=cancelled)
             if not isinstance(body, dict):
                 raise RuntimeError(f"{error_prefix} 返回格式异常: {body}")
             if reservation is not None and callable(usage_tokens):
@@ -121,6 +179,8 @@ def post_json(
                 except Exception:
                     pass
             return body
+        except KnowledgeBaseCancelled:
+            raise
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
             last_error = RuntimeError(f"{error_prefix} HTTP {exc.code}: {detail}")
@@ -131,7 +191,13 @@ def post_json(
             last_error = exc
             retry_after = None
         if attempt < max(1, int(retries)):
-            time.sleep(_retry_delay(attempt, retry_after))
+            delay = _retry_delay(attempt, retry_after)
+            if callable(cancelled):
+                wait_with_cancellation(delay, cancelled)
+            else:
+                # Preserve the original synchronous path and its injectable
+                # sleep behavior for callers that do not need cancellation.
+                time.sleep(delay)
     raise RuntimeError(f"{error_prefix} 失败: {last_error}")
 
 
@@ -146,6 +212,7 @@ def embeddings(
     rate_limiter=None,
     estimated_tokens: int = 1,
     usage_tokens=None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Dict[str, Any]:
     return post_json(
         "/embeddings",
@@ -158,6 +225,7 @@ def embeddings(
         rate_limiter=rate_limiter,
         estimated_tokens=estimated_tokens,
         usage_tokens=usage_tokens,
+        cancelled=cancelled,
     )
 
 
@@ -173,6 +241,7 @@ def chat_completions(
     rate_limiter=None,
     estimated_tokens: int = 1,
     usage_tokens=None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"model": model, "messages": messages}
     if extra:
@@ -188,6 +257,7 @@ def chat_completions(
         rate_limiter=rate_limiter,
         estimated_tokens=estimated_tokens,
         usage_tokens=usage_tokens,
+        cancelled=cancelled,
     )
 
 
@@ -205,6 +275,7 @@ def anthropic_messages(
     rate_limiter=None,
     estimated_tokens: int = 1,
     usage_tokens=None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "model": model,
@@ -226,6 +297,7 @@ def anthropic_messages(
         rate_limiter=rate_limiter,
         estimated_tokens=estimated_tokens,
         usage_tokens=usage_tokens,
+        cancelled=cancelled,
     )
 
 

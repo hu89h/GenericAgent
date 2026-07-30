@@ -8,6 +8,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Callable
 
+from ..cancellation import check_cancelled
+
 
 @dataclass(eq=False, slots=True)
 class Reservation:
@@ -107,7 +109,12 @@ class SlidingWindowRateLimiter:
             )
         return max(0.01, max(waits, default=0.05))
 
-    def acquire(self, estimated_tokens: int) -> Reservation:
+    def acquire(
+        self,
+        estimated_tokens: int,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Reservation:
         requested_tokens = max(1, int(estimated_tokens or 1))
         if requested_tokens > self.tpm:
             raise ValueError(
@@ -118,6 +125,7 @@ class SlidingWindowRateLimiter:
                 f"request token estimate {requested_tokens} exceeds TPS budget {self.tps}"
             )
         while True:
+            check_cancelled(cancelled)
             with self._lock:
                 now = self._clock()
                 self._purge(now)
@@ -150,7 +158,19 @@ class SlidingWindowRateLimiter:
                 wait_seconds = self._wait_seconds(now, requested_tokens)
             # Wake periodically so configuration changes, clock jumps, and test
             # clocks do not leave a worker sleeping for a whole minute.
-            self._sleep(min(wait_seconds, 1.0))
+            if callable(cancelled):
+                # Keep the limiter responsive to cancellation without changing
+                # the injected sleep behavior used by existing tests.
+                responsive_wait = min(wait_seconds, 1.0)
+                deadline = time.monotonic() + responsive_wait
+                while True:
+                    check_cancelled(cancelled)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._sleep(min(0.1, remaining))
+            else:
+                self._sleep(min(wait_seconds, 1.0))
 
     def reconcile(self, reservation: Reservation, actual_tokens: int | None) -> None:
         if not actual_tokens:

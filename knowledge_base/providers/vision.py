@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Dict
+from typing import Callable, Dict
 
 import multimodal
 
@@ -217,7 +217,12 @@ def _extract_json(text: str) -> Dict[str, object]:
     return {"error": "model did not return valid JSON", "raw": raw[:1000]}
 
 
-def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
+def _vision_chat(
+    path: str,
+    prompt_text: str,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> Dict[str, object]:
     """POST one build-time text+image request and parse its JSON reply."""
     cfg = _config()
     if not (cfg["api_key"] and cfg["base_url"] and cfg["model"]):
@@ -266,6 +271,7 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
             rate_limiter=limiter,
             estimated_tokens=cfg["token_reserve"],
             usage_tokens=usage_tokens,
+            cancelled=cancelled,
         )
         content = "".join(
             str(block.get("text") or "")
@@ -293,6 +299,7 @@ def _vision_chat(path: str, prompt_text: str) -> Dict[str, object]:
             rate_limiter=limiter,
             estimated_tokens=cfg["token_reserve"],
             usage_tokens=usage_tokens,
+            cancelled=cancelled,
         )
         choice = body["choices"][0]
         content = choice["message"]["content"]
@@ -316,7 +323,12 @@ def analyze_image(
     title: str = "",
     near_text: str = "",
     ref_candidates: list[str] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Dict[str, object]:
     if not enabled():
         return {}
-    return _vision_chat(path, _prompt(focus, title, near_text, ref_candidates or []))
+    return _vision_chat(
+        path,
+        _prompt(focus, title, near_text, ref_candidates or []),
+        cancelled=cancelled,
+    )

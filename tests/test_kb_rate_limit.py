@@ -1,4 +1,5 @@
 import io
+import threading
 import unittest
 import urllib.error
 from email.message import Message
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from knowledge_base.providers import embeddings, provider_http, vision
+from knowledge_base.cancellation import KnowledgeBaseCancelled
 from knowledge_base.providers.rate_limit import SlidingWindowRateLimiter
 
 
@@ -47,6 +49,67 @@ class FakeResponse:
 
 
 class KnowledgeBaseRateLimitTests(unittest.TestCase):
+    def test_cancelled_request_does_not_start_or_retry_http(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        with mock.patch.object(provider_http.urllib.request, "urlopen") as request:
+            with self.assertRaises(KnowledgeBaseCancelled):
+                provider_http.post_json(
+                    "/v1",
+                    {"value": 1},
+                    base="https://example.test",
+                    key="secret",
+                    retries=4,
+                    cancelled=cancelled.is_set,
+                )
+        request.assert_not_called()
+
+    def test_cancellation_stops_waiting_for_an_inflight_request(self):
+        started = threading.Event()
+        release = threading.Event()
+        cancelled = threading.Event()
+
+        def blocking_urlopen(*_args, **_kwargs):
+            started.set()
+            release.wait(5)
+            return FakeResponse()
+
+        result = {}
+        with mock.patch.object(
+            provider_http.urllib.request,
+            "urlopen",
+            side_effect=blocking_urlopen,
+        ):
+            worker = threading.Thread(
+                target=lambda: result.setdefault(
+                    "error",
+                    self._run_cancelled_request(cancelled),
+                ),
+                daemon=True,
+            )
+            worker.start()
+            self.assertTrue(started.wait(1))
+            cancelled.set()
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+            self.assertIsInstance(result.get("error"), KnowledgeBaseCancelled)
+            release.set()
+
+    @staticmethod
+    def _run_cancelled_request(cancelled):
+        try:
+            provider_http.post_json(
+                "/v1",
+                {"value": 1},
+                base="https://example.test",
+                key="secret",
+                retries=4,
+                cancelled=cancelled.is_set,
+            )
+        except Exception as error:
+            return error
+        return None
+
     def test_uses_only_headroom_budget(self):
         fake = FakeTime()
         limiter = SlidingWindowRateLimiter(

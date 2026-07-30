@@ -773,7 +773,13 @@ class ImageAssetProcessor:
         completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
         return prompt, completion
 
-    def analyze_image_job(self, kb_path: str, job: ImageContent):
+    def analyze_image_job(
+        self,
+        kb_path: str,
+        job: ImageContent,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ):
         delta = {"calls": 0, "cached": 0, "failed": 0, "prompt_tokens": 0, "completion_tokens": 0}
         image_sha = job.image_sha
         analysis_meta = job.analysis_meta
@@ -797,13 +803,19 @@ class ImageAssetProcessor:
             client = self._image_client
             image_abs = job.image_abspath
             delta["calls"] += 1
-            analysis = client.analyze_image(
-                image_abs,
-                focus=focus,
-                title=job.title or "",
-                near_text=job.near_text or "",
-                ref_candidates=job.ref_candidates or [],
-            )
+            analysis_kwargs = {
+                "focus": focus,
+                "title": job.title or "",
+                "near_text": job.near_text or "",
+                "ref_candidates": job.ref_candidates or [],
+            }
+            if callable(cancelled):
+                analysis_kwargs["cancelled"] = cancelled
+            analysis = client.analyze_image(image_abs, **analysis_kwargs)
+            # Do not persist a response that completed after the user asked to
+            # stop.  The surrounding pipeline will remove staging, but this
+            # guard also keeps cancellation from populating the image cache.
+            check_cancelled(cancelled)
             usage = analysis.pop("_usage", None)
             request_id = analysis.pop("_request_id", None)
             prompt_tokens, completion_tokens = self._usage_tokens(usage)
@@ -827,6 +839,8 @@ class ImageAssetProcessor:
                 "result": analysis,
             }, focus, context_key)
             return analysis, delta
+        except KnowledgeBaseCancelled:
+            raise
         except Exception as exc:
             delta["failed"] += 1
             return {"error": str(exc), "uncertain": [str(exc)]}, delta
@@ -923,6 +937,13 @@ class ImageAssetProcessor:
                 "image_documents": progress_snapshot(),
             })
 
+        def run_image_job(job: ImageContent):
+            if callable(cancelled):
+                return self.analyze_image_job(
+                    kb["path"], job, cancelled=cancelled
+                )
+            return self.analyze_image_job(kb["path"], job)
+
         if callable(progress):
             emit_progress(None, 0)
         results = {}
@@ -935,7 +956,7 @@ class ImageAssetProcessor:
         # classification, never on a model-name heuristic.
         first_job = jobs[0]
         check_cancelled(cancelled)
-        first_analysis, first_delta = self.analyze_image_job(kb["path"], first_job)
+        first_analysis, first_delta = run_image_job(first_job)
         check_cancelled(cancelled)
         self._usage_tracker.merge_image_analysis(first_delta)
         first_analysis = first_analysis or {}
@@ -977,7 +998,7 @@ class ImageAssetProcessor:
         if workers <= 1:
             for job in remaining_jobs:
                 check_cancelled(cancelled)
-                analysis, delta = self.analyze_image_job(kb["path"], job)
+                analysis, delta = run_image_job(job)
                 check_cancelled(cancelled)
                 self._usage_tracker.merge_image_analysis(delta)
                 results[job.image_sha] = analysis
@@ -991,7 +1012,7 @@ class ImageAssetProcessor:
         futures = {}
         try:
             futures = {
-                executor.submit(self.analyze_image_job, kb["path"], job): job
+                executor.submit(run_image_job, job): job
                 for job in remaining_jobs
             }
             for future in as_completed(futures):
@@ -1016,7 +1037,7 @@ class ImageAssetProcessor:
         except KnowledgeBaseCancelled:
             for future in futures:
                 future.cancel()
-            executor.shutdown(wait=True, cancel_futures=True)
+            executor.shutdown(wait=False, cancel_futures=True)
             raise
         else:
             executor.shutdown(wait=True)
