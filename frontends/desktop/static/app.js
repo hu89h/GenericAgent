@@ -246,6 +246,11 @@ let bridgeUiOffline = false;
         if (!id) throw new Error('kb/reindex missing kbId');
         return http(`/kb/${encodeURIComponent(id)}/reindex`, { method: 'POST' });
       }
+      case 'kb/retry-image-analysis': {
+        const id = params.kbId || params.id || '';
+        if (!id) throw new Error('kb/retry-image-analysis missing kbId');
+        return http(`/kb/${encodeURIComponent(id)}/retry-image-analysis`, { method: 'POST' });
+      }
       case 'kb/delete-document': {
         const id = params.kbId || params.id || '';
         if (!id) throw new Error('kb/delete-document missing kbId');
@@ -375,6 +380,7 @@ let bridgeUiOffline = false;
     kbJob: (jobId) => rpc('kb/job', { jobId }),
     kbCancelJob: (jobId) => rpc('kb/job/cancel', { jobId }),
     kbReindex: (kbId) => rpc('kb/reindex', { kbId }),
+    kbRetryImageAnalysis: (kbId) => rpc('kb/retry-image-analysis', { kbId }),
     kbDeleteDocument: (kbId, params = {}) => rpc('kb/delete-document', Object.assign({}, params, { kbId })),
     kbDelete: (kbId, params = {}) => rpc('kb/delete', Object.assign({}, params, { kbId })),
     getConductorModel: () => rpc('services/conductor/model/get', {}),
@@ -908,7 +914,7 @@ const kbPageEls = {
   taskProgress: kbEl('kb-task-progress-bar'), taskProgressValue: kbEl('kb-task-progress-value'),
   taskCurrent: kbEl('kb-task-current'), taskCounts: kbEl('kb-task-counts'), taskSuccess: kbEl('kb-task-successes'),
   taskImages: kbEl('kb-task-image-documents'), taskWarning: kbEl('kb-task-warnings'),
-  taskFailure: kbEl('kb-task-failures'), taskCancel: kbEl('kb-task-cancel'),
+  taskFailure: kbEl('kb-task-failures'), taskGuidance: kbEl('kb-task-guidance'), taskCancel: kbEl('kb-task-cancel'),
   taskBackground: kbEl('kb-task-background'), taskClose: kbEl('kb-task-close'),
   taskCapsule: kbEl('kb-task-capsule'), taskCapsuleTitle: kbEl('kb-task-capsule-title'),
   taskCapsulePhase: kbEl('kb-task-capsule-phase'), taskCapsuleValue: kbEl('kb-task-capsule-value'),
@@ -1133,7 +1139,7 @@ function kbRenderLibraries() {
     card.innerHTML = `
       <div class="kb-card-title-row"><h3 class="kb-card-title"></h3><span class="kb-status ${statusClass}">${stateIcon}<span>${escapeHtml(stateText)}</span></span></div>
       <div class="kb-card-meta"></div>
-      <div class="kb-card-actions"><button type="button" class="kb-link-btn kb-reindex-library" title="${escapeHtml(t('kb.reindexHint'))}">${escapeHtml(t('kb.reindexAction'))}</button><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
+      <div class="kb-card-actions"><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
     card.querySelector('.kb-card-title').textContent = kb.name || kb.id || '';
     card.querySelector('.kb-card-meta').textContent = kbFormat(t('kb.libraryMeta'), {
       documents: kb.counts?.documents || 0,
@@ -1142,11 +1148,6 @@ function kbRenderLibraries() {
     card.addEventListener('click', event => {
       if (event.target.closest('.kb-card-actions')) return;
       void kbOpenDocuments(kb);
-    });
-    card.querySelector('.kb-reindex-library').addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      void kbOpenBuildModal(kb.id);
     });
     card.querySelector('.kb-delete-library').addEventListener('click', () => void kbDeleteLibrary(kb));
     grid.appendChild(card);
@@ -1614,7 +1615,9 @@ function kbJobTerminal(job) {
 function kbJobKind(job, fallback = '') {
   const mode = kbText(job?.mode || fallback || 'import');
   if (mode === 'delete_document' || mode === 'delete') return 'delete';
-  return mode === 'reindex' ? 'reindex' : 'import';
+  if (mode === 'reindex') return 'reindex';
+  if (mode === 'retry_image_analysis') return 'retry_image_analysis';
+  return 'import';
 }
 
 function kbClampCapsulePosition(left, top, width, height) {
@@ -1749,7 +1752,9 @@ function kbRenderTaskCapsule() {
   if (kbPageEls.taskCapsuleTitle) {
     const titleKey = kind === 'import'
       ? 'kb.taskCapsuleImport'
-      : (kind === 'delete' ? 'kb.taskCapsuleDelete' : 'kb.taskCapsuleReindex');
+      : (kind === 'delete'
+        ? 'kb.taskCapsuleDelete'
+        : (kind === 'retry_image_analysis' ? 'kb.taskCapsuleImageRetry' : 'kb.taskCapsuleReindex'));
     kbPageEls.taskCapsuleTitle.textContent = t(titleKey);
   }
   if (kbPageEls.taskCapsulePhase) kbPageEls.taskCapsulePhase.textContent = kbPhaseText(job);
@@ -1778,14 +1783,14 @@ function kbDocumentResultHtml(item) {
     ? [...new Set(item.errorDetails.filter(Boolean).map(kbText))].join('；')
     : '';
   const suffix = errorDetails ? `<br><small>${escapeHtml(errorDetails)}</small>` : '';
-  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(detail + warnings)}${suffix}</div>`;
+  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(detail + warnings)}${suffix}${kbResultGuidanceHtml(item.recommendedActions)}</div>`;
 }
 
 function kbPreparationFailureHtml(item) {
   const reason = item.errorCode ? kbErrorText(item.errorCode) : t('kb.error.processing_failed');
   const detail = kbText(item.errorDetail);
   const suffix = detail && detail !== reason ? `<br><small>${escapeHtml(detail)}</small>` : '';
-  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(reason)}${suffix}</div>`;
+  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(reason)}${suffix}${kbResultGuidanceHtml(item.recommendedAction)}</div>`;
 }
 
 function kbFailedDocumentHtml(item) {
@@ -1797,7 +1802,28 @@ function kbFailedDocumentHtml(item) {
     ? [...new Set(item.errorDetails.filter(Boolean).map(kbText))].join('；')
     : '';
   const suffix = details && details !== reasons ? `<br><small>${escapeHtml(details)}</small>` : '';
-  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(reasons)}${suffix}</div>`;
+  return `<div><b>${escapeHtml(item.name || '')}</b><br>${escapeHtml(reasons)}${suffix}${kbResultGuidanceHtml(item.recommendedAction)}</div>`;
+}
+
+function kbGuidanceKey(action) {
+  return {
+    check_configuration: 'kb.guidance.checkConfiguration',
+    retry_document_import: 'kb.guidance.retryDocument',
+    retry_image_analysis: 'kb.guidance.retryImages',
+    reindex: 'kb.guidance.reindex',
+    retry_operation: 'kb.guidance.retryOperation',
+  }[kbText(action)] || '';
+}
+
+function kbResultGuidanceHtml(actions) {
+  const keys = [...new Set((Array.isArray(actions) ? actions : [actions])
+    .map(kbText)
+    .filter(Boolean)
+    .map(kbGuidanceKey)
+    .filter(Boolean))];
+  return keys.length
+    ? `<br><small class="kb-result-guidance">${keys.map(key => escapeHtml(t(key))).join('<br>')}</small>`
+    : '';
 }
 
 function kbSetTask(job, kind) {
@@ -1821,7 +1847,9 @@ function kbSetTask(job, kind) {
       ? (terminal ? 'kb.importResult' : 'kb.importing')
       : (kind === 'delete'
         ? (terminal ? 'kb.deleteDocumentResult' : 'kb.deletingDocument')
-        : (terminal ? 'kb.reindexResult' : 'kb.building'));
+        : (kind === 'retry_image_analysis'
+          ? (terminal ? 'kb.imageRetryResult' : 'kb.imageRetrying')
+          : (terminal ? 'kb.reindexResult' : 'kb.reindexing')));
     kbPageEls.taskTitle.textContent = t(titleKey);
   }
   if (kbPageEls.taskPhase) kbPageEls.taskPhase.textContent = kbPhaseText(job);
@@ -1845,7 +1873,10 @@ function kbSetTask(job, kind) {
 
   const imageDocuments = Array.isArray(job.imageDocuments) ? job.imageDocuments : [];
   if (kbPageEls.taskImages) {
-    const showImages = job.phase === 'image_analysis' && imageDocuments.length;
+    // Keep the grouped image progress visible after analysis completes and
+    // when a background task is reopened.  The bridge retains the last
+    // non-empty snapshot in the job record.
+    const showImages = imageDocuments.length > 0;
     kbPageEls.taskImages.hidden = !showImages;
     kbPageEls.taskImages.innerHTML = showImages
       ? imageDocuments.map(item => (
@@ -1882,6 +1913,13 @@ function kbSetTask(job, kind) {
     } else if (kind === 'delete') {
       kbPageEls.taskCounts.textContent = kbFormat(t('kb.deleteCounts'), {
         name: job.documentName || '',
+      });
+      kbPageEls.taskCounts.hidden = false;
+    } else if (terminal && (kind === 'reindex' || kind === 'retry_image_analysis') && summary.n_docs != null) {
+      kbPageEls.taskCounts.textContent = kbFormat(t('kb.maintenanceCounts'), {
+        documents: summary.n_docs || 0,
+        text: summary.text_chunks || 0,
+        images: summary.image_chunks || 0,
       });
       kbPageEls.taskCounts.hidden = false;
     } else {
@@ -1931,6 +1969,31 @@ function kbSetTask(job, kind) {
       kbPageEls.taskFailure.insertAdjacentHTML('beforeend', taskError);
     } else {
       kbPageEls.taskFailure.innerHTML = `<strong>${escapeHtml(t('kb.failureList'))}</strong>${taskError}`;
+    }
+  }
+
+  if (kbPageEls.taskGuidance) {
+    const actions = terminal && Array.isArray(job.recommendedActions)
+      ? [...new Set(job.recommendedActions.map(kbText).filter(Boolean))]
+      : [];
+    const messages = actions
+      .map(action => kbGuidanceKey(action))
+      .filter(Boolean)
+      .map(key => `<div>${escapeHtml(t(key))}</div>`);
+    const canOpenMaintenance = actions.some(action =>
+      ['retry_image_analysis', 'reindex', 'retry_operation'].includes(action)
+    );
+    kbPageEls.taskGuidance.hidden = !messages.length;
+    kbPageEls.taskGuidance.innerHTML = messages.length
+      ? messages.join('') + (canOpenMaintenance
+        ? `<button type="button" class="kb-guidance-action">${escapeHtml(t('kb.openMaintenance'))}</button>`
+        : '')
+      : '';
+    if (canOpenMaintenance) {
+      kbPageEls.taskGuidance.querySelector('.kb-guidance-action')?.addEventListener('click', () => {
+        closeModals();
+        void kbOpenBuildModal();
+      });
     }
   }
 
@@ -2226,6 +2289,8 @@ async function kbOpenBuildModal(preselectedKbId = '') {
     option.selected = Boolean(preselectedKbId && kb.id === preselectedKbId);
     kbPageEls.buildScope.appendChild(option);
   }
+  const reindex = kbPageEls.build?.querySelector('input[name="maintenanceOperation"][value="reindex"]');
+  if (reindex) reindex.checked = true;
   openModal('kb-build-modal');
 }
 
@@ -2244,6 +2309,7 @@ function initKbPage() {
   bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb, { force: true }));
   bindClick('kb-add-docs-btn', () => void kbPickAndAddDocuments());
   bindClick('kb-folder-import-btn', () => void kbPickAndImport());
+  bindClick('kb-maintenance-btn', () => void kbOpenBuildModal(kbState.activeKb?.id || ''));
   bindClick('kb-create-btn', () => {
     const form = kbEl('kb-create-form');
     if (form) form.reset();
@@ -2269,6 +2335,7 @@ function initKbPage() {
   kbPageEls.buildForm?.addEventListener('submit', async event => {
     event.preventDefault();
     const scope = kbPageEls.buildScope?.value || '';
+    const operation = kbPageEls.buildForm.querySelector('input[name="maintenanceOperation"]:checked')?.value || 'reindex';
     closeModals();
     try {
       if (!scope) throw new Error(t('kb.noReady'));
@@ -2276,9 +2343,11 @@ function initKbPage() {
         kbOpenTrackedTask();
         return;
       }
-      const result = await window.ga.kbReindex(scope);
+      const result = operation === 'retry_image_analysis'
+        ? await window.ga.kbRetryImageAnalysis(scope)
+        : await window.ga.kbReindex(scope);
       if (!result.jobId) throw new Error(result.error || t('err.kbBuild'));
-      await kbTrackJob('reindex', result.jobId);
+      await kbTrackJob(operation, result.jobId);
     } catch (error) { showError(`${t('err.kbBuild')}: ${error.message || error}`); }
   });
   bindKbBrowserSplitter();
@@ -3998,6 +4067,9 @@ const modelNameEl= modelChip ? modelChip.querySelector('.model-name') : null;
 // conductor 页面也有一个独立的模型 chip,共用一份模型数据
 const collabModelChip   = document.getElementById('cdb-model-chip');
 const collabModelNameEl = collabModelChip ? collabModelChip.querySelector('.model-name') : null;
+// 知识库问答使用与聊天相同的模型绑定和切换逻辑，只在独立页面提供同样的入口。
+const kbModelChip = document.getElementById('kb-model-chip');
+const kbModelNameEl = kbModelChip ? kbModelChip.querySelector('.model-name') : null;
 
 let msgsEl = null;
 function ensureMsgs() {
@@ -5992,6 +6064,7 @@ function updateModelChip() {
   if (collabModelNameEl) collabModelNameEl.innerHTML = labelWithCapability(
     state.conductorModelName || name, conductorProfile || profile,
   );
+  if (kbModelNameEl) kbModelNameEl.innerHTML = labelWithCapability(name, profile);
   syncVisionSendState();
   syncVisionSendState({ ctx: 'kb' });
 }
@@ -6914,6 +6987,7 @@ async function loadModelProfiles() {
 /* ═══════════════ 模型菜单(chat + conductor 共用一份逻辑,各自一个 DOM) ═══════════════ */
 const modelMenu       = document.getElementById('model-menu');
 const collabModelMenu = document.getElementById('cdb-model-menu');
+const kbModelMenu = document.getElementById('kb-model-menu');
 function renderModelMenu(menuEl) {
   if (!menuEl) return;
   const list = state.modelProfiles || [];
@@ -6948,8 +7022,10 @@ function openModelMenu(chipEl, menuEl) {
 function closeAllModelMenus() {
   if (modelMenu) modelMenu.hidden = true;
   if (collabModelMenu) collabModelMenu.hidden = true;
+  if (kbModelMenu) kbModelMenu.hidden = true;
   if (modelChip) modelChip.classList.remove('open');
   if (collabModelChip) collabModelChip.classList.remove('open');
+  if (kbModelChip) kbModelChip.classList.remove('open');
 }
 function bindModelMenuItemClick(menuEl, onSelect) {
   if (!menuEl) return;
@@ -6966,6 +7042,7 @@ function bindModelMenuItemClick(menuEl, onSelect) {
 }
 bindModelMenuItemClick(modelMenu, selectModel);
 bindModelMenuItemClick(collabModelMenu, selectConductorModel);
+bindModelMenuItemClick(kbModelMenu, selectModel);
 if (modelChip) modelChip.addEventListener('click', (e) => {
   e.preventDefault(); e.stopPropagation();
   if (modelMenu && !modelMenu.hidden) { closeAllModelMenus(); return; }
@@ -6976,9 +7053,15 @@ if (collabModelChip) collabModelChip.addEventListener('click', (e) => {
   if (collabModelMenu && !collabModelMenu.hidden) { closeAllModelMenus(); return; }
   openModelMenu(collabModelChip, collabModelMenu);
 });
+if (kbModelChip) kbModelChip.addEventListener('click', (e) => {
+  e.preventDefault(); e.stopPropagation();
+  if (kbModelMenu && !kbModelMenu.hidden) { closeAllModelMenus(); return; }
+  openModelMenu(kbModelChip, kbModelMenu);
+});
 document.addEventListener('click', (e) => {
   if (e.target.closest('#model-menu') || e.target.closest('#model-chip') ||
       e.target.closest('#cdb-model-menu') || e.target.closest('#cdb-model-chip') ||
+      e.target.closest('#kb-model-menu') || e.target.closest('#kb-model-chip') ||
       e.target.closest('#chat-menu') || e.target.closest('#chat-plus-btn') ||
       e.target.closest('#kb-qa-menu') || e.target.closest('#kb-qa-plus-btn') ||
       e.target.closest('#knowledge-scope-picker') ||

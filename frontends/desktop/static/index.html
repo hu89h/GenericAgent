@@ -282,8 +282,9 @@
                   <div class="kb-library-head">
                     <input class="kb-library-search" id="kb-library-search" data-i18n-ph="kb.searchKbs" placeholder="">
                     <div class="kb-library-actions">
-                      <button type="button" class="kb-btn kb-btn-compact primary" id="kb-create-btn" data-i18n-title="kb.create" title=""><span data-ga-icon="plus"></span><span data-i18n="kb.create"></span></button>
+                      <button type="button" class="kb-btn kb-btn-compact" id="kb-create-btn" data-i18n-title="kb.create" title=""><span data-ga-icon="plus"></span><span data-i18n="kb.create"></span></button>
                       <button type="button" class="kb-btn kb-btn-compact" id="kb-folder-import-btn" data-i18n-title="kb.importFolder" title=""><span data-ga-icon="folderSimplePlus"></span><span data-i18n="kb.importFolder"></span></button>
+                      <button type="button" class="kb-btn kb-btn-compact" id="kb-maintenance-btn" data-i18n-title="kb.maintenanceHint" title=""><span data-ga-icon="gear"></span><span data-i18n="kb.maintenanceAction"></span></button>
                       <button type="button" class="ic-btn" id="kb-refresh-btn" data-i18n-title="kb.refresh" title=""><span data-ga-icon="arrowClockwise"></span></button>
                     </div>
                   </div>
@@ -325,10 +326,12 @@
                               </div>
                             </div>
                             <span class="spacer"></span>
+                            <button type="button" class="chip kb-model-chip" id="kb-model-chip" data-i18n-title="model.menuLabel" title=""><span class="model-name"></span> <span class="chip-ic" data-ga-icon="caretDown"></span></button>
                             <button type="button" class="send kb-send" id="kb-ask-btn" data-i18n-title="act.send" title=""><span data-ga-icon="paperPlaneTilt"></span></button>
                           </div>
                         </div>
                       </div>
+                      <div class="ga-menu" id="kb-model-menu" hidden></div>
                       <input type="file" id="kb-file-input" multiple hidden>
                     </div>
                   </aside>
@@ -601,6 +604,7 @@
         <div class="kb-task-result" id="kb-task-successes" hidden></div>
         <div class="kb-task-result kb-task-warnings" id="kb-task-warnings" hidden></div>
         <div class="kb-task-result kb-task-failures" id="kb-task-failures" hidden></div>
+        <div class="kb-task-guidance" id="kb-task-guidance" hidden></div>
         <div class="kb-task-actions">
           <button type="button" class="set-btn danger" id="kb-task-cancel" data-i18n="kb.cancelTask"></button>
           <button type="button" class="set-btn" id="kb-task-background" data-i18n="kb.runInBackground"></button>
@@ -613,14 +617,26 @@
   <div class="modal" id="kb-build-modal" hidden>
     <div class="modal-backdrop" data-close></div>
     <div class="modal-card kb-build-card" role="dialog" aria-modal="true">
-      <div class="modal-head"><div class="modal-title" data-i18n="kb.buildOptionsTitle"></div><button class="modal-x" data-close data-i18n-title="common.close" title=""><span data-ga-icon="x"></span></button></div>
-      <form class="modal-body kb-build-body" id="kb-build-form">
+      <div class="modal-head"><div class="modal-title" data-i18n="kb.maintenanceTitle"></div><button class="modal-x" data-close data-i18n-title="common.close" title=""><span data-ga-icon="x"></span></button></div>
+        <form class="modal-body kb-build-body" id="kb-build-form">
         <label class="kb-build-group">
           <span class="kb-build-label" data-i18n="kb.buildScope"></span>
           <span class="kb-build-select-wrap"><select id="kb-build-scope" class="kb-build-select" name="scope"></select></span>
         </label>
-        <p class="kb-build-description" data-i18n="kb.reindexDesc"></p>
-        <div class="kb-build-actions"><button type="button" class="set-btn ghost" data-close data-i18n="common.cancel"></button><button type="submit" class="set-btn primary" data-i18n="kb.buildStart"></button></div>
+        <fieldset class="kb-build-group">
+          <legend class="kb-build-label" data-i18n="kb.maintenanceOperation"></legend>
+          <div class="kb-build-modes">
+            <label class="kb-build-mode">
+              <input type="radio" name="maintenanceOperation" value="reindex" checked>
+              <span class="kb-build-mode-copy"><strong data-i18n="kb.reindexAction"></strong><small data-i18n="kb.reindexDesc"></small></span>
+            </label>
+            <label class="kb-build-mode">
+              <input type="radio" name="maintenanceOperation" value="retry_image_analysis">
+              <span class="kb-build-mode-copy"><strong data-i18n="kb.retryImageAction"></strong><small data-i18n="kb.retryImageDesc"></small></span>
+            </label>
+          </div>
+        </fieldset>
+        <div class="kb-build-actions"><button type="button" class="set-btn ghost" data-close data-i18n="common.cancel"></button><button type="submit" class="set-btn primary" data-i18n="kb.maintenanceStart"></button></div>
       </form>
     </div>
   </div>
