@@ -3677,12 +3677,15 @@ function normalizeKnowledgeScope(value) {
   if (mode === 'document' || mode === 'doc') {
     const kbId = raw.kb_id || raw.kbId;
     const dataId = raw.data_id || raw.dataId;
-    if (kbId && dataId) {
+    const fileName = raw.file_name || raw.fileName;
+    const ref = raw.ref;
+    if (kbId && (dataId || fileName || ref)) {
       return {
-        mode: 'document', origin, kb_id: String(kbId), data_id: String(dataId),
+        mode: 'document', origin, kb_id: String(kbId),
+        ...(dataId ? { data_id: String(dataId) } : {}),
         ...(raw.kb_name || raw.kbName ? { kb_name: String(raw.kb_name || raw.kbName) } : {}),
-        ...(raw.file_name || raw.fileName ? { file_name: String(raw.file_name || raw.fileName) } : {}),
-        ...(raw.ref ? { ref: String(raw.ref) } : {}),
+        ...(fileName ? { file_name: String(fileName) } : {}),
+        ...(ref ? { ref: String(ref) } : {}),
         ...(raw.title ? { title: String(raw.title) } : {}),
       };
     }
