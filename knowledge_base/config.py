@@ -64,6 +64,19 @@ def staging_root(kb_id: str) -> str:
     return os.path.join(kb_root(kb_id), "staging")
 
 
+def cache_root(kb_id: str) -> str:
+    """Return the durable, application-managed cache root for one KB."""
+    return os.path.join(kb_root(kb_id), ".cache")
+
+
+def mineru_cache_root(kb_id: str) -> str:
+    return os.path.join(cache_root(kb_id), "mineru")
+
+
+def image_cache_root(kb_id: str) -> str:
+    return os.path.join(cache_root(kb_id), "vision")
+
+
 def manifest_path(kb_id: str) -> str:
     return os.path.join(active_root(kb_id), "manifest.json")
 
@@ -267,6 +280,7 @@ __all__ = [
     "DATA_ROOT",
     "ROOT",
     "active_root",
+    "cache_root",
     "canonical_source_path",
     "create_kb",
     "kb_by_id",
@@ -274,6 +288,8 @@ __all__ = [
     "kb_root",
     "load_config",
     "manifest_path",
+    "mineru_cache_root",
+    "image_cache_root",
     "processed_path",
     "records_path",
     "remove_kb",

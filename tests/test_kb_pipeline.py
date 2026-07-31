@@ -8,9 +8,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 from knowledge_base import config
+from knowledge_base.assets import ImageAssetProcessor
+from knowledge_base.build import RecordBuilder
 from knowledge_base.cancellation import KnowledgeBaseCancelled
 from knowledge_base.locking import KnowledgeBaseLockedError, KnowledgeBaseMutationLock
 from knowledge_base.pipeline import IngestPipeline, Publisher
+from knowledge_base.usage import UsageTracker
 
 
 class _ProbeIndex:
@@ -399,6 +402,187 @@ class MutationLockTests(unittest.TestCase):
                 thread.join()
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], KnowledgeBaseLockedError)
+
+
+class ProcessedContentRepairTests(unittest.TestCase):
+    class _Assets(ImageAssetProcessor):
+        def __init__(self):
+            super().__init__(usage_tracker=UsageTracker())
+
+        def analyze_image_jobs(self, kb, image_jobs, log, progress=None, cancelled=None):
+            results = {}
+            jobs = list(image_jobs.values())
+            for index, job in enumerate(jobs, 1):
+                results[job.image_sha] = {
+                    "description": "repaired image description",
+                    "table_markdown": "",
+                    "ref_key": "",
+                    "uncertain": [],
+                }
+                if callable(progress):
+                    progress({
+                        "phase": "image_analysis",
+                        "analysis_completed": index,
+                        "analysis_total": len(jobs),
+                        "image_documents": [{
+                            "key": job.origins[0]["key"],
+                            "name": job.origins[0]["name"],
+                            "completed": index,
+                            "total": len(jobs),
+                        }],
+                    })
+            return results
+
+    class _Index:
+        @staticmethod
+        def path(kb_path):
+            return os.path.join(kb_path, ".kb_index", "zvec")
+
+        def probe(self, kb_path):
+            present = os.path.isdir(self.path(kb_path))
+            return {
+                "present": present,
+                "openable": present,
+                "schema_valid": present,
+                "embedding_matches": present,
+                "error": "",
+                "meta": {},
+            }
+
+    class _IndexBuilder:
+        def __init__(self, index):
+            self.index = index
+
+        def begin_build(self):
+            return None
+
+        def build(self, kb, *, records, sources, progress=None, logfn=None, cancelled=None):
+            os.makedirs(self.index.path(kb["path"]), exist_ok=True)
+            stats = {
+                "n_docs": len({record.get("file_name") for record in records}),
+                "n_chunks": len(records),
+                "text_chunks": sum(record.get("kind") == "text" for record in records),
+                "image_chunks": sum(record.get("kind") == "image" for record in records),
+                "image_assets": sum(record.get("kind") == "image" for record in records),
+            }
+            if callable(progress):
+                progress({"phase": "validated", "processed": len(records), "total": len(records), **stats})
+            return stats
+
+    def test_repair_retries_processed_images_without_mineru(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = os.path.join(temp, "source")
+            data_root = os.path.join(temp, "data")
+            config_path = os.path.join(temp, "kb.yaml")
+            os.makedirs(source)
+            with mock.patch.object(config, "DATA_ROOT", data_root), mock.patch.object(
+                config, "CONFIG_PATH", config_path
+            ), mock.patch("knowledge_base.providers.vision.enabled", return_value=True):
+                kb_id = config.kb_id_for_source(source)
+                config.upsert_kb(kb_id, name="Repair test", source_path=source)
+                active = config.active_root(kb_id)
+                processed = config.processed_path(kb_id)
+                image_dir = os.path.join(processed, "documents", "doc.assets-test")
+                os.makedirs(image_dir)
+                with open(os.path.join(processed, "documents", "doc.md"), "w", encoding="utf-8") as handle:
+                    handle.write("# Test\n\n![图1](doc.assets-test/figure.png)\n")
+                with open(os.path.join(image_dir, "figure.png"), "wb") as handle:
+                    handle.write(b"test image")
+                manifest = {
+                    "kb_id": kb_id,
+                    "name": "Repair test",
+                    "source_path": source,
+                    "files": [{
+                        "kind": "document",
+                        "source": "doc.pdf",
+                        "name": "doc.pdf",
+                        "processed": ["documents/doc.md"],
+                    }],
+                    "summary": {"documents_total": 1},
+                    "failures": [{
+                        "source": "documents/doc.md:doc.assets-test/figure.png",
+                        "stage": "image_analysis",
+                        "error": "timed out",
+                    }],
+                    "index_sources": {},
+                }
+                os.makedirs(active, exist_ok=True)
+                with open(os.path.join(active, "manifest.json"), "w", encoding="utf-8") as handle:
+                    json.dump(manifest, handle)
+                os.makedirs(os.path.join(processed, ".kb_index", "image_cache"), exist_ok=True)
+                index = self._Index()
+                pipeline = IngestPipeline(
+                    document_processor=None,
+                    record_builder=RecordBuilder(assets=self._Assets()),
+                    index_builder=self._IndexBuilder(index),
+                    publisher=Publisher(),
+                    index=index,
+                )
+
+                result = pipeline.retry_image_analysis(kb_id)
+
+                self.assertEqual(result["state"], "ready")
+                self.assertEqual(result["summary"]["image_chunks"], 1)
+                self.assertFalse(result["failures"])
+                records = RecordBuilder.read_records(os.path.join(active, "records.jsonl"))
+                image_records = [record for record in records if record.get("kind") == "image"]
+                self.assertEqual(len(image_records), 1)
+                self.assertEqual(image_records[0]["description"], "repaired image description")
+                self.assertFalse(os.path.exists(config.staging_root(kb_id)))
+
+    def test_reindex_rebuilds_only_the_published_records(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = os.path.join(temp, "source")
+            data_root = os.path.join(temp, "data")
+            config_path = os.path.join(temp, "kb.yaml")
+            os.makedirs(source)
+            with mock.patch.object(config, "DATA_ROOT", data_root), mock.patch.object(
+                config, "CONFIG_PATH", config_path
+            ), mock.patch("knowledge_base.providers.vision.enabled", side_effect=AssertionError("reindex must not probe vision")):
+                kb_id = config.kb_id_for_source(source)
+                config.upsert_kb(kb_id, name="Index test", source_path=source)
+                active = config.active_root(kb_id)
+                processed = config.processed_path(kb_id)
+                os.makedirs(processed, exist_ok=True)
+                records = [{
+                    "data_id": f"{kb_id}::doc.md::0",
+                    "chunk_index": 0,
+                    "kind": "text",
+                    "file_name": "doc.md",
+                    "title": "doc",
+                    "body": "content",
+                }]
+                records_path = os.path.join(active, "records.jsonl")
+                with open(records_path, "w", encoding="utf-8") as handle:
+                    for record in records:
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                with open(os.path.join(active, "manifest.json"), "w", encoding="utf-8") as handle:
+                    json.dump({"index_sources": {}, "files": []}, handle)
+
+                class _PublishedRecords:
+                    @staticmethod
+                    def read_records(path):
+                        with open(path, encoding="utf-8") as handle:
+                            return [json.loads(line) for line in handle if line.strip()]
+
+                    @staticmethod
+                    def records_sha256(path):
+                        return "published-records"
+
+                index = self._Index()
+                pipeline = IngestPipeline(
+                    document_processor=None,
+                    record_builder=_PublishedRecords(),
+                    index_builder=self._IndexBuilder(index),
+                    publisher=Publisher(),
+                    index=index,
+                )
+
+                result = pipeline.reindex(kb_id)
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["stats"]["n_chunks"], 1)
+                self.assertEqual(result["stats"]["text_chunks"], 1)
 
 
 if __name__ == "__main__":

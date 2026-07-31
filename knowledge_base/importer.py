@@ -21,12 +21,16 @@ from typing import Any, Callable
 from urllib.parse import quote, unquote
 
 try:
+    from . import config
     from .cancellation import KnowledgeBaseCancelled, check_cancelled
     from .documents import read_textfile
+    from .fs import remove_tree
     from .providers import mineru
 except ImportError:  # pragma: no cover - supports direct CLI execution
+    import config
     from cancellation import KnowledgeBaseCancelled, check_cancelled
     from documents import read_textfile
+    from fs import remove_tree
     from providers import mineru
 
 
@@ -409,6 +413,7 @@ class DocumentProcessor:
         processed_root = stage / "processed"
         downloads_root = stage / ".mineru_downloads"
         extract_root = stage / ".mineru_extract"
+        mineru_cache_root = Path(config.mineru_cache_root(kb_id))
         stage.mkdir(parents=True, exist_ok=True)
 
         files = _scan_source(source_root)
@@ -569,6 +574,7 @@ class DocumentProcessor:
                         downloads_root,
                         on_update=on_mineru_update,
                         cancelled=cancelled,
+                        cache_dir=mineru_cache_root,
                     )
                 except KnowledgeBaseCancelled:
                     raise
@@ -604,7 +610,12 @@ class DocumentProcessor:
                     asset_root = Path(f"{target.stem}.assets-{output_key}")
                     try:
                         extract_dir = extract_root / output_key
-                        _safe_extract_zip(downloads_root / f"{job.data_id}.zip", extract_dir)
+                        result_zip = (
+                            Path(job.result_path)
+                            if getattr(job, "result_path", None)
+                            else downloads_root / f"{job.data_id}.zip"
+                        )
+                        _safe_extract_zip(result_zip, extract_dir)
                         markdown = _find_markdown(extract_dir)
                         if markdown is None:
                             raise ValueError("MinerU 结果中未找到 Markdown 文档")
@@ -632,7 +643,7 @@ class DocumentProcessor:
                         raise
                     except Exception as error:
                         self._mark_failure(entry, error, "mineru_result")
-                        shutil.rmtree(target.parent / asset_root, ignore_errors=True)
+                        remove_tree(target.parent / asset_root)
                         refresh_document_counts()
                         _emit(
                             progress, "processing", counts,
@@ -690,7 +701,7 @@ class DocumentProcessor:
             }
         finally:
             for path in (downloads_root, extract_root):
-                shutil.rmtree(path, ignore_errors=True)
+                remove_tree(path)
 
     @staticmethod
     def _selection_label(path: Path) -> str:
@@ -811,7 +822,7 @@ class DocumentProcessor:
 
         stage = Path(stage_root).resolve()
         workspace = stage / ".selected_sources"
-        shutil.rmtree(workspace, ignore_errors=True)
+        remove_tree(workspace)
         try:
             mapping = self._prepare_selection_workspace(
                 [str(path) for path in selected_paths], workspace
@@ -864,7 +875,7 @@ class DocumentProcessor:
             result["failures"] = list(manifest.get("failures") or [])
             return result
         finally:
-            shutil.rmtree(workspace, ignore_errors=True)
+            remove_tree(workspace)
 
 
 __all__ = ["DocumentProcessor", "MAX_PDF_PAGES"]

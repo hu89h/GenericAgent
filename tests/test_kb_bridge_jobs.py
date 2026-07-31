@@ -156,7 +156,10 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
                     "text_chunks": 10,
                     "images_indexed": 2,
                     "images_total": 3,
-                    "failures": [{"error": "当前模型不支持图片输入"}],
+                    "failures": [{
+                        "stage": "image_analysis",
+                        "error": "当前模型不支持图片输入",
+                    }],
                 },
             ],
             "imageDocuments": [
@@ -177,6 +180,11 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         self.assertEqual(snapshot["documents"][0]["name"], "alpha.pdf")
         self.assertEqual(snapshot["documents"][0]["status"], "succeeded_with_warnings")
         self.assertEqual(snapshot["documents"][0]["warningCount"], 1)
+        self.assertEqual(snapshot["recommendedActions"], ["check_configuration"])
+        self.assertEqual(
+            snapshot["documents"][0]["recommendedActions"],
+            ["check_configuration"],
+        )
         self.assertEqual(snapshot["documents"][0]["errorCodes"], ["vision_unsupported"])
         self.assertNotIn("source", snapshot["documents"][0])
         self.assertEqual(snapshot["imageDocuments"], [
@@ -184,6 +192,26 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         ])
         self.assertEqual(snapshot["failures"][0]["source"], "books/alpha.pdf")
         self.assertNotIn("internal-a.md", snapshot["failures"][0]["source"])
+
+    def test_failure_actions_follow_the_failed_stage(self):
+        self.assertEqual(
+            desktop_bridge._kb_recommended_action(
+                mode="import", stage="image_analysis", error="read operation timed out"
+            ),
+            "retry_image_analysis",
+        )
+        self.assertEqual(
+            desktop_bridge._kb_recommended_action(
+                mode="import", stage="image_resolve", error="image missing"
+            ),
+            "retry_document_import",
+        )
+        self.assertEqual(
+            desktop_bridge._kb_recommended_action(
+                mode="import", stage="indexing", error="schema invalid"
+            ),
+            "reindex",
+        )
 
 
 if __name__ == "__main__":

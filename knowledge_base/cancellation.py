@@ -6,7 +6,7 @@ from typing import Callable
 
 
 class KnowledgeBaseCancelled(RuntimeError):
-    """Raised when the user cancels an import or reindex operation."""
+    """Raised when the user cancels a knowledge-base mutation."""
 
     code = "kb_operation_cancelled"
 

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import time
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -28,6 +29,65 @@ _REF_CANDIDATE_RE = re.compile(
 )
 _SOURCE_LINE_RE = re.compile(r"^(?:资料)?来源\b|^source\b", re.IGNORECASE)
 _MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+
+IMAGE_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+IMAGE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def cleanup_image_cache(
+    cache_dir: str,
+    *,
+    max_age_seconds: int = IMAGE_CACHE_MAX_AGE_SECONDS,
+    max_bytes: int = IMAGE_CACHE_MAX_BYTES,
+) -> dict[str, int]:
+    """Remove partial, expired, and over-quota VLM cache files."""
+    root = os.path.abspath(str(cache_dir or ""))
+    if not os.path.isdir(root):
+        return {"removed": 0, "bytes": 0}
+    now = time.time()
+    removed = 0
+    removed_bytes = 0
+    entries: list[tuple[float, int, str]] = []
+    for name in os.listdir(root):
+        path = os.path.join(root, name)
+        if os.path.isdir(path):
+            continue
+        if not name.lower().endswith(".json"):
+            try:
+                removed_bytes += os.path.getsize(path)
+            except OSError:
+                pass
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+            continue
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        if now - stat.st_mtime > max(0, int(max_age_seconds)):
+            try:
+                os.remove(path)
+                removed += 1
+                removed_bytes += stat.st_size
+            except OSError:
+                pass
+            continue
+        entries.append((stat.st_mtime, stat.st_size, path))
+    total = sum(size for _mtime, size, _path in entries)
+    for _mtime, size, path in sorted(entries):
+        if total <= max(0, int(max_bytes)):
+            break
+        try:
+            os.remove(path)
+            total -= size
+            removed += 1
+            removed_bytes += size
+        except OSError:
+            pass
+    return {"removed": removed, "bytes": removed_bytes}
 
 
 @dataclass(slots=True)
@@ -325,6 +385,10 @@ class ImageAssetProcessor:
     @staticmethod
     def image_cache_dir(kb_path: str) -> str:
         return os.path.join(kb_path, ".kb_index", "image_cache")
+
+    @classmethod
+    def _cache_base(cls, kb: dict) -> str:
+        return str(kb.get("image_cache_path") or kb.get("path") or "")
 
     def build_document_index(self, body: str) -> DocumentImageIndex:
         return DocumentImageIndex.build(self, body)
@@ -938,11 +1002,12 @@ class ImageAssetProcessor:
             })
 
         def run_image_job(job: ImageContent):
+            cache_base = self._cache_base(kb)
             if callable(cancelled):
                 return self.analyze_image_job(
-                    kb["path"], job, cancelled=cancelled
+                    cache_base, job, cancelled=cancelled
                 )
-            return self.analyze_image_job(kb["path"], job)
+            return self.analyze_image_job(cache_base, job)
 
         if callable(progress):
             emit_progress(None, 0)

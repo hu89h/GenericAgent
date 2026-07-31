@@ -12,9 +12,12 @@ from typing import Callable
 
 from . import config
 from .build import IndexBuilder, RecordBuilder
+from .assets import cleanup_image_cache
 from .cancellation import check_cancelled
+from .fs import remove_tree
 from .importer import DocumentProcessor
 from .locking import mutation_lock
+from .providers import mineru
 
 
 def _write_json_atomic(path: str, payload: dict) -> None:
@@ -57,7 +60,7 @@ class Publisher:
         if not os.path.isdir(stage):
             raise RuntimeError("staging 知识库不存在")
 
-        shutil.rmtree(rollback, ignore_errors=True)
+        remove_tree(rollback)
 
         had_active = os.path.isdir(active)
         if had_active:
@@ -70,12 +73,12 @@ class Publisher:
                 source_path=source_path,
             )
         except Exception:
-            shutil.rmtree(active, ignore_errors=True)
+            remove_tree(active)
             if had_active and os.path.isdir(rollback):
                 self._rename_with_retry(rollback, active)
             raise
 
-        shutil.rmtree(rollback, ignore_errors=True)
+        remove_tree(rollback)
         return config.kb_by_id(kb_id) or {}
 
 
@@ -101,13 +104,16 @@ class IngestPipeline:
             progress(event)
 
     @staticmethod
-    def _copy_image_cache(kb_id: str, stage_processed: str) -> None:
+    def _ensure_image_cache(kb_id: str) -> str:
+        """Keep completed VLM results outside disposable staging."""
+        durable = config.image_cache_root(kb_id)
+        os.makedirs(durable, exist_ok=True)
         active_cache = os.path.join(
             config.processed_path(kb_id), ".kb_index", "image_cache"
         )
-        stage_cache = os.path.join(stage_processed, ".kb_index", "image_cache")
         if os.path.isdir(active_cache):
-            shutil.copytree(active_cache, stage_cache, dirs_exist_ok=True)
+            shutil.copytree(active_cache, durable, dirs_exist_ok=True)
+        return durable
 
     @staticmethod
     def _relative_key(value) -> str:
@@ -250,15 +256,17 @@ class IngestPipeline:
                     continue
                 deleting_prefix = name.split(".deleting-", 1)[0]
                 if ".deleting-" in name and config.valid_kb_id(deleting_prefix):
-                    shutil.rmtree(candidate, ignore_errors=True)
+                    remove_tree(candidate)
                     continue
                 if not config.valid_kb_id(name) or not os.path.isdir(candidate):
                     continue
                 for transient in ("staging", "rollback"):
-                    shutil.rmtree(
+                    remove_tree(
                         os.path.join(candidate, transient),
                         ignore_errors=True,
                     )
+                mineru.cleanup_cache(config.mineru_cache_root(name))
+                cleanup_image_cache(config.image_cache_root(name))
                 index_root = os.path.join(
                     candidate, "active", "processed", ".kb_index"
                 )
@@ -266,7 +274,7 @@ class IngestPipeline:
                     continue
                 for child in os.listdir(index_root):
                     if child.startswith(("zvec.tmp.", "zvec.rollback.")):
-                        shutil.rmtree(
+                        remove_tree(
                             os.path.join(index_root, child),
                             ignore_errors=True,
                         )
@@ -293,6 +301,7 @@ class IngestPipeline:
             "name": name,
             "source_path": source_path,
             "path": stage_processed,
+            "image_cache_path": self._ensure_image_cache(kb_id),
             "exists": True,
         }
         built = self.records.build(
@@ -416,8 +425,8 @@ class IngestPipeline:
         with mutation_lock:
             check_cancelled(cancelled)
             os.makedirs(root, exist_ok=True)
-            shutil.rmtree(stage, ignore_errors=True)
-            shutil.rmtree(os.path.join(root, "rollback"), ignore_errors=True)
+            remove_tree(stage)
+            remove_tree(os.path.join(root, "rollback"))
             try:
                 self.index_builder.begin_build()
                 check_cancelled(cancelled)
@@ -430,8 +439,7 @@ class IngestPipeline:
                     cancelled=cancelled,
                 )
                 check_cancelled(cancelled)
-                stage_processed = prepared["processed_path"]
-                self._copy_image_cache(kb_id, stage_processed)
+                self._ensure_image_cache(kb_id)
                 check_cancelled(cancelled)
                 return self._build_and_publish(
                     kb_id=kb_id,
@@ -446,7 +454,7 @@ class IngestPipeline:
                     cancelled=cancelled,
                 )
             except Exception:
-                shutil.rmtree(stage, ignore_errors=True)
+                remove_tree(stage)
                 raise
 
     def add_documents(
@@ -469,7 +477,7 @@ class IngestPipeline:
                 raise KeyError("knowledge_base_not_found")
             self.index_builder.begin_build()
             stage = config.staging_root(value)
-            shutil.rmtree(stage, ignore_errors=True)
+            remove_tree(stage)
             try:
                 active = config.active_root(value)
                 if os.path.isdir(active):
@@ -550,7 +558,7 @@ class IngestPipeline:
                     cancelled=cancelled,
                 )
             except Exception:
-                shutil.rmtree(stage, ignore_errors=True)
+                remove_tree(stage)
                 raise
 
     def reindex(
@@ -559,29 +567,150 @@ class IngestPipeline:
         *,
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> dict:
+        """Rebuild only the search index from the published records.
+
+        This operation deliberately does not read Markdown again or invoke
+        image understanding.  It is the safe maintenance action for an index
+        or embedding configuration problem.
+        """
         with mutation_lock:
             kb = config.kb_by_id(kb_id)
             if kb is None or not kb.get("exists"):
                 raise KeyError("knowledge_base_not_found")
-            self.index_builder.begin_build()
-            with open(kb["manifest_path"], encoding="utf-8") as handle:
-                manifest = json.load(handle)
-            records = self.records.read_records(kb["records_path"])
-            sources = dict(manifest.get("index_sources") or {})
-            sources["records_sha256"] = self.records.records_sha256(kb["records_path"])
-            stats = self.index_builder.build(
+            check_cancelled(cancelled)
+            return self._reindex_records(
                 kb,
-                records=records,
-                sources=sources,
                 progress=progress,
                 logfn=logfn,
+                cancelled=cancelled,
             )
-            manifest["index_sources"] = sources
-            manifest["index_stats"] = stats
-            manifest["reindexed_at"] = int(time.time())
-            _write_json_atomic(kb["manifest_path"], manifest)
-            return {"ok": True, "kb_id": kb_id, "stats": stats}
+
+    def retry_image_analysis(
+        self,
+        kb_id: str,
+        *,
+        progress: Callable[[dict], None] | None = None,
+        logfn: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict:
+        """Retry image understanding against the published processed content."""
+        with mutation_lock:
+            kb = config.kb_by_id(kb_id)
+            if kb is None or not kb.get("exists"):
+                raise KeyError("knowledge_base_not_found")
+            check_cancelled(cancelled)
+            try:
+                from .providers import vision
+                available = bool(vision.enabled())
+            except Exception:
+                available = False
+            if not available:
+                raise RuntimeError("知识库图片理解未启用或没有可用的多模态配置")
+            return self._repair_processed_content(
+                kb,
+                progress=progress,
+                logfn=logfn,
+                cancelled=cancelled,
+            )
+
+    def _reindex_records(
+        self,
+        kb: dict,
+        *,
+        progress: Callable[[dict], None] | None = None,
+        logfn: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict:
+        """Rebuild Zvec from the published records without reprocessing content."""
+        check_cancelled(cancelled)
+        kb_id = str(kb.get("id") or "")
+        if not kb_id:
+            raise KeyError("knowledge_base_not_found")
+        self.index_builder.begin_build()
+        with open(kb["manifest_path"], encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        records = self.records.read_records(kb["records_path"])
+        sources = dict(manifest.get("index_sources") or {})
+        sources["records_sha256"] = self.records.records_sha256(kb["records_path"])
+        stats = self.index_builder.build(
+            kb,
+            records=records,
+            sources=sources,
+            progress=progress,
+            logfn=logfn,
+            cancelled=cancelled,
+        )
+        check_cancelled(cancelled)
+        manifest["index_sources"] = sources
+        manifest["index_stats"] = stats
+        manifest["reindexed_at"] = int(time.time())
+        _write_json_atomic(kb["manifest_path"], manifest)
+        return {"ok": True, "kb_id": kb_id, "stats": stats}
+
+    def _repair_processed_content(
+        self,
+        kb: dict,
+        *,
+        progress: Callable[[dict], None] | None = None,
+        logfn: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict:
+        """Retry processed image analyses and publish a rebuilt complete index."""
+        kb_id = str(kb.get("id") or "")
+        active = config.active_root(kb_id)
+        if not os.path.isdir(active):
+            raise KeyError("knowledge_base_not_found")
+        with open(kb["manifest_path"], encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        if not isinstance(manifest, dict):
+            raise ValueError("知识库清单格式无效")
+
+        stage = config.staging_root(kb_id)
+        remove_tree(stage)
+        try:
+            check_cancelled(cancelled)
+            shutil.copytree(active, stage, dirs_exist_ok=True)
+            name = str(manifest.get("name") or kb.get("name") or kb_id)
+            source_path = str(manifest.get("source_path") or kb.get("source_path") or "")
+            total_documents = sum(
+                1
+                for item in (manifest.get("files") or [])
+                if isinstance(item, dict) and item.get("kind") == "document"
+            )
+            self._emit(
+                progress,
+                phase="preparing",
+                current=name,
+                processed=0,
+                total=total_documents,
+            )
+            # RecordBuilder recomputes image failures from the staged Markdown.
+            # Keep unrelated source/parse failures, but do not carry stale VLM
+            # warnings into the new publication.
+            preserved_failures = [
+                item
+                for item in (manifest.get("failures") or [])
+                if isinstance(item, dict)
+                and str(item.get("stage") or "") not in {"image_analysis", "image_capability"}
+            ]
+            result = self._build_and_publish(
+                kb_id=kb_id,
+                name=name,
+                source_path=source_path,
+                stage=stage,
+                manifest=manifest,
+                prepared_summary=dict(manifest.get("summary") or {}),
+                prepared_failures=preserved_failures,
+                progress=progress,
+                logfn=logfn,
+                cancelled=cancelled,
+            )
+            return result
+        except Exception:
+            remove_tree(stage)
+            raise
 
     def delete_document(
         self,
@@ -635,7 +764,7 @@ class IngestPipeline:
                     if os.path.islink(root):
                         raise RuntimeError("拒绝删除符号链接知识库目录")
                     Publisher._rename_with_retry(root, deleting)
-                    shutil.rmtree(deleting, ignore_errors=True)
+                    remove_tree(deleting)
                 self._emit(progress, phase="completed", processed=1, total=1)
                 return {
                     "ok": True,
@@ -646,7 +775,7 @@ class IngestPipeline:
                 }
 
             stage = config.staging_root(value)
-            shutil.rmtree(stage, ignore_errors=True)
+            remove_tree(stage)
             try:
                 active = config.active_root(value)
                 if not os.path.isdir(active):
@@ -664,7 +793,7 @@ class IngestPipeline:
                     stem = os.path.splitext(os.path.basename(target))[0]
                     for asset_dir in glob.glob(os.path.join(parent, f"{stem}.assets-*")):
                         if os.path.isdir(asset_dir):
-                            shutil.rmtree(asset_dir, ignore_errors=True)
+                            remove_tree(asset_dir)
 
                 records = self.records.read_records(kb["records_path"])
                 kept_records = []
@@ -770,7 +899,7 @@ class IngestPipeline:
                     "kb": published,
                 }
             except Exception:
-                shutil.rmtree(stage, ignore_errors=True)
+                remove_tree(stage)
                 raise
 
     def delete(self, kb_id: str) -> dict:
@@ -793,7 +922,7 @@ class IngestPipeline:
                     Publisher._rename_with_retry(deleting, root)
                 raise
             if moved:
-                shutil.rmtree(deleting)
+                remove_tree(deleting, ignore_errors=False)
             return {
                 "removed": bool(removed or moved),
                 "kb_id": kb_id,

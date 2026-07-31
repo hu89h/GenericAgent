@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import sys
 from typing import Any, Dict
 
@@ -95,6 +96,23 @@ def _selected_vision_cfg(vars_: Dict[str, Any], selector: str) -> Dict[str, Any]
         return {}
     for name, cfg in vars_.items():
         if name == selector and _is_verified_vision_cfg(name, cfg):
+            protocol = "anthropic" if "claude" in name.lower() else "openai"
+            return {**dict(cfg), "protocol": protocol}
+    # Model profile variables can be renumbered after another profile is
+    # removed (for example native_oai_config1 -> native_oai_config).  The
+    # desktop wizard can already identify this unambiguously; runtime config
+    # resolution must do the same or an enabled KB image-analysis job will be
+    # silently disabled despite the model still being present.
+    selector_base = re.sub(r"\d+$", "", selector)
+    if selector_base:
+        renamed = [
+            (name, cfg)
+            for name, cfg in vars_.items()
+            if re.sub(r"\d+$", "", str(name)) == selector_base
+            and _is_verified_vision_cfg(name, cfg)
+        ]
+        if len(renamed) == 1:
+            name, cfg = renamed[0]
             protocol = "anthropic" if "claude" in name.lower() else "openai"
             return {**dict(cfg), "protocol": protocol}
     return {}

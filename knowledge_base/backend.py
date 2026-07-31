@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 import threading
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from . import config
 from .assets import ImageAssetProcessor
 from .build import IndexBuilder, RecordBuilder
 from .importer import DocumentProcessor
+from .fs import remove_tree
 from .locking import KnowledgeBaseLockedError, mutation_lock
 from .pipeline import IngestPipeline, Publisher
 from .providers import provider_settings
@@ -201,7 +201,7 @@ def delete_document(
         _mark_processing(value, False)
 
 
-def reindex(kb_id: str, *, progress=None, logfn=None) -> dict:
+def reindex(kb_id: str, *, progress=None, logfn=None, cancelled=None) -> dict:
     value = str(kb_id or "").strip()
     _mark_processing(value, True)
     try:
@@ -209,6 +209,23 @@ def reindex(kb_id: str, *, progress=None, logfn=None) -> dict:
             value,
             progress=progress,
             logfn=logfn,
+            cancelled=cancelled,
+        )
+    finally:
+        _mark_processing(value, False)
+
+
+def retry_image_analysis(
+    kb_id: str, *, progress=None, logfn=None, cancelled=None
+) -> dict:
+    value = str(kb_id or "").strip()
+    _mark_processing(value, True)
+    try:
+        return _runtime().pipeline.retry_image_analysis(
+            value,
+            progress=progress,
+            logfn=logfn,
+            cancelled=cancelled,
         )
     finally:
         _mark_processing(value, False)
@@ -521,7 +538,7 @@ def reset_managed_data() -> dict:
                 candidate != root
                 and os.path.commonpath((root, candidate)) == root
             ):
-                shutil.rmtree(candidate, ignore_errors=True)
+                remove_tree(candidate)
     config._dump_raw_config({"knowledge_base": {}}, config.CONFIG_PATH)
     return {"ok": True, "removed": removed}
 

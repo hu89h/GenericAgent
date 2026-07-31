@@ -7,6 +7,8 @@ remote job is submitted.
 from __future__ import annotations
 
 import os
+import hashlib
+import shutil
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import requests
+import zipfile
 
 try:
     from . import provider_settings
@@ -44,6 +47,9 @@ MAX_BATCH_FILES = 50
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_MODEL_VERSION = "vlm"
 DEFAULT_TIMEOUT = (15, 300)
+MINERU_CACHE_VERSION = 1
+MINERU_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+MINERU_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024
 
 
 class MinerUError(RuntimeError):
@@ -63,6 +69,122 @@ class MinerUFile:
     zip_url: str = ""
     state: str = "queued"
     error: str = ""
+    result_path: Path | None = None
+    cache_key: str = ""
+    cache_hit: bool = False
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _configured_endpoint() -> tuple[str, str]:
+    """Read cache-relevant MinerU settings without requiring an API key."""
+    try:
+        raw = provider_settings.mineru_config()
+    except Exception:
+        raw = {}
+    raw = raw if isinstance(raw, dict) else {}
+    base_url = str(raw.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
+    model_version = (
+        str(raw.get("model_version") or DEFAULT_MODEL_VERSION).strip()
+        or DEFAULT_MODEL_VERSION
+    )
+    return base_url, model_version
+
+
+def _cache_key(path: Path, relative_path: str, *, base_url: str, model_version: str) -> str:
+    payload = "\x1f".join(
+        (
+            str(MINERU_CACHE_VERSION),
+            str(base_url),
+            str(model_version),
+            str(relative_path).replace("\\", "/"),
+            _file_sha256(path),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()
+
+
+def _cache_path(cache_dir: Path, key: str) -> Path:
+    return cache_dir / f"{key}.zip"
+
+
+def _valid_zip(path: Path) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size <= 0:
+            return False
+        with zipfile.ZipFile(path) as archive:
+            return archive.testzip() is None
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+def _store_cache(source: Path, destination: Path) -> bool:
+    """Persist a complete MinerU ZIP, never exposing a partial cache entry."""
+    temporary = destination.with_name(
+        f".{destination.name}.{uuid.uuid4().hex}.part"
+    )
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, temporary)
+        if not _valid_zip(temporary):
+            return False
+        os.replace(temporary, destination)
+        return True
+    except (OSError, zipfile.BadZipFile):
+        return False
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def cleanup_cache(
+    cache_dir: str | Path,
+    *,
+    max_age_seconds: int = MINERU_CACHE_MAX_AGE_SECONDS,
+    max_bytes: int = MINERU_CACHE_MAX_BYTES,
+) -> dict[str, int]:
+    """Remove incomplete, expired, and over-quota MinerU cache artifacts."""
+    root = Path(cache_dir)
+    if not root.is_dir():
+        return {"removed": 0, "bytes": 0}
+    now = time.time()
+    removed = 0
+    removed_bytes = 0
+    entries: list[tuple[float, int, Path]] = []
+    for path in root.iterdir():
+        if path.is_dir() or path.suffix.lower() != ".zip":
+            if path.name.startswith(".") and path.is_file():
+                try:
+                    removed_bytes += path.stat().st_size
+                except OSError:
+                    pass
+                path.unlink(missing_ok=True)
+                removed += 1
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if now - stat.st_mtime > max(0, int(max_age_seconds)) or not _valid_zip(path):
+            removed_bytes += stat.st_size
+            path.unlink(missing_ok=True)
+            removed += 1
+            continue
+        entries.append((stat.st_mtime, stat.st_size, path))
+    total = sum(size for _mtime, size, _path in entries)
+    for _mtime, size, path in sorted(entries):
+        if total <= max(0, int(max_bytes)):
+            break
+        path.unlink(missing_ok=True)
+        total -= size
+        removed += 1
+        removed_bytes += size
+    return {"removed": removed, "bytes": removed_bytes}
 
 
 def load_config() -> dict[str, str]:
@@ -346,10 +468,17 @@ def process_batches(
     *,
     on_update: Callable[[MinerUFile], None],
     cancelled: Callable[[], bool] | None = None,
+    cache_dir: Path | None = None,
 ) -> list[MinerUFile]:
-    """Upload, poll, and download all supplied files in MinerU batches."""
-    config = load_config()
-    jobs = []
+    """Upload, poll, and download files, reusing complete cached results."""
+    base_url, model_version = _configured_endpoint()
+    cache_root = Path(cache_dir).resolve() if cache_dir else None
+    if cache_root is not None:
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cleanup_cache(cache_root)
+
+    jobs: list[MinerUFile] = []
+    remote_jobs: list[MinerUFile] = []
     for path, relative_path in files:
         check_cancelled(cancelled)
         path = Path(path).resolve()
@@ -360,12 +489,51 @@ def process_batches(
             raise MinerUError(
                 f"文件过大：{relative_path}（{size} bytes，限制 {MAX_FILE_BYTES} bytes）"
             )
-        jobs.append(MinerUFile(path, str(relative_path).replace("\\", "/"), uuid.uuid4().hex))
+        relative = str(relative_path).replace("\\", "/")
+        cache_key = (
+            _cache_key(
+                path,
+                relative,
+                base_url=base_url,
+                model_version=model_version,
+            )
+            if cache_root is not None
+            else ""
+        )
+        cached_path = _cache_path(cache_root, cache_key) if cache_root else None
+        if cached_path is not None and _valid_zip(cached_path):
+            item = MinerUFile(
+                path,
+                relative,
+                cache_key,
+                state="downloaded",
+                result_path=cached_path,
+                cache_key=cache_key,
+                cache_hit=True,
+            )
+            jobs.append(item)
+            on_update(item)
+            continue
+        if cached_path is not None and cached_path.exists():
+            cached_path.unlink(missing_ok=True)
+        item = MinerUFile(
+            path,
+            relative,
+            uuid.uuid4().hex,
+            cache_key=cache_key,
+        )
+        jobs.append(item)
+        remote_jobs.append(item)
+
+    if not remote_jobs:
+        return jobs
+
+    config = load_config()
     download_dir.mkdir(parents=True, exist_ok=True)
 
-    for first in range(0, len(jobs), MAX_BATCH_FILES):
+    for first in range(0, len(remote_jobs), MAX_BATCH_FILES):
         check_cancelled(cancelled)
-        batch = jobs[first:first + MAX_BATCH_FILES]
+        batch = remote_jobs[first:first + MAX_BATCH_FILES]
         batch_id = _request_upload_urls(config, batch, cancelled=cancelled)
         for item in batch:
             item.state = "uploading"
@@ -417,6 +585,11 @@ def process_batches(
                     download_dir / f"{item.data_id}.zip",
                     cancelled=cancelled,
                 )
+                item.result_path = download_dir / f"{item.data_id}.zip"
+                if cache_root is not None and item.cache_key:
+                    cached_path = _cache_path(cache_root, item.cache_key)
+                    if _store_cache(item.result_path, cached_path):
+                        item.result_path = cached_path
                 item.state = "downloaded"
             except Exception as error:
                 item.state = "failed"

@@ -1,4 +1,4 @@
-"""One re-entrant mutation lock shared by import, reindex, and delete."""
+"""One re-entrant mutation lock shared by all knowledge-base mutations."""
 from __future__ import annotations
 
 import socket

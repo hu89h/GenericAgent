@@ -27,6 +27,7 @@ HTTP API:
   GET    /kb/{kb_id}/source/asset
   POST   /kb/{kb_id}/documents/delete
   POST   /kb/{kb_id}/reindex
+  POST   /kb/{kb_id}/retry-image-analysis
   DELETE /kb/{kb_id}
   POST   /kb/{kb_id}/open
   GET    /sessions
@@ -845,6 +846,37 @@ class AgentManager:
             raise ValueError(f"{field} must be a positive integer")
         return number
 
+    @_serialize_mykey_mutation
+    def _repair_kb_vision_profile(self, stale_profile: str, current_profile: str) -> bool:
+        """Persist an unambiguous model-profile rename discovered while reading KB config.
+
+        The model editor can renumber native profiles when an earlier block is
+        removed.  Keeping the repaired name only in the response makes the
+        wizard look configured while provider_settings still reads the stale
+        selector during an import.  Repair only an existing KB block and only
+        when it still contains the selector we observed, so a concurrent save
+        cannot be overwritten by a stale GET response.
+        """
+        stale_profile = str(stale_profile or "").strip()
+        current_profile = str(current_profile or "").strip()
+        if not stale_profile or not current_profile or stale_profile == current_profile:
+            return False
+        target = self._mykey_file()
+        text = target.read_text(encoding="utf-8")
+        span = self._find_var_block_span(text, "kb_vision_config")
+        if not span:
+            return False
+        self.ensure_ga_import_path()
+        from llmcore import reload_mykeys
+        raw = reload_mykeys()[0]
+        old = raw.get("kb_vision_config")
+        if not isinstance(old, dict) or str(old.get("model_profile") or "").strip() != stale_profile:
+            return False
+        cfg = dict(old)
+        cfg["model_profile"] = current_profile
+        self._save_mykey_text(self._patch_var_block(text, "kb_vision_config", cfg))
+        return True
+
     def get_kb_service_configs(self) -> dict:
         provider_settings = self._kb_provider_settings()
         embedding = provider_settings.embedding_config()
@@ -879,8 +911,9 @@ class AgentManager:
         if selected is None and selected_profile:
             # Model blocks can be renumbered when a stale mykey.py entry is
             # removed (for example native_oai_config1 -> native_oai_config).
-            # Keep the persisted file untouched, but recover an unambiguous
-            # current profile so the wizard does not appear blank.
+            # Recover and persist an unambiguous current profile so the wizard
+            # and the importer use the same model.
+            stale_profile = selected_profile
             selector_base = re.sub(r"\d+$", "", selected_profile)
             renamed = [
                 profile for profile in available_profiles
@@ -889,6 +922,7 @@ class AgentManager:
             if len(renamed) == 1:
                 selected = renamed[0]
                 selected_profile = selected["varName"]
+                self._repair_kb_vision_profile(stale_profile, selected_profile)
         return {
             "embedding": {
                 "apiKey": embedding_api_key,
@@ -2615,6 +2649,8 @@ def _kb_error_code(error) -> str:
         return "network_error"
     if "already exists" in text or "已存在" in text:
         return "already_exists"
+    if "图片理解未启用" in str(error or "") or "没有可用的多模态配置" in str(error or ""):
+        return "vision_not_configured"
     if "unsupported_file_type" in text or "不支持的文件类型" in str(error or ""):
         return "unsupported_file_type"
     if (
@@ -2652,6 +2688,64 @@ def _kb_error_detail(error, limit: int = 800) -> str:
     return text[:max(80, int(limit))]
 
 
+def _kb_recommended_action(*, mode: str = "", stage: str = "", error=None) -> str:
+    """Map a failure to a user operation, without exposing pipeline internals."""
+    operation = str(mode or "").strip().lower()
+    stage_value = str(stage or "").strip().lower()
+    error_code = _kb_error_code(error)
+    if error_code in {
+        "api_key_missing", "unsupported_file_type", "encrypted_pdf",
+        "vision_not_configured", "vision_unsupported",
+    }:
+        return "check_configuration"
+    if stage_value in {"image_analysis", "image_capability"}:
+        return "retry_image_analysis"
+    if stage_value in {
+        "image_resolve", "chunking", "markdown", "pdf_validation",
+        "mineru", "mineru_result", "document",
+    }:
+        return "retry_document_import"
+    if stage_value in {"indexing", "index", "embedding", "zvec", "validation"}:
+        return "reindex"
+    if stage_value in {"publishing", "publish"}:
+        return "retry_operation"
+    if error_code in {"network_error", "processing_timeout", "source_missing"}:
+        return "retry_document_import" if operation == "import" else "retry_operation"
+    if operation == "retry_image_analysis":
+        return "check_configuration" if error_code == "processing_failed" else "retry_image_analysis"
+    if operation == "reindex":
+        return "retry_operation"
+    return "retry_document_import" if operation == "import" else "retry_operation"
+
+
+def _kb_recommended_actions(
+    *, mode: str = "", failures: list[dict] | None = None, error=None
+) -> list[str]:
+    actions = []
+    for failure in failures or []:
+        if not isinstance(failure, dict):
+            continue
+        action = _kb_recommended_action(
+            mode=mode,
+            stage=failure.get("stage"),
+            error=failure.get("error"),
+        )
+        if action and action not in actions:
+            actions.append(action)
+    if error and not actions:
+        action = _kb_recommended_action(mode=mode, error=error)
+        if action:
+            actions.append(action)
+    priority = {
+        "check_configuration": 0,
+        "retry_document_import": 1,
+        "retry_image_analysis": 2,
+        "reindex": 3,
+        "retry_operation": 4,
+    }
+    return sorted(actions, key=lambda item: priority.get(item, 99))
+
+
 def _kb_public_job_item(item: dict) -> dict:
     if not isinstance(item, dict):
         return {}
@@ -2665,6 +2759,9 @@ def _kb_public_job_item(item: dict) -> dict:
     error_detail = _kb_error_detail(item.get("error"))
     if error_detail:
         public["errorDetail"] = error_detail
+    public["recommendedAction"] = _kb_recommended_action(
+        mode="import", error=item.get("error")
+    )
     return public
 
 
@@ -2691,6 +2788,9 @@ def _kb_public_document_result(item: dict) -> dict:
         "warningCount": len(failures),
         "errorCodes": error_codes,
         "errorDetails": error_details,
+        "recommendedActions": _kb_recommended_actions(
+            mode="import", failures=failures
+        ),
     }
 
 
@@ -2755,6 +2855,9 @@ def _kb_progress_from_event(event: dict) -> dict:
 def _kb_public_failure(item: dict) -> dict:
     if not isinstance(item, dict):
         return {}
+    action = _kb_recommended_action(
+        stage=item.get("stage"), error=item.get("error"), mode="import"
+    )
     return {
         "source": str(
             item.get("source_document")
@@ -2763,6 +2866,7 @@ def _kb_public_failure(item: dict) -> dict:
         "stage": str(item.get("stage") or ""),
         "error_type": str(item.get("error_type") or ""),
         "error": str(item.get("error") or ""),
+        "recommendedAction": action,
     }
 
 
@@ -2825,6 +2929,9 @@ def _kb_job_snapshot(job: dict) -> dict:
         ),
     }
     error_code = _kb_error_code(job.get("error"))
+    snapshot["recommendedActions"] = _kb_recommended_actions(
+        mode=snapshot["mode"], failures=failures, error=job.get("error")
+    )
     if error_code:
         snapshot["errorCode"] = error_code
         snapshot["error"] = str(job.get("error") or "")
@@ -3121,7 +3228,7 @@ async def kb_import_handler(request):
             }:
                 current["current"] = ""
             current["progress"] = _kb_progress_from_event(event)
-            if isinstance(event.get("image_documents"), list):
+            if isinstance(event.get("image_documents"), list) and event["image_documents"]:
                 current["imageDocuments"] = [
                     dict(item)
                     for item in event["image_documents"]
@@ -3478,7 +3585,9 @@ async def kb_document_delete_handler(request):
     return json_ok({"ok": True, "jobId": job_id, "state": "queued"}, status=202)
 
 
-async def kb_reindex_handler(request):
+async def _kb_maintenance_handler(request, operation: str):
+    if operation not in {"reindex", "retry_image_analysis"}:
+        return json_ok({"ok": False, "error": "unknown_kb_maintenance_operation"}, status=400)
     kb_id = str(request.match_info.get("kb_id") or "").strip()
     if not kb_id:
         return json_ok({"ok": False, "error": "missing_kb_id"}, status=400)
@@ -3488,14 +3597,15 @@ async def kb_reindex_handler(request):
         return json_ok({"ok": False, "error": "knowledge_base_not_found"}, status=404)
     with _kb_jobs_lock:
         _kb_prune_jobs_locked()
-    job_id = f"kbreindex-{uuid.uuid4().hex[:16]}"
+    job_prefix = "kbreindex" if operation == "reindex" else "kbimageretry"
+    job_id = f"{job_prefix}-{uuid.uuid4().hex[:16]}"
     now = int(time.time())
     job = {
         "ok": True,
         "jobId": job_id,
         "state": "queued",
         "phase": "queued",
-        "mode": "reindex",
+        "mode": operation,
         "kbId": kb_id,
         "scope": "selected",
         "targets": [{"id": kb_id, "name": detail[0].get("name") or kb_id}],
@@ -3504,6 +3614,13 @@ async def kb_reindex_handler(request):
         "currentKb": "",
         "current": "",
         "files": [],
+        "documents": [],
+        "imageDocuments": [],
+        "failures": [],
+        "counts": {
+            "analysis_completed": 0,
+            "analysis_total": 0,
+        },
         "progress": {
             "completed": 0,
             "total": 0,
@@ -3570,9 +3687,21 @@ async def kb_reindex_handler(request):
                 current["phase"] = str(event.get("phase") or current["phase"])
             current["done"] = int(event.get("processed") or current.get("done") or 0)
             current["progress"] = _kb_progress_from_event(event)
+            if isinstance(event.get("image_documents"), list) and event["image_documents"]:
+                current["imageDocuments"] = [
+                    dict(item)
+                    for item in event["image_documents"]
+                    if isinstance(item, dict)
+                ]
+            for key in ("analysis_completed", "analysis_total"):
+                if key in event:
+                    try:
+                        current["counts"][key] = max(0, int(event[key]))
+                    except (TypeError, ValueError):
+                        pass
             current["updatedAt"] = int(time.time())
 
-    def run_reindex():
+    def run_maintenance():
         with _kb_jobs_lock:
             current = _kb_jobs[job_id]
             current.update(
@@ -3581,22 +3710,65 @@ async def kb_reindex_handler(request):
                 updatedAt=int(time.time()),
             )
         try:
-            result = backend.reindex(
+            method = (
+                backend.reindex
+                if operation == "reindex"
+                else backend.retry_image_analysis
+            )
+            result = method(
                 kb_id,
                 progress=update_progress,
                 logfn=log,
+                cancelled=job["cancelEvent"].is_set,
             )
+            if operation == "reindex":
+                stats = result.get("stats") or {}
+                summary = {
+                    "n_docs": int(stats.get("n_docs") or 0),
+                    "n_chunks": int(stats.get("n_chunks") or 0),
+                    "text_chunks": int(stats.get("text_chunks") or 0),
+                    "image_chunks": int(stats.get("image_chunks") or 0),
+                    "image_assets": int(stats.get("image_assets") or 0),
+                    "documents_total": int(stats.get("n_docs") or 0),
+                    "documents_succeeded": int(stats.get("n_docs") or 0),
+                    "documents_failed": 0,
+                    "documents_with_warnings": 0,
+                }
+                result = {**result, "summary": summary, "failures": [], "documents": []}
+            else:
+                summary = result.get("summary") or {}
+            failures = result.get("failures") or []
+            state = "completed_with_failures" if failures else "completed"
             with _kb_jobs_lock:
                 current = _kb_jobs[job_id]
                 current.update(
-                    state="completed",
-                    phase="completed",
+                    state=state,
+                    phase=state,
                     result=result,
                     updatedAt=int(time.time()),
                     done=1,
                     current="",
-                    files=[{"name": detail[0].get("name") or kb_id, "status": "built"}],
-                    summary={"total": 1, "succeeded": 1, "failed": 0},
+                    files=[{
+                        "name": detail[0].get("name") or kb_id,
+                        "status": "reindexed" if operation == "reindex" else "image_analysis_retried",
+                    }],
+                    documents=result.get("documents") or [],
+                    failures=failures,
+                    summary=summary,
+                    counts={
+                        **dict(current.get("counts") or {}),
+                        **{
+                            key: int(value)
+                            for key, value in summary.items()
+                            if isinstance(value, (int, float))
+                        },
+                    },
+                    documentProgress={
+                        "completed": int(summary.get("documents_total") or 0),
+                        "total": int(summary.get("documents_total") or 0),
+                        "failed": int(summary.get("documents_failed") or 0),
+                        "ready": int(summary.get("documents_succeeded") or 0),
+                    },
                     progress={
                         "completed": 1,
                         "total": 1,
@@ -3605,6 +3777,24 @@ async def kb_reindex_handler(request):
                     },
                 )
         except Exception as error:
+            if getattr(error, "code", "") == "kb_operation_cancelled":
+                with _kb_jobs_lock:
+                    _kb_jobs[job_id].update(
+                        ok=True,
+                        state="cancelled",
+                        phase="cancelled",
+                        error="",
+                        updatedAt=int(time.time()),
+                        current="",
+                        cancelRequested=True,
+                        progress={
+                            "completed": 0,
+                            "total": 0,
+                            "unit": "",
+                            "indeterminate": False,
+                        },
+                    )
+                return
             with _kb_jobs_lock:
                 _kb_jobs[job_id].update(
                     ok=False,
@@ -3620,8 +3810,16 @@ async def kb_reindex_handler(request):
                     },
                 )
 
-    threading.Thread(target=run_reindex, name=job_id, daemon=True).start()
+    threading.Thread(target=run_maintenance, name=job_id, daemon=True).start()
     return json_ok({"ok": True, "jobId": job_id, "state": "queued"}, status=202)
+
+
+async def kb_reindex_handler(request):
+    return await _kb_maintenance_handler(request, "reindex")
+
+
+async def kb_retry_image_analysis_handler(request):
+    return await _kb_maintenance_handler(request, "retry_image_analysis")
 
 
 # File attachments live under GA's own temp dir (gitignored), NOT the OS temp
@@ -4226,6 +4424,7 @@ def create_app():
     app.router.add_get("/kb/{kb_id}/source", kb_source_handler)
     app.router.add_post("/kb/{kb_id}/documents/delete", kb_document_delete_handler)
     app.router.add_post("/kb/{kb_id}/reindex", kb_reindex_handler)
+    app.router.add_post("/kb/{kb_id}/retry-image-analysis", kb_retry_image_analysis_handler)
     app.router.add_post("/kb/{kb_id}/open", kb_open_handler)
     app.router.add_delete("/kb/{kb_id}", kb_delete_handler)
     app.router.add_post("/path/open", path_open_handler)

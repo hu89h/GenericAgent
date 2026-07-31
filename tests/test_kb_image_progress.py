@@ -10,6 +10,33 @@ from knowledge_base.usage import UsageTracker
 
 
 class ImageProgressTests(unittest.TestCase):
+    def test_image_analysis_uses_durable_cache_path_when_provided(self):
+        processor = ImageAssetProcessor(usage_tracker=UsageTracker(), concurrency=1)
+        processor._image_client = SimpleNamespace(enabled=lambda: True)
+        paths = []
+        processor.analyze_image_job = lambda path, _job, **_kwargs: (
+            paths.append(path) or ({"description": "ok"}, {"calls": 1})
+        )
+        job = ImageContent(
+            image_sha="one",
+            image_path="assets/one.png",
+            image_abspath="unused",
+            focus="general",
+            title="",
+            near_text="",
+            ref_candidates=[],
+            analysis_meta={},
+            origins=[{"key": "documents/a.md", "name": "alpha.pdf"}],
+        )
+
+        processor.analyze_image_jobs(
+            {"path": "disposable-stage", "image_cache_path": "durable-cache"},
+            {"one": job},
+            lambda _message: None,
+        )
+
+        self.assertEqual(paths, ["durable-cache"])
+
     def test_progress_is_grouped_by_original_document(self):
         processor = ImageAssetProcessor(usage_tracker=UsageTracker(), concurrency=1)
         processor._image_client = SimpleNamespace(enabled=lambda: True)

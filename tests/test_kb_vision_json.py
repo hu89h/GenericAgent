@@ -119,6 +119,31 @@ class VisionJsonParsingTests(unittest.TestCase):
         self.assertEqual(config["apikey"], "vision-key")
         self.assertEqual(config["model_profile"], "native_oai_vision")
 
+    def test_vision_config_resolves_an_unambiguous_renumbered_profile(self):
+        with mock.patch.object(
+            vision.provider_settings,
+            "_load_mykey_vars",
+            return_value={
+                "native_oai_config": {
+                    "apikey": "vision-key",
+                    "apibase": "https://vision.example/v1",
+                    "model": "vision-model",
+                    "vision_mode": "multimodal",
+                    "vision": True,
+                    "vision_verified": True,
+                },
+                "kb_vision_config": {
+                    "enabled": True,
+                    "model_profile": "native_oai_config1",
+                },
+            },
+        ):
+            config = vision.provider_settings.vision_config()
+            self.assertTrue(vision.enabled())
+
+        self.assertEqual(config["model"], "vision-model")
+        self.assertEqual(config["apikey"], "vision-key")
+
     def test_saved_disable_wins_over_environment_override(self):
         with mock.patch.object(
             vision.provider_settings,

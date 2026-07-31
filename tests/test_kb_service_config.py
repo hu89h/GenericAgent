@@ -94,11 +94,26 @@ class KnowledgeBaseServiceConfigTests(unittest.TestCase):
             "model_profile": "native_oai_config1",
         }
         self.manager.list_model_profiles = lambda: [verified]
+        self.mykey.write_text(
+            self.mykey.read_text(encoding="utf-8")
+            + "kb_vision_config = {\n"
+            + "    'enabled': True,\n"
+            + "    'model_profile': 'native_oai_config1',\n"
+            + "}\n",
+            encoding="utf-8",
+        )
 
-        result = self.manager.get_kb_service_configs()
+        raw = runpy.run_path(str(self.mykey))
+        with mock.patch("llmcore.reload_mykeys", return_value=(raw, False)):
+            result = self.manager.get_kb_service_configs()
 
         self.assertEqual(result["vision"]["modelProfile"], "native_oai_config")
         self.assertEqual(result["vision"]["modelProfileName"], "通义千问")
+        saved = runpy.run_path(str(self.mykey))
+        self.assertEqual(
+            saved["kb_vision_config"]["model_profile"],
+            "native_oai_config",
+        )
 
     def test_partial_embedding_save_keeps_both_existing_keys(self):
         raw = runpy.run_path(str(self.mykey))
