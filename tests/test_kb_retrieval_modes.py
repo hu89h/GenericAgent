@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from knowledge_base.retrieval import KnowledgeBaseRetriever
@@ -160,6 +161,76 @@ class RetrievalModeTests(unittest.TestCase):
 
         self.assertTrue(result["results"])
         self.assertEqual(calls, [["documents/selected.md"], ["documents/selected.md"]])
+
+    def test_selection_scope_normalizes_ref_to_relative_document_name(self):
+        calls = []
+
+        def capture(*_args, **kwargs):
+            calls.append(kwargs.get("file_name"))
+            return [_hit("zvec")]
+
+        self.retriever._search_exact_image_refs = capture
+        self.retriever._search_one_zvec = capture
+        self.retriever.search(
+            "scoped",
+            mode="vector",
+            scope_targets=[{
+                "kb_id": "kb-test",
+                "documents": [{"ref": "kb-test/documents/selected.md"}],
+            }],
+        )
+
+        self.assertEqual(calls, [["documents/selected.md"], ["documents/selected.md"]])
+
+    def test_read_image_accepts_source_document_filter(self):
+        captured = {}
+
+        def query_rows(_kb, **kwargs):
+            captured.update(kwargs)
+            return [{
+                "kind": "image",
+                "data_id": "kb-test::documents/selected.md::image::one",
+                "file_name": "documents/selected.md",
+                "title": "图片",
+                "source_data_id": kwargs.get("source_data_id"),
+                "image_path": "documents/selected.assets/one.png",
+                "image_id": "one",
+                "ref_key": "图1",
+            }]
+
+        self.retriever._query_image_rows = query_rows
+        result = self.retriever.read_image(
+            kb_id="kb-test",
+            ref_key="图1",
+            source_data_id="kb-test::documents/selected.md",
+        )
+
+        self.assertEqual(captured["source_data_id"], "kb-test::documents/selected.md")
+        self.assertEqual(result["data_id"], "kb-test::documents/selected.md::image::one")
+
+    def test_read_chunk_resolves_ref_when_scope_also_supplies_kb_id(self):
+        captured = {}
+
+        def fetch(_kb, data_id, chunk_index, output_fields=None):
+            captured.update(data_id=data_id, chunk_index=chunk_index)
+            return SimpleNamespace(fields={
+                "title": "原始文档.pdf",
+                "header_path": "章节/方法",
+                "body": "这是通过 ref 读取到的正文。",
+            })
+
+        self.retriever._zvec_fetch_doc = fetch
+        content = self.retriever.read_chunk(
+            ref="kb-test/documents/selected.md",
+            kb_id="kb-test",
+            chunk_index=2,
+        )
+
+        self.assertIn("这是通过 ref 读取到的正文。", content)
+        self.assertEqual(captured, {
+            "data_id": "kb-test::documents/selected.md",
+            "chunk_index": 2,
+        })
 
 
 if __name__ == "__main__":

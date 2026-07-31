@@ -45,6 +45,25 @@ class _Backend:
         }
 
 
+class _ScopedImageBackend:
+    image_abspath = ""
+    calls = []
+
+    @classmethod
+    def read_image(cls, **kwargs):
+        cls.calls.append(dict(kwargs))
+        return {
+            "kind": "image",
+            "kb_id": "kb-test",
+            "data_id": "kb-test::doc.md::image::1",
+            "image_id": "image-1",
+            "image_abspath": cls.image_abspath,
+            "source_data_id": kwargs.get("source_data_id"),
+            "source_file_name": "source.pdf",
+            "description": "diagram",
+        }
+
+
 class _Handler(KnowledgeBaseToolsMixin):
     def __init__(self):
         self.parent = SimpleNamespace(knowledge_scope={"mode": "all"})
@@ -60,6 +79,15 @@ class _Handler(KnowledgeBaseToolsMixin):
     def queue_image_for_next_turn(self, path, **_kwargs):
         self.queued_image = path
         return {"attach_status": "attached"}, None
+
+
+class _ScopedImageHandler(_Handler):
+    def __init__(self, scope):
+        self.parent = SimpleNamespace(knowledge_scope=scope)
+
+    @staticmethod
+    def _kb_backend():
+        return _ScopedImageBackend
 
 
 class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
@@ -98,6 +126,28 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
                 self.assertIn('"attach_status": "attached"', outcome.data)
             finally:
                 _Backend.image_abspath = ""
+
+    def test_document_scope_passes_source_document_to_figure_lookup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            image = Path(temp) / "figure.png"
+            Image.new("RGB", (2, 2), "red").save(image)
+            _ScopedImageBackend.image_abspath = str(image)
+            _ScopedImageBackend.calls = []
+            try:
+                handler = _ScopedImageHandler({
+                    "mode": "document",
+                    "kb_id": "kb-test",
+                    "ref": "kb-test/doc.md",
+                })
+                outcome = handler.do_kb_image_read({"ref_key": "图1"}, None)
+
+                self.assertIn('"attach_status": "attached"', outcome.data)
+                self.assertEqual(
+                    _ScopedImageBackend.calls[0]["source_data_id"],
+                    "kb-test::doc.md",
+                )
+            finally:
+                _ScopedImageBackend.image_abspath = ""
 
     def test_search_returns_payload_without_info_status_line(self):
         outcome = _Handler().do_kb_search(

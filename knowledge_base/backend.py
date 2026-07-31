@@ -444,9 +444,12 @@ def list_chunks(data_id=None, kb_id=None, ref=None, preview_chars=80, limit=400)
     )
 
 
-def read_image(data_id=None, ref_key=None, kb_id=None):
+def read_image(data_id=None, ref_key=None, kb_id=None, source_data_id=None):
     return _runtime().retrieval.read_image(
-        data_id=data_id, ref_key=ref_key, kb_id=kb_id
+        data_id=data_id,
+        ref_key=ref_key,
+        kb_id=kb_id,
+        source_data_id=source_data_id,
     )
 
 

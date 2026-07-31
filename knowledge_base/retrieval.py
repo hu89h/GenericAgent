@@ -264,6 +264,32 @@ class KnowledgeBaseRetriever:
         )
 
     @staticmethod
+    def _scope_document_candidates(document: dict, kb_id: str) -> list[str]:
+        """Normalize scope locators into the relative names stored in Zvec."""
+        values: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: object) -> None:
+            normalized = str(value or "").strip().replace("\\", "/").lstrip("/")
+            if not normalized:
+                return
+            if normalized.startswith(f"{kb_id}/"):
+                normalized = normalized[len(kb_id) + 1:]
+            if "::" in normalized:
+                prefix, suffix = normalized.split("::", 1)
+                if prefix == kb_id:
+                    normalized = suffix.split("::image::", 1)[0]
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                values.append(normalized)
+
+        add(document.get("file_name") or document.get("fileName"))
+        add(document.get("ref"))
+        add(document.get("data_id") or document.get("dataId"))
+        add(document.get("title"))
+        return values
+
+    @staticmethod
     def _zvec_quote(value: str) -> str:
         return "'" + str(value or "").replace("\\", "\\\\").replace("'", "''") + "'"
 
@@ -377,6 +403,7 @@ class KnowledgeBaseRetriever:
             self._record_search_error(kb, error_source, error)
             return []
 
+        source_titles = self._imported_document_titles(kb["path"])
         out, seen = [], set()
         for row in rows or []:
             fields = getattr(row, "fields", None) or {}
@@ -402,6 +429,7 @@ class KnowledgeBaseRetriever:
                 "chunk_index": chunk_index,
                 "title": ttl[:160],
                 "file_name": rel,
+                "source_file_name": "",
                 "ref": f"{kb['id']}/{rel}",
                 "abspath": os.path.join(kb["path"], rel),
                 "kind": fields.get("kind") or "text",
@@ -415,6 +443,10 @@ class KnowledgeBaseRetriever:
                 "snippet": self._snippet(body, query, snippet_chars),
                 "body": body,
             }
+            source_title = source_titles.get(rel, "")
+            if source_title:
+                hit["title"] = source_title[:160]
+                hit["source_file_name"] = source_title
             out.append(self._enrich_hit_with_asset(kb, hit, fields))
             if len(out) >= top_k:
                 break
@@ -575,29 +607,13 @@ class KnowledgeBaseRetriever:
                     continue
                 if not any(bool(target.get("all_documents", target.get("allDocuments", False))) for target in kb_targets):
                     scoped_file_names = [
-                        str(
-                            document.get("file_name")
-                            or document.get("fileName")
-                            or document.get("ref")
-                            or document.get("title")
-                            or (
-                                str(document.get("data_id") or "").split("::", 1)[1].split("::image::", 1)[0]
-                                if "::" in str(document.get("data_id") or "") else ""
-                            )
-                            or ""
-                        ).strip()
+                        candidate
                         for target in kb_targets
                         for document in (target.get("documents") or target.get("docs") or [])
                         if isinstance(document, dict)
-                        and str(
-                            document.get("file_name")
-                            or document.get("fileName")
-                            or document.get("ref")
-                            or document.get("title")
-                            or document.get("data_id")
-                            or ""
-                        ).strip()
+                        for candidate in self._scope_document_candidates(document, kb["id"])
                     ]
+                    scoped_file_names = list(dict.fromkeys(scoped_file_names))
                     if not scoped_file_names:
                         continue
             # Exact figure/table-number matches (图3-1, 表4.1, ...) are injected
@@ -671,10 +687,11 @@ class KnowledgeBaseRetriever:
             target = next((kb for kb in knowledge_bases if kb["id"] == kid), None)
         if target is None and kb_id:
             target = next((kb for kb in knowledge_bases if kb["id"] == kb_id), None)
-        if target is None and ref:
+        if ref:
             for kb in knowledge_bases:
                 if ref.startswith(kb["id"] + "/"):
-                    target = kb
+                    if target is None:
+                        target = kb
                     rel = ref[len(kb["id"]) + 1:]
                     if not data_id:
                         data_id = f"{kb['id']}::{rel}"
@@ -845,6 +862,7 @@ class KnowledgeBaseRetriever:
         data_id: str | None = None,
         ref_key: str | None = None,
         kb_id: str | None = None,
+        source_data_id: str | None = None,
     ) -> dict:
         """Resolve one image from the widened zvec rows.
 
@@ -855,6 +873,7 @@ class KnowledgeBaseRetriever:
         """
         data_id = str(data_id or "").strip()
         ref_key = self._local_ref_key(str(ref_key or "").strip())
+        source_data_id = str(source_data_id or "").strip()
         if not data_id and not ref_key:
             return {
                 "error_code": "image_target_missing",
@@ -874,6 +893,8 @@ class KnowledgeBaseRetriever:
                 fields = (getattr(doc, "fields", None) or {}) if doc else {}
                 if not fields or (fields.get("kind") or "") != "image":
                     continue
+                if source_data_id and str(fields.get("source_data_id") or "") != source_data_id:
+                    continue
                 if ref_key and self._local_ref_key(fields.get("ref_key") or "") != ref_key:
                     continue
                 matches.append((kb, fields))
@@ -883,7 +904,7 @@ class KnowledgeBaseRetriever:
                 for fields in self._query_image_rows(
                     kb,
                     ref_keys=[ref_key] if ref_key else None,
-                    source_data_id=data_id or None,
+                    source_data_id=source_data_id or data_id or None,
                 ):
                     matches.append((kb, fields))
         if not matches:

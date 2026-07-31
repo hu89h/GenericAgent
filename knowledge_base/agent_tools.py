@@ -492,8 +492,18 @@ class KnowledgeBaseToolsMixin:
         if lookup["data_id"] and not self._scope_allows_target(data_id=lookup["data_id"]):
             return None, "[Error] 图片目标不在当前会话的知识库范围内。"
         try:
+            scope = self._knowledge_scope()
             read_kb_id = self._scope_read_kb_id(data_id=lookup.get("data_id"))
-            if self._knowledge_scope()["mode"] == "selection" and not lookup.get("data_id"):
+            source_data_id = None
+            if scope["mode"] == "document":
+                source_data_id = str(scope.get("data_id") or "").strip() or None
+                if not source_data_id:
+                    target_kb, target_doc = self._target_parts(
+                        ref=scope.get("ref"), kb_id=scope.get("kb_id")
+                    )
+                    if target_kb and target_doc:
+                        source_data_id = f"{target_kb}::{target_doc}"
+            if scope["mode"] == "selection" and not lookup.get("data_id"):
                 matches = []
                 for kb_id in self._scope_kb_ids():
                     candidate = self._kb_backend().read_image(kb_id=kb_id, **lookup)
@@ -523,7 +533,10 @@ class KnowledgeBaseToolsMixin:
                 else:
                     info = {"error": "[未找到图片资产]"}
             else:
-                info = self._kb_backend().read_image(kb_id=read_kb_id, **lookup)
+                kwargs = {"kb_id": read_kb_id, **lookup}
+                if source_data_id:
+                    kwargs["source_data_id"] = source_data_id
+                info = self._kb_backend().read_image(**kwargs)
         except Exception as error:
             return None, f"[Error] 知识库图片读取失败: {error}"
         if not isinstance(info, dict) or info.get("error"):
