@@ -1192,10 +1192,11 @@ function kbRenderLibraries() {
       ? 'ready'
       : (kb.state === 'empty' ? 'empty' : 'pending');
     const stateIcon = statusClass === 'ready' ? GA_ICON('check') : '';
+    const canResume = kb.resume_available === true;
     card.innerHTML = `
       <div class="kb-card-title-row"><h3 class="kb-card-title"></h3><span class="kb-status ${statusClass}">${stateIcon}<span>${escapeHtml(stateText)}</span></span></div>
       <div class="kb-card-meta"></div>
-      <div class="kb-card-actions">${kb.resume_available || kb.checkpoint?.available ? `<button type="button" class="kb-link-btn kb-resume-import">${escapeHtml(t('kb.resume'))}</button><button type="button" class="kb-link-btn kb-discard-checkpoint">${escapeHtml(t('kb.discardCheckpoint'))}</button>` : ''}<button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
+      <div class="kb-card-actions">${kb.source_changed === true ? `<button type="button" class="kb-link-btn kb-rescan-source">${escapeHtml(t('kb.rescanSource'))}</button>` : ''}${canResume ? `<button type="button" class="kb-link-btn kb-resume-import">${escapeHtml(t('kb.resume'))}</button><button type="button" class="kb-link-btn kb-discard-checkpoint">${escapeHtml(t('kb.discardCheckpoint'))}</button>` : ''}<button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
     card.querySelector('.kb-card-title').textContent = kb.name || kb.id || '';
     card.querySelector('.kb-card-meta').textContent = kbFormat(t('kb.libraryMeta'), {
       documents: kb.counts?.documents || 0,
@@ -1206,6 +1207,11 @@ function kbRenderLibraries() {
       void kbOpenDocuments(kb);
     });
     card.querySelector('.kb-delete-library').addEventListener('click', () => void kbDeleteLibrary(kb));
+    card.querySelector('.kb-rescan-source')?.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      void kbRescanSource(kb);
+    });
     card.querySelector('.kb-resume-import')?.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
@@ -2070,22 +2076,26 @@ function kbSetTask(job, kind) {
 
   if (kbPageEls.taskCounts) {
     if (kind === 'import' && terminal && summary.documents_total != null) {
-      kbPageEls.taskCounts.textContent = kbFormat(t('kb.finalCounts'), {
+      const lines = [kbFormat(t('kb.finalCounts'), {
         total: summary.documents_total || 0,
         success: Math.max(0, Number(summary.documents_succeeded || 0) - Number(summary.documents_with_warnings || 0)),
         warning: summary.documents_with_warnings || 0,
         failure: summary.documents_failed || 0,
-      });
+      })];
+      if (Array.isArray(job.skippedFiles) && job.skippedFiles.length) {
+        lines.push(kbFormat(t('kb.skippedFiles'), { count: job.skippedFiles.length }));
+      }
+      if (Array.isArray(job.replacedFiles) && job.replacedFiles.length) {
+        lines.push(kbFormat(t('kb.replacedFiles'), { count: job.replacedFiles.length }));
+      }
+      if (Array.isArray(job.processedFiles) && job.processedFiles.length) {
+        lines.push(kbFormat(t('kb.processedFiles'), { count: job.processedFiles.length }));
+      }
+      if (job.notice === 'all_documents_skipped') lines.push(t('kb.allDocumentsSkipped'));
+      kbPageEls.taskCounts.textContent = lines.join('\n');
+      kbPageEls.taskCounts.hidden = false;
     } else if (kind === 'import' && !terminal) {
       const lines = [];
-      const preparationPhase = !['records_ready', 'indexing', 'validated', 'publishing'].includes(phase)
-        && !imagePhase;
-      if (documentProgress.total && preparationPhase) {
-        lines.push(kbFormat(t('kb.prepareCounts'), {
-          completed: Math.min(documentProgress.completed || 0, documentProgress.total || 0),
-          total: documentProgress.total || 0,
-        }));
-      }
       if ((counts.assets || 0) || (counts.ignored || 0)) {
         lines.push(kbFormat(t('kb.importExtras'), {
           assets: counts.assets || 0,
@@ -2127,9 +2137,7 @@ function kbSetTask(job, kind) {
       });
       kbPageEls.taskCounts.hidden = false;
     }
-    if (kind === 'import' && terminal && summary.documents_total != null) {
-      kbPageEls.taskCounts.hidden = false;
-    }
+    if (kind === 'import' && terminal && summary.documents_total != null) kbPageEls.taskCounts.hidden = false;
   }
 
   if (kbPageEls.taskUsage) {
@@ -2328,7 +2336,7 @@ async function kbCancelTrackedJob() {
     || job?.cancellable === false
   ) return;
   let cancelOptions = {};
-  if (kind === 'import') {
+  if (kind === 'import' || kind === 'retry_image_analysis') {
     const choice = await showImportCancelChoice();
     if (!choice || jobId !== kbState.jobId) return;
     cancelOptions = { retainProcessed: choice === 'keep' };
@@ -2392,6 +2400,34 @@ async function kbImport(sourceDir) {
   } catch (error) { showError(`${t('err.kbImport')}: ${error.message || error}`); }
 }
 
+async function kbRescanSource(kb) {
+  if (!kb?.id) return;
+  const confirmed = await showConfirmDialog({
+    title: t('kb.rescanSource'),
+    message: t('kb.rescanSourceConfirm'),
+    okText: t('kb.rescanSource'),
+    okKind: 'primary',
+  });
+  if (!confirmed) return;
+  try {
+    const result = await window.ga.kbImport({
+      kbId: kb.id,
+      rescanSource: true,
+      duplicatePolicy: 'skip',
+    });
+    if (!result.jobId) throw new Error(result.error || t('err.kbImport'));
+    await kbTrackJob('import', result.jobId);
+    await kbRefresh({ force: true });
+  } catch (error) {
+    const code = error?.data?.error || '';
+    const translated = code ? t(`kb.error.${code}`) : '';
+    const detail = translated && translated !== `kb.error.${code}`
+      ? translated
+      : (error.message || error);
+    showError(`${t('err.kbImport')}: ${detail}`);
+  }
+}
+
 async function kbCreateLibrary(name) {
   const value = kbText(name).trim();
   if (!value) return;
@@ -2430,16 +2466,16 @@ async function kbPickAndAddDocuments() {
       const code = error?.data?.error || '';
       if (code !== 'documents_already_exist') throw error;
       const replace = await showConfirmDialog({
-        title: t('kb.replaceExisting'),
-        message: t('kb.replaceExistingConfirm'),
+        title: t('kb.duplicatePolicy'),
+        message: t('kb.duplicatePolicyConfirm'),
         okText: t('kb.replaceExisting'),
+        cancelText: t('kb.skipExisting'),
         okKind: 'primary',
       });
-      if (!replace) return;
       result = await window.ga.kbImport({
         kbId: kb.id,
         sourceFiles: files,
-        replaceExisting: true,
+        duplicatePolicy: replace ? 'replace' : 'skip',
       });
     }
     if (!result.jobId) throw new Error(result.error || t('err.kbImport'));

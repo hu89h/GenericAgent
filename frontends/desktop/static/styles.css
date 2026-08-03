@@ -2997,7 +2997,7 @@ svg.kb-doc-icon{ width:20px; height:20px; }
 .kb-task-heading{ display:flex; align-items:center; gap:10px; min-width:0; }
 .kb-task-mark{ width:20px; height:20px; display:flex; align-items:center; justify-content:center; color:var(--accent); }
 .kb-task-mark svg{ width:18px; height:18px; }
-.kb-task-body{ min-height:0; padding:18px 20px 20px; display:flex; flex-direction:column; gap:12px; }
+.kb-task-body{ min-height:0; padding:18px 20px 20px; display:flex; flex-direction:column; gap:12px; overflow:auto; }
 .kb-task-phase-row{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
 .kb-task-phase{ color:var(--txt-strong); font-size:calc(14px * var(--ui-scale)); font-weight:600; }
 .kb-task-progress-value{ flex:0 0 auto; color:var(--muted); font-size:calc(12px * var(--ui-scale)); font-variant-numeric:tabular-nums; }
@@ -3031,7 +3031,7 @@ svg.kb-doc-icon{ width:20px; height:20px; }
 .kb-task-guidance > div{ flex:1 1 100%; }
 .kb-guidance-action{ border:0; padding:0; color:var(--accent); background:transparent; cursor:pointer; font:inherit; font-weight:600; }
 .kb-guidance-action:hover{ color:var(--txt-strong); text-decoration:underline; }
-.kb-task-actions{ display:flex; justify-content:flex-end; gap:8px; padding-top:2px; }
+.kb-task-actions{ position:sticky; bottom:-20px; display:flex; justify-content:flex-end; gap:8px; margin:0 -20px -20px; padding:12px 20px 20px; background:color-mix(in srgb,var(--panel) 96%,transparent); border-top:1px solid var(--line-soft); }
 .kb-task-actions > button[hidden]{ display:none; }
 .kb-build-card{ width:min(480px,92vw); }
 .kb-build-body{ min-height:0; padding:18px; display:flex; flex-direction:column; gap:14px; }
