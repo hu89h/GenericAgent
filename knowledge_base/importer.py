@@ -395,19 +395,41 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _source_fingerprint(files: list[tuple[Path, str]]) -> list[dict[str, Any]]:
+def _source_fingerprint(
+    files: list[tuple[Path, str]],
+    digest_cache: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     result = []
     for path, relative in files:
         try:
             stat = path.stat()
+            key = os.path.normcase(str(path))
+            digest_value = (digest_cache or {}).get(key)
+            if not digest_value:
+                digest = hashlib.sha256()
+                with path.open("rb") as handle:
+                    for block in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(block)
+                digest_value = digest.hexdigest()
+                if digest_cache is not None:
+                    digest_cache[key] = digest_value
         except OSError:
             continue
         result.append({
             "path": relative,
             "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
+            "sha256": digest_value,
         })
     return result
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 class DocumentProcessor:
@@ -457,6 +479,16 @@ class DocumentProcessor:
             for item in (resume_manifest or {}).get("source_fingerprint") or []
             if isinstance(item, dict) and item.get("path")
         }
+        fingerprint_cache: dict[str, str] = {}
+
+        def file_sha256(path: Path) -> str:
+            key = os.path.normcase(str(path))
+            cached = fingerprint_cache.get(key)
+            if cached:
+                return cached
+            value = _sha256_path(path)
+            fingerprint_cache[key] = value
+            return value
         entries: list[dict[str, Any]] = []
         entry_by_source: dict[str, dict[str, Any]] = {}
         output_rels: set[str] = set()
@@ -479,6 +511,47 @@ class DocumentProcessor:
             counts["skipped"] = counts["ignored"]
             counts["succeeded"] = counts["ready"]
             counts["completed"] = counts["ready"] + counts["failed"]
+
+        def persist_checkpoint() -> None:
+            """Persist document-level progress so a hard stop can resume safely."""
+            if not entries:
+                return
+            try:
+                fingerprint = _source_fingerprint(files, fingerprint_cache)
+                document_entries = [
+                    item for item in entries if item.get("kind") == "document"
+                ]
+                payload = {
+                    "schema_version": 1,
+                    "kb_id": kb_id,
+                    "name": str(name or source_root.name),
+                    "source_path": str(source_root),
+                    "imported_at": int(time.time()),
+                    "source_fingerprint": fingerprint,
+                    "files": entries,
+                    "summary": dict(counts),
+                    "failures": [
+                        {
+                            "source": item.get("source") or "",
+                            "stage": item.get("stage") or "document",
+                            "error_type": item.get("error_type") or "ProcessingError",
+                            "error": item.get("error") or "",
+                        }
+                        for item in document_entries
+                        if item.get("status") == "failed"
+                    ],
+                    "state": "checkpoint",
+                    "checkpoint": {
+                        "created_at": int(time.time()),
+                        "ready_documents": int(counts.get("ready") or 0),
+                        "total_documents": int(counts.get("total") or 0),
+                    },
+                }
+                _write_json_atomic(stage / "manifest.json", payload)
+            except Exception:
+                # Checkpointing is best effort; the active KB must never be
+                # affected by a diagnostic persistence failure.
+                pass
 
         def output_rel_for(source_rel: str) -> str:
             digest = hashlib.sha256(source_rel.encode("utf-8")).hexdigest()[:12]
@@ -508,6 +581,13 @@ class DocumentProcessor:
                 or int(fingerprint.get("mtime_ns") or -1) != stat.st_mtime_ns
             ):
                 return None
+            expected_sha = str(fingerprint.get("sha256") or "").strip().lower()
+            if expected_sha:
+                try:
+                    if file_sha256(path).lower() != expected_sha:
+                        return None
+                except OSError:
+                    return None
             processed = [
                 str(value or "").replace("\\", "/").lstrip("/")
                 for value in previous.get("processed") or []
@@ -600,6 +680,7 @@ class DocumentProcessor:
             document_entries = [item for item in entries if item["kind"] == "document"]
             refresh_document_counts()
             _emit(progress, "scanned", counts)
+            persist_checkpoint()
 
             upload_specs: list[dict[str, Any]] = []
             for spec in conversion_specs:
@@ -618,6 +699,7 @@ class DocumentProcessor:
                             source=source, name=path.name, current=source,
                             file_status="failed", error=str(error),
                         )
+                        persist_checkpoint()
                         continue
                 upload_specs.append({"source": source, "path": path, "relative_path": source})
             if upload_specs:
@@ -638,6 +720,8 @@ class DocumentProcessor:
                         current=spec["source"], file_status=entry["status"],
                         error=job.error,
                     )
+                    if job.state in {"done", "failed", "downloaded"}:
+                        persist_checkpoint()
 
                 jobs_by_relative.update({
                     spec["relative_path"]: spec for spec in upload_specs
@@ -676,6 +760,7 @@ class DocumentProcessor:
                             source=source, name=Path(source).name, current=source,
                             file_status="failed", error=error,
                         )
+                        persist_checkpoint()
                         continue
 
                     target_rel = output_rel_for(source)
@@ -713,6 +798,7 @@ class DocumentProcessor:
                             source=source, name=Path(source).name, current=source,
                             file_status="ready",
                         )
+                        persist_checkpoint()
                     except KnowledgeBaseCancelled:
                         raise
                     except Exception as error:
@@ -724,20 +810,14 @@ class DocumentProcessor:
                             source=source, name=Path(source).name, current=source,
                             file_status="failed", error=str(error),
                         )
+                        persist_checkpoint()
 
             refresh_document_counts()
             check_cancelled(cancelled)
             if not counts["ready"]:
                 raise RuntimeError("没有成功处理的知识库文档")
 
-            source_fingerprint = [
-                {
-                    "path": rel,
-                    "size": path.stat().st_size,
-                    "mtime_ns": path.stat().st_mtime_ns,
-                }
-                for path, rel in files
-            ]
+            source_fingerprint = _source_fingerprint(files, fingerprint_cache)
             manifest = {
                 "schema_version": 1,
                 "kb_id": kb_id,
@@ -795,7 +875,7 @@ class DocumentProcessor:
                     "name": str(name or source_root.name),
                     "source_path": str(source_root),
                     "imported_at": int(time.time()),
-                    "source_fingerprint": _source_fingerprint(files),
+                    "source_fingerprint": _source_fingerprint(files, fingerprint_cache),
                     "files": entries,
                     "summary": dict(counts),
                     "failures": partial_failures,
@@ -962,6 +1042,7 @@ class DocumentProcessor:
                         "path": str(path),
                         "size": path.stat().st_size,
                         "mtime_ns": path.stat().st_mtime_ns,
+                        "sha256": _sha256_path(path),
                     }
                     for path in fingerprint_paths
                 ],

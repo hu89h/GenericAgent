@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -13,6 +14,32 @@ from knowledge_base.assets import ImageAssetProcessor
 
 
 class DocumentProcessorTests(unittest.TestCase):
+    def test_resume_reprocesses_same_size_file_when_content_hash_changed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            stage = Path(temp) / "stage"
+            source.mkdir()
+            document = source / "document.md"
+            document.write_text("# First\nbody", encoding="utf-8")
+            processor = importer.DocumentProcessor()
+            first = processor.prepare(
+                str(source), stage_root=str(stage), kb_id="kb-test"
+            )
+            original_stat = document.stat()
+            document.write_text("# First\ntext", encoding="utf-8")
+            os.utime(document, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            with mock.patch.object(importer, "_write_markdown", wraps=importer._write_markdown) as write_markdown:
+                resumed = processor.prepare(
+                    str(source),
+                    stage_root=str(stage),
+                    kb_id="kb-test",
+                    resume_manifest=first["manifest"],
+                )
+            self.assertEqual(resumed["summary"]["ready"], 1)
+            write_markdown.assert_called_once()
+            fingerprint = resumed["manifest"]["source_fingerprint"][0]
+            self.assertEqual(len(fingerprint["sha256"]), 64)
+
     def test_cancel_with_retention_writes_checkpoint_and_resume_reuses_ready_document(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "source"

@@ -619,6 +619,53 @@ class ProcessedContentRepairTests(unittest.TestCase):
                 self.assertEqual(result["stats"]["n_chunks"], 1)
                 self.assertEqual(result["stats"]["text_chunks"], 1)
 
+    def test_reindex_failure_keeps_published_active_unchanged(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = os.path.join(temp, "source")
+            data_root = os.path.join(temp, "data")
+            config_path = os.path.join(temp, "kb.yaml")
+            os.makedirs(source)
+            with mock.patch.object(config, "DATA_ROOT", data_root), mock.patch.object(
+                config, "CONFIG_PATH", config_path
+            ):
+                kb_id = config.kb_id_for_source(source)
+                config.upsert_kb(kb_id, name="Transactional", source_path=source)
+                active = config.active_root(kb_id)
+                processed = config.processed_path(kb_id)
+                os.makedirs(os.path.join(processed, ".kb_index", "zvec"), exist_ok=True)
+                records_path = os.path.join(active, "records.jsonl")
+                with open(records_path, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"body": "published"}) + "\n")
+                manifest_path = os.path.join(active, "manifest.json")
+                original_manifest = {"state": "ready", "marker": "old"}
+                with open(manifest_path, "w", encoding="utf-8") as handle:
+                    json.dump(original_manifest, handle)
+
+                class _Records:
+                    @staticmethod
+                    def read_records(path):
+                        with open(path, encoding="utf-8") as handle:
+                            return [json.loads(line) for line in handle if line.strip()]
+
+                    @staticmethod
+                    def records_sha256(path):
+                        return "published-records"
+
+                pipeline = IngestPipeline(
+                    document_processor=None,
+                    record_builder=_Records(),
+                    index_builder=_FailingIndexBuilder("index failure"),
+                    publisher=Publisher(),
+                    index=self._Index(),
+                )
+                with self.assertRaisesRegex(RuntimeError, "index failure"):
+                    pipeline.reindex(kb_id)
+
+                with open(manifest_path, encoding="utf-8") as handle:
+                    self.assertEqual(json.load(handle), original_manifest)
+                self.assertTrue(os.path.isdir(active))
+                self.assertFalse(os.path.exists(config.staging_root(kb_id)))
+
 
 if __name__ == "__main__":
     unittest.main()

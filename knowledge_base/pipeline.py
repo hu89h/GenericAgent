@@ -165,10 +165,44 @@ class IngestPipeline:
         return {
             "available": True,
             "created_at": checkpoint.get("created_at"),
+            "checkpoint_at": checkpoint.get("created_at"),
             "mode": str(checkpoint.get("mode") or "import"),
             "ready_documents": int(checkpoint.get("ready_documents") or 0),
             "total_documents": int(checkpoint.get("total_documents") or 0),
+            "completed_documents": int(checkpoint.get("ready_documents") or 0),
+            "pending_documents": max(
+                0,
+                int(checkpoint.get("total_documents") or 0)
+                - int(checkpoint.get("ready_documents") or 0),
+            ),
         }
+
+    def checkpoint_inputs(self, kb_id: str) -> dict:
+        """Return private resume inputs for the import endpoint only."""
+        stage = config.staging_root(str(kb_id or "").strip())
+        manifest = self._checkpoint_manifest(stage)
+        if not manifest:
+            return {"available": False}
+        checkpoint = manifest.get("checkpoint") or {}
+        return {
+            "available": True,
+            "source_path": str(manifest.get("source_path") or ""),
+            "source_files": [
+                str(item)
+                for item in (checkpoint.get("source_files") or [])
+                if str(item).strip()
+            ],
+        }
+
+    def discard_checkpoint(self, kb_id: str) -> dict:
+        """Drop only an interrupted staging checkpoint, keeping the KB active."""
+        value = str(kb_id or "").strip()
+        with mutation_lock:
+            stage = config.staging_root(value)
+            available = self._checkpoint_manifest(stage) is not None
+            if available:
+                remove_tree(stage)
+            return {"ok": True, "kb_id": value, "discarded": available}
 
     @staticmethod
     def _emit(progress: Callable[[dict], None] | None, **event) -> None:
@@ -457,6 +491,7 @@ class IngestPipeline:
                 for key in (
                     "n_docs", "n_chunks", "text_chunks",
                     "image_chunks", "image_assets",
+                    "embedding_cache_hits", "embedding_cache_misses",
                 )
             },
             "total": len(document_results),
@@ -470,6 +505,13 @@ class IngestPipeline:
             "failure_items": len(failures),
         }
         manifest = dict(manifest)
+        manifest["processing_fingerprint"] = {
+            "mineru_cache_version": int(getattr(mineru, "MINERU_CACHE_VERSION", 1)),
+            "chunking": dict(built.sources.get("chunking") or {}),
+            "image_analysis": dict(built.sources.get("image_analysis") or {}),
+            "embedding": dict(index_stats.get("embedding") or {}),
+            "sparse_embedding": dict(index_stats.get("sparse_embedding") or {}),
+        }
         manifest.update({
             "schema_version": int(manifest.get("schema_version") or 1),
             "kb_id": kb_id,
@@ -507,6 +549,10 @@ class IngestPipeline:
             "failures": failures,
             "documents": document_results,
         }
+        if existing_records and int(index_stats.get("embedding_cache_misses") or 0) and not int(
+            index_stats.get("embedding_cache_hits") or 0
+        ):
+            result["notice"] = "embedding_cache_rebuilt"
         self._emit(
             progress,
             phase="completed_with_failures" if failures else "completed",
@@ -609,6 +655,7 @@ class IngestPipeline:
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
         retain_partial: Callable[[], bool] | None = None,
+        replace_existing: bool = False,
     ) -> dict:
         """Append selected external files and rebuild one complete staged index."""
         value = str(kb_id or "").strip()
@@ -654,6 +701,7 @@ class IngestPipeline:
                 old_manifest = old_manifest if isinstance(old_manifest, dict) else {}
                 source_root = str(kb.get("source_path") or "").strip()
                 existing_source_paths = set()
+                existing_entries_by_path: dict[str, dict] = {}
                 for entry in old_manifest.get("files") or []:
                     if not isinstance(entry, dict) or entry.get("kind") != "document":
                         continue
@@ -664,7 +712,9 @@ class IngestPipeline:
                         if os.path.isfile(candidate):
                             source_value = candidate
                     if source_value and not resume_checkpoint:
-                        existing_source_paths.add(os.path.normcase(os.path.realpath(source_value)))
+                        identity = os.path.normcase(os.path.realpath(source_value))
+                        existing_source_paths.add(identity)
+                        existing_entries_by_path[identity] = entry
                 selected = []
                 selected_keys = set()
                 for raw in source_files or []:
@@ -672,7 +722,11 @@ class IngestPipeline:
                     if not os.path.isfile(path):
                         raise ValueError(f"source file not found: {path}")
                     identity = os.path.normcase(path)
-                    if (resume_checkpoint or identity not in existing_source_paths) and identity not in selected_keys:
+                    if (
+                        resume_checkpoint
+                        or replace_existing
+                        or identity not in existing_source_paths
+                    ) and identity not in selected_keys:
                         selected.append(path)
                         selected_keys.add(identity)
                 if not selected:
@@ -708,11 +762,52 @@ class IngestPipeline:
                     self.documents._selection_label(Path(path))
                     for path in selected
                 }
+                replaced_processed_files = set()
+                if replace_existing and not resume_checkpoint:
+                    for path in selected:
+                        old_entry = existing_entries_by_path.get(
+                            os.path.normcase(os.path.realpath(path))
+                        )
+                        if old_entry:
+                            replaced_processed_files.update(
+                                str(item).replace("\\", "/").lstrip("/")
+                                for item in (old_entry.get("processed") or [])
+                                if str(item).strip()
+                            )
+                selected_identities = {
+                    os.path.normcase(os.path.realpath(path)) for path in selected
+                }
+
+                def keep_existing_entry(item: dict) -> bool:
+                    if resume_checkpoint:
+                        return item.get("source") not in selected_labels
+                    if not replace_existing:
+                        return True
+                    source_value = str(item.get("source_path") or "").strip()
+                    if not source_value and source_root:
+                        relative = str(item.get("source") or "").replace("/", os.sep)
+                        source_value = os.path.join(source_root, relative)
+                    if not source_value:
+                        return True
+                    return os.path.normcase(os.path.realpath(source_value)) not in selected_identities
+
                 existing_files = [
                     item for item in (old_manifest.get("files") or [])
                     if isinstance(item, dict)
-                    and (not resume_checkpoint or item.get("source") not in selected_labels)
+                    and keep_existing_entry(item)
                 ]
+                if replace_existing and replaced_processed_files:
+                    processed_root = os.path.realpath(os.path.join(stage, "processed"))
+                    for relative in replaced_processed_files:
+                        target = os.path.realpath(os.path.join(processed_root, relative))
+                        if os.path.commonpath((processed_root, target)) != processed_root:
+                            raise ValueError("非法处理后文档路径")
+                        if os.path.isfile(target):
+                            os.remove(target)
+                        parent = os.path.dirname(target)
+                        stem = os.path.splitext(os.path.basename(target))[0]
+                        for asset_dir in glob.glob(os.path.join(parent, f"{stem}.assets-*")):
+                            remove_tree(asset_dir)
                 merged["files"] = existing_files + prepared_files
                 merged["source_path"] = kb.get("source_path") or ""
                 fingerprints = {
@@ -752,7 +847,11 @@ class IngestPipeline:
                     logfn=logfn,
                     cancelled=cancelled,
                     existing_records=existing_records,
-                    include_files=(new_processed_files if existing_records else None),
+                    include_files=(
+                        new_processed_files | replaced_processed_files
+                        if existing_records
+                        else None
+                    ),
                     existing_sources=(existing_index_sources if existing_records else None),
                 )
             except KnowledgeBaseCancelled:
@@ -834,31 +933,87 @@ class IngestPipeline:
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict:
-        """Rebuild Zvec from the published records without reprocessing content."""
+        """Rebuild Zvec from published records in staging, then publish atomically."""
         check_cancelled(cancelled)
         kb_id = str(kb.get("id") or "")
         if not kb_id:
             raise KeyError("knowledge_base_not_found")
-        self.index_builder.begin_build()
-        with open(kb["manifest_path"], encoding="utf-8") as handle:
-            manifest = json.load(handle)
-        records = self.records.read_records(kb["records_path"])
-        sources = dict(manifest.get("index_sources") or {})
-        sources["records_sha256"] = self.records.records_sha256(kb["records_path"])
-        stats = self.index_builder.build(
-            kb,
-            records=records,
-            sources=sources,
-            progress=progress,
-            logfn=logfn,
-            cancelled=cancelled,
-        )
-        check_cancelled(cancelled)
-        manifest["index_sources"] = sources
-        manifest["index_stats"] = stats
-        manifest["reindexed_at"] = int(time.time())
-        _write_json_atomic(kb["manifest_path"], manifest)
-        return {"ok": True, "kb_id": kb_id, "stats": stats}
+        active = config.active_root(kb_id)
+        if not os.path.isdir(active):
+            raise KeyError("knowledge_base_not_found")
+        stage = config.staging_root(kb_id)
+        remove_tree(stage)
+        try:
+            shutil.copytree(active, stage, dirs_exist_ok=True)
+            manifest_path = os.path.join(stage, "manifest.json")
+            records_path = os.path.join(stage, "records.jsonl")
+            with open(manifest_path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            records = self.records.read_records(records_path)
+            if not records:
+                raise RuntimeError("知识库没有可重建的图文记录")
+            stage_processed = os.path.join(stage, "processed")
+            stage_kb = {
+                **kb,
+                "path": stage_processed,
+                "manifest_path": manifest_path,
+                "records_path": records_path,
+                "exists": True,
+            }
+            sources = dict(manifest.get("index_sources") or {})
+            sources["records_sha256"] = self.records.records_sha256(records_path)
+            self.index_builder.begin_build()
+            stats = self.index_builder.build(
+                stage_kb,
+                records=records,
+                sources=sources,
+                progress=progress,
+                logfn=logfn,
+                cancelled=cancelled,
+            )
+            check_cancelled(cancelled)
+            manifest = dict(manifest)
+            manifest["index_sources"] = sources
+            manifest["index_stats"] = stats
+            manifest["processing_fingerprint"] = {
+                "mineru_cache_version": int(getattr(mineru, "MINERU_CACHE_VERSION", 1)),
+                "chunking": dict((manifest.get("index_sources") or {}).get("chunking") or {}),
+                "image_analysis": dict((manifest.get("index_sources") or {}).get("image_analysis") or {}),
+                "embedding": dict(stats.get("embedding") or {}),
+                "sparse_embedding": dict(stats.get("sparse_embedding") or {}),
+            }
+            manifest["reindexed_at"] = int(time.time())
+            manifest["state"] = (
+                "ready_with_warnings" if manifest.get("failures") else "ready"
+            )
+            _write_json_atomic(manifest_path, manifest)
+            probe = self.index.probe(stage_processed)
+            if not all(
+                probe.get(key)
+                for key in ("present", "openable", "schema_valid", "embedding_matches")
+            ):
+                raise RuntimeError("重建索引发布前校验失败")
+            self._emit(
+                progress,
+                phase="publishing",
+                current=str(manifest.get("name") or kb.get("name") or kb_id),
+            )
+            check_cancelled(cancelled)
+            published = self.publisher.publish(
+                kb_id=kb_id,
+                name=str(manifest.get("name") or kb.get("name") or kb_id),
+                source_path=str(manifest.get("source_path") or kb.get("source_path") or ""),
+            )
+            return {
+                "ok": True,
+                "kb_id": kb_id,
+                "stats": stats,
+                "usage": dict(stats.get("usage") or {}),
+                "kb": published,
+            }
+        except Exception:
+            remove_tree(stage)
+            raise
 
     def _repair_processed_content(
         self,
@@ -936,10 +1091,12 @@ class IngestPipeline:
         ref: str = "",
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> dict:
         """Remove one processed document and publish a rebuilt index atomically."""
         value = str(kb_id or "").strip()
         with mutation_lock:
+            check_cancelled(cancelled)
             kb = config.kb_by_id(value)
             if kb is None or not kb.get("exists"):
                 raise KeyError("knowledge_base_not_found")
@@ -974,12 +1131,43 @@ class IngestPipeline:
             ]
             root = config.kb_root(value)
             if not remaining_documents:
-                deleting = f"{root}.deleting-{os.getpid()}-{time.time_ns()}"
-                if os.path.lexists(root):
-                    if os.path.islink(root):
-                        raise RuntimeError("拒绝删除符号链接知识库目录")
-                    Publisher._rename_with_retry(root, deleting)
-                    remove_tree(deleting)
+                stage = config.staging_root(value)
+                remove_tree(stage)
+                try:
+                    os.makedirs(os.path.join(stage, "processed"), exist_ok=True)
+                    empty_manifest = dict(manifest)
+                    empty_manifest.update({
+                        "state": "empty",
+                        "files": [],
+                        "failures": [],
+                        "document_results": [],
+                        "index_sources": {},
+                        "index_stats": {},
+                        "summary": {
+                            "n_docs": 0,
+                            "n_chunks": 0,
+                            "text_chunks": 0,
+                            "image_chunks": 0,
+                            "image_assets": 0,
+                            "documents_total": 0,
+                            "documents_succeeded": 0,
+                            "documents_failed": 0,
+                            "documents_with_warnings": 0,
+                        },
+                        "published_at": int(time.time()),
+                    })
+                    _write_json_atomic(
+                        os.path.join(stage, "manifest.json"),
+                        empty_manifest,
+                    )
+                    published = self.publisher.publish(
+                        kb_id=value,
+                        name=kb.get("name") or value,
+                        source_path=kb.get("source_path") or "",
+                    )
+                except Exception:
+                    remove_tree(stage)
+                    raise
                 self._emit(progress, phase="completed", processed=1, total=1)
                 return {
                     "ok": True,
@@ -987,6 +1175,7 @@ class IngestPipeline:
                     "data_id": data_id or f"{value}::{target_rel}",
                     "document_name": removed_name or target_rel,
                     "empty": True,
+                    "kb": published,
                 }
 
             stage = config.staging_root(value)
@@ -1013,6 +1202,7 @@ class IngestPipeline:
                 records = self.records.read_records(kb["records_path"])
                 kept_records = []
                 for record in records:
+                    check_cancelled(cancelled)
                     record_rel = self._relative_key(record.get("file_name"))
                     if record_rel.startswith("processed/"):
                         record_rel = record_rel[len("processed/"):]
@@ -1056,7 +1246,9 @@ class IngestPipeline:
                     sources=sources,
                     progress=progress,
                     logfn=logfn,
+                    cancelled=cancelled,
                 )
+                check_cancelled(cancelled)
                 next_manifest = dict(manifest)
                 next_manifest["files"] = remaining_files
                 next_manifest["failures"] = failures
@@ -1097,6 +1289,7 @@ class IngestPipeline:
                 ):
                     raise RuntimeError("删除文档后的索引校验失败")
                 self._emit(progress, phase="publishing", current=removed_name)
+                check_cancelled(cancelled)
                 published = self.publisher.publish(
                     kb_id=value,
                     name=kb.get("name") or value,
@@ -1117,8 +1310,14 @@ class IngestPipeline:
                 remove_tree(stage)
                 raise
 
-    def delete(self, kb_id: str) -> dict:
+    def delete(
+        self,
+        kb_id: str,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict:
         with mutation_lock:
+            check_cancelled(cancelled)
             kb = config.kb_by_id(kb_id)
             root = config.kb_root(kb_id)
             if kb is None and not os.path.lexists(root):
@@ -1126,11 +1325,13 @@ class IngestPipeline:
             deleting = f"{root}.deleting-{os.getpid()}-{time.time_ns()}"
             moved = False
             if os.path.lexists(root):
+                check_cancelled(cancelled)
                 if os.path.islink(root):
                     raise RuntimeError("拒绝删除符号链接知识库目录")
                 Publisher._rename_with_retry(root, deleting)
                 moved = True
             try:
+                check_cancelled(cancelled)
                 removed = config.remove_kb(kb_id)
             except Exception:
                 if moved and os.path.exists(deleting):

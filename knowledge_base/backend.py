@@ -166,6 +166,7 @@ def add_documents(
     progress=None,
     cancelled=None,
     retain_partial=None,
+    replace_existing=False,
 ) -> dict:
     value = str(kb_id or "").strip()
     _mark_processing(value, True)
@@ -176,6 +177,7 @@ def add_documents(
             progress=progress,
             cancelled=cancelled,
             retain_partial=retain_partial,
+            replace_existing=replace_existing,
         )
     finally:
         _mark_processing(value, False)
@@ -189,6 +191,7 @@ def delete_document(
     ref: str = "",
     progress=None,
     logfn=None,
+    cancelled=None,
 ) -> dict:
     value = str(kb_id or "").strip()
     _mark_processing(value, True)
@@ -200,6 +203,7 @@ def delete_document(
             ref=ref,
             progress=progress,
             logfn=logfn,
+            cancelled=cancelled,
         )
     finally:
         _mark_processing(value, False)
@@ -235,8 +239,37 @@ def retry_image_analysis(
         _mark_processing(value, False)
 
 
-def delete_kb(kb_id: str) -> dict:
-    return _runtime().pipeline.delete(str(kb_id or "").strip())
+def delete_kb(kb_id: str, *, cancelled=None) -> dict:
+    value = str(kb_id or "").strip()
+    _mark_processing(value, True)
+    try:
+        return _runtime().pipeline.delete(value, cancelled=cancelled)
+    finally:
+        _mark_processing(value, False)
+
+
+def existing_document_files(kb_id: str, source_files: list[str]) -> list[str]:
+    """Return selected source names already represented by a KB manifest."""
+    kb = config.kb_by_id(str(kb_id or "").strip())
+    if not kb:
+        return []
+    manifest = _load_manifest(kb)
+    existing: set[str] = set()
+    source_root = str(kb.get("source_path") or "").strip()
+    for entry in manifest.get("files") or []:
+        if not isinstance(entry, dict) or entry.get("kind") != "document":
+            continue
+        value = str(entry.get("source_path") or "").strip()
+        if not value and source_root:
+            relative = str(entry.get("source") or "").replace("/", os.sep)
+            value = os.path.join(source_root, relative)
+        if value:
+            existing.add(os.path.normcase(os.path.realpath(value)))
+    return [
+        os.path.basename(str(path))
+        for path in source_files or []
+        if os.path.normcase(os.path.realpath(str(path))) in existing
+    ]
 
 
 def _load_manifest(kb: dict) -> dict:
@@ -291,6 +324,25 @@ def _selected_source_fingerprint(manifest: dict) -> list[dict] | None:
     return rows
 
 
+def _fingerprint_signature(rows: list[dict] | None) -> list[dict] | None:
+    """Compare fast source metadata without making every status poll rehash files."""
+    if not isinstance(rows, list):
+        return None
+    signature = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        signature.append({
+            key: value
+            for key, value in item.items()
+            if key != "sha256"
+        })
+    return sorted(
+        signature,
+        key=lambda item: str(item.get("path") or "").casefold(),
+    )
+
+
 def kb_status(kb: dict) -> dict:
     manifest = _load_manifest(kb)
     processing = _is_processing(kb["id"])
@@ -306,12 +358,20 @@ def kb_status(kb: dict) -> dict:
         probe = _runtime().index.probe(kb["path"])
     summary = manifest.get("summary") or {}
     failures = manifest.get("failures") or []
+    manifest_state = str(manifest.get("state") or "").strip().lower()
+    is_empty = manifest_state == "empty" or (
+        not kb.get("exists")
+        and not kb.get("source_path")
+        and not manifest
+    )
     healthy = all(
         probe.get(key)
         for key in ("present", "openable", "schema_valid", "embedding_matches")
     )
     if processing:
         state = "processing"
+    elif is_empty:
+        state = "empty"
     elif not kb.get("exists"):
         state = "missing"
     elif not healthy:
@@ -329,10 +389,20 @@ def kb_status(kb: dict) -> dict:
         current_source = None if has_external_files else _source_fingerprint(kb.get("source_path") or "")
     else:
         current_source = _selected_source_fingerprint(manifest)
-    source_changed = (
-        None if current_source is None or not isinstance(expected_source, list)
-        else current_source != expected_source
-    )
+    if not isinstance(expected_source, list) or not expected_source:
+        source_changed = None
+        source_change_reason = "not_tracked"
+    elif current_source is None:
+        source_changed = True
+        source_change_reason = "source_missing"
+    elif _fingerprint_signature(current_source) != _fingerprint_signature(expected_source):
+        source_changed = True
+        source_change_reason = "source_changed"
+    else:
+        source_changed = False
+        source_change_reason = "unchanged"
+    if state == "ready" and source_changed is True:
+        state = "ready_with_warnings"
     index_meta = probe.get("meta") or {}
     documents = []
     if kb.get("exists"):
@@ -359,6 +429,8 @@ def kb_status(kb: dict) -> dict:
         "source_path": kb.get("source_path") or "",
         "state": state,
         "source_changed": source_changed,
+        "source_change_reason": source_change_reason,
+        "empty": is_empty,
         "index": {
             "present": bool(probe.get("present")),
             "openable": bool(probe.get("openable")),
@@ -375,6 +447,7 @@ def kb_status(kb: dict) -> dict:
         "last_success_at": max(success_times) if success_times else None,
         "usage": usage,
         "checkpoint": checkpoint,
+        "resume_available": bool(checkpoint.get("available")),
         "failures": failures,
         "documents": documents,
     }
@@ -394,6 +467,14 @@ def status(kb_id: str | None = None) -> dict:
 
 def checkpoint_status(kb_id: str) -> dict:
     return _runtime().pipeline.checkpoint_status(kb_id)
+
+
+def checkpoint_inputs(kb_id: str) -> dict:
+    return _runtime().pipeline.checkpoint_inputs(kb_id)
+
+
+def discard_checkpoint(kb_id: str) -> dict:
+    return _runtime().pipeline.discard_checkpoint(kb_id)
 
 
 def search(
