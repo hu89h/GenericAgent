@@ -54,7 +54,7 @@ WS API (state sync):
 """
 from __future__ import annotations
 
-import asyncio, atexit, base64, contextlib, hashlib, importlib, json, os, re, shutil, signal, subprocess, sys, tempfile, webbrowser
+import asyncio, atexit, base64, contextlib, hashlib, importlib, json, ntpath, os, re, shutil, signal, subprocess, sys, tempfile, webbrowser
 from collections import Counter, deque
 import threading, time, traceback, uuid
 from dataclasses import dataclass, field
@@ -281,6 +281,7 @@ _KB_TERMINAL_JOB_STATES = {
     "completed_with_failures",
     "failed",
     "cancelled",
+    "cancelled_with_checkpoint",
 }
 
 
@@ -2685,6 +2686,11 @@ def _kb_error_detail(error, limit: int = 800) -> str:
         r"\1<redacted>",
         text,
     )
+    text = re.sub(
+        r"(?i)(?<![A-Za-z])(?:[A-Za-z]:[\\/]|\\\\)[^\s,;，；。.!！？)）]+",
+        lambda match: ntpath.basename(match.group(0).rstrip(".,;，；。")),
+        text,
+    )
     return text[:max(80, int(limit))]
 
 
@@ -2912,7 +2918,13 @@ def _kb_progress_from_event(event: dict) -> dict:
         total = 0
     if phase in {"scanning", "publishing", "cancelling"}:
         indeterminate = True
-    if phase in {"completed", "completed_with_failures", "failed", "cancelled"}:
+    if phase in {
+        "completed",
+        "completed_with_failures",
+        "failed",
+        "cancelled",
+        "cancelled_with_checkpoint",
+    }:
         indeterminate = False
     return {
         "completed": completed,
@@ -2935,7 +2947,7 @@ def _kb_public_failure(item: dict) -> dict:
         ),
         "stage": str(item.get("stage") or ""),
         "error_type": str(item.get("error_type") or ""),
-        "error": str(item.get("error") or ""),
+        "error": _kb_error_detail(item.get("error")),
         "recommendedAction": action,
     }
 
@@ -2958,6 +2970,7 @@ def _kb_job_snapshot(job: dict) -> dict:
         "counts": dict(job.get("counts") or {}),
         "documentProgress": dict(job.get("documentProgress") or {}),
         "summary": dict(job.get("summary") or {}),
+        "notice": str(job.get("notice") or result.get("notice") or ""),
         "usage": _kb_public_usage(
             job.get("usage")
             or result.get("usage")
@@ -3000,6 +3013,7 @@ def _kb_job_snapshot(job: dict) -> dict:
         "cancelRequested": bool(job.get("cancelRequested")),
         "retainProcessed": bool(job.get("retainProcessed")),
         "checkpointAvailable": bool(job.get("checkpointAvailable")),
+        "resumeAvailable": bool(job.get("checkpointAvailable")),
         "checkpoint": dict(job.get("checkpoint") or {}),
         "cancellable": (
             isinstance(job.get("cancelEvent"), threading.Event)
@@ -3013,9 +3027,34 @@ def _kb_job_snapshot(job: dict) -> dict:
     )
     if error_code:
         snapshot["errorCode"] = error_code
-        snapshot["error"] = str(job.get("error") or "")
+        snapshot["error"] = _kb_error_detail(job.get("error"))
         snapshot["errorDetail"] = _kb_error_detail(job.get("error"))
     return json.loads(json.dumps(snapshot, ensure_ascii=False, default=str))
+
+
+def _kb_public_status(row: dict) -> dict:
+    """Hide managed filesystem paths from the desktop status API."""
+    value = dict(row or {})
+    for key in ("source_path", "root", "active_path", "path", "manifest_path", "records_path"):
+        value.pop(key, None)
+    public_documents = []
+    for raw_document in value.get("documents") or []:
+        if not isinstance(raw_document, dict):
+            continue
+        document = dict(raw_document)
+        for key in ("abspath", "path", "source_path", "processed_path", "manifest_path"):
+            document.pop(key, None)
+        public_documents.append(document)
+    value["documents"] = public_documents
+    index = dict(value.get("index") or {})
+    index.pop("error", None)
+    value["index"] = index
+    value["failures"] = [
+        failure
+        for failure in (_kb_public_failure(item) for item in value.get("failures") or [])
+        if failure
+    ]
+    return value
 
 
 def _kb_prune_jobs_locked(now: int | None = None) -> None:
@@ -3054,9 +3093,13 @@ async def kb_jobs_handler(request):
 
 async def kb_list_handler(request):
     try:
-        return json_ok(_kb_backend().status())
+        result = _kb_backend().status()
+        result["knowledge_bases"] = [
+            _kb_public_status(row) for row in result.get("knowledge_bases") or []
+        ]
+        return json_ok(result)
     except Exception as error:
-        return json_ok({"ok": False, "error": str(error)}, status=500)
+        return json_ok({"ok": False, "error": _kb_error_detail(error)}, status=500)
 
 
 async def kb_create_handler(request):
@@ -3095,7 +3138,7 @@ async def kb_detail_status_handler(request):
                 {"ok": False, "error": "knowledge_base_not_found"},
                 status=404,
             )
-        return json_ok(rows[0])
+        return json_ok(_kb_public_status(rows[0]))
     except Exception as error:
         return json_ok({"ok": False, "error": str(error)}, status=500)
 
@@ -3131,11 +3174,11 @@ async def kb_open_handler(request):
         if not path:
             return json_ok({"ok": False, "error": "target_not_found"}, status=404)
         _open_path_default(Path(path))
-        return json_ok({"ok": True, "path": str(path)})
+        return json_ok({"ok": True})
     except OSError as error:
-        return json_ok({"ok": False, "error": str(error)}, status=500)
+        return json_ok({"ok": False, "error": _kb_error_detail(error)}, status=500)
     except Exception as error:
-        return json_ok({"ok": False, "error": str(error)}, status=400)
+        return json_ok({"ok": False, "error": _kb_error_detail(error)}, status=400)
 
 
 async def kb_source_handler(request):
@@ -3188,6 +3231,13 @@ async def kb_source_asset_handler(request):
 
 async def kb_import_handler(request):
     data = await read_json(request)
+    resume_job_id = str(data.get("resumeJobId") or data.get("resume_job_id") or "").strip()
+    resume_job = None
+    if resume_job_id:
+        with _kb_jobs_lock:
+            resume_job = _kb_jobs.get(resume_job_id)
+        if not resume_job or not resume_job.get("checkpointAvailable"):
+            return json_ok({"ok": False, "error": "kb_checkpoint_not_found"}, status=404)
     source_dir = str(data.get("sourceDir") or data.get("path") or "").strip()
     raw_files = data.get("sourceFiles") or data.get("files") or []
     if isinstance(raw_files, str):
@@ -3199,7 +3249,45 @@ async def kb_import_handler(request):
             return json_ok({"ok": False, "error": "source_file_not_found"}, status=400)
         if path not in source_files:
             source_files.append(path)
-    kb_id = str(data.get("kbId") or data.get("kb_id") or "").strip()
+    if resume_job:
+        if not source_dir:
+            source_dir = str(resume_job.get("sourceDir") or "").strip()
+        if not source_files:
+            source_files = [
+                str(path)
+                for path in (resume_job.get("sourceFiles") or [])
+                if str(path).strip()
+            ]
+    kb_id = str(
+        data.get("kbId")
+        or data.get("kb_id")
+        or (resume_job or {}).get("kbId")
+        or ""
+    ).strip()
+    if (
+        (data.get("resume") or data.get("resumeCheckpoint"))
+        and kb_id
+        and not source_dir
+        and not source_files
+    ):
+        checkpoint_inputs = _kb_backend().checkpoint_inputs(kb_id)
+        if checkpoint_inputs.get("available"):
+            source_dir = str(checkpoint_inputs.get("source_path") or "").strip()
+            source_files = [
+                str(path)
+                for path in (checkpoint_inputs.get("source_files") or [])
+                if str(path).strip()
+            ]
+    if data.get("discardCheckpoint") or data.get("discard_checkpoint"):
+        if not kb_id:
+            return json_ok({"ok": False, "error": "knowledge_base_required"}, status=400)
+        try:
+            return json_ok(_kb_backend().discard_checkpoint(kb_id))
+        except Exception as error:
+            return json_ok({"ok": False, "error": _kb_error_detail(error)}, status=400)
+    for path in source_files:
+        if not os.path.isfile(path):
+            return json_ok({"ok": False, "error": "source_file_not_found"}, status=400)
     if source_files:
         from knowledge_base.importer import MARKDOWN_EXTS, SUPPORTED_EXTS
 
@@ -3223,6 +3311,22 @@ async def kb_import_handler(request):
         detail = _kb_backend().status(kb_id).get("knowledge_bases") or []
         if not detail:
             return json_ok({"ok": False, "error": "knowledge_base_not_found"}, status=404)
+        replace_existing = bool(
+            data.get("replaceExisting")
+            or data.get("replace_existing")
+        )
+        is_resume_request = bool(data.get("resume") or data.get("resumeCheckpoint") or resume_job_id)
+        if not replace_existing and not is_resume_request:
+            duplicates = _kb_backend().existing_document_files(kb_id, source_files)
+            if duplicates:
+                return json_ok(
+                    {
+                        "ok": False,
+                        "error": "documents_already_exist",
+                        "files": duplicates,
+                    },
+                    status=409,
+                )
     elif not source_dir or not os.path.isdir(source_dir):
         return json_ok({"ok": False, "error": "source_directory_not_found"}, status=400)
     backend = _kb_backend()
@@ -3237,6 +3341,7 @@ async def kb_import_handler(request):
         "mode": "import",
         "sourceDir": source_dir,
         "sourceFiles": source_files,
+        "resumeJobId": resume_job_id,
         "kbId": kb_id or backend.kb_id_for_source(source_dir),
         "counts": {
             "scanned": 0,
@@ -3273,7 +3378,14 @@ async def kb_import_handler(request):
         "result": None,
         "error": "",
         "cancelRequested": False,
-        "retainProcessed": False,
+        "retainProcessed": bool(
+            data.get("retainProcessed")
+            or data.get("retain_processed")
+            or data.get("keepProcessed")
+        ),
+        "replaceExisting": bool(
+            data.get("replaceExisting") or data.get("replace_existing")
+        ),
         "checkpointAvailable": False,
         "checkpoint": {},
         "cancelEvent": threading.Event(),
@@ -3403,6 +3515,7 @@ async def kb_import_handler(request):
                     progress=update_progress,
                     cancelled=job["cancelEvent"].is_set,
                     retain_partial=lambda: bool(job.get("retainProcessed")),
+                    replace_existing=bool(job.get("replaceExisting")),
                 )
             else:
                 result = backend.import_kb(
@@ -3423,6 +3536,7 @@ async def kb_import_handler(request):
                     result=result,
                     usage=_kb_public_usage(result.get("usage")),
                     summary=summary,
+                    notice=str(result.get("notice") or ""),
                     updatedAt=int(time.time()),
                     current="",
                     files=[],
@@ -3456,8 +3570,16 @@ async def kb_import_handler(request):
                     current = _kb_jobs[job_id]
                     current.update(
                         ok=True,
-                        state="cancelled",
-                        phase="cancelled",
+                        state=(
+                            "cancelled_with_checkpoint"
+                            if checkpoint.get("available")
+                            else "cancelled"
+                        ),
+                        phase=(
+                            "cancelled_with_checkpoint"
+                            if checkpoint.get("available")
+                            else "cancelled"
+                        ),
                         error="",
                         updatedAt=int(time.time()),
                         current="",
@@ -3553,15 +3675,76 @@ async def kb_delete_handler(request):
     kb_id = str(request.match_info.get("kb_id") or "").strip()
     if not kb_id:
         return json_ok({"ok": False, "error": "missing_kb_id"}, status=400)
-    try:
-        result = _kb_backend().delete_kb(kb_id)
-        if not result.get("removed"):
-            return json_ok({"ok": False, "error": "knowledge_base_not_found", **result}, status=404)
-        return json_ok({"ok": True, **result})
-    except RuntimeError as error:
-        return json_ok({"ok": False, "error": str(error)}, status=409)
-    except Exception as error:
-        return json_ok({"ok": False, "error": str(error)}, status=400)
+    backend = _kb_backend()
+    detail = backend.status(kb_id).get("knowledge_bases") or []
+    if not detail:
+        return json_ok({"ok": False, "error": "knowledge_base_not_found"}, status=404)
+    with _kb_jobs_lock:
+        _kb_prune_jobs_locked()
+    job_id = f"kbdelete-{uuid.uuid4().hex[:16]}"
+    now = int(time.time())
+    job = {
+        "ok": True,
+        "jobId": job_id,
+        "state": "queued",
+        "phase": "queued",
+        "mode": "delete",
+        "kbId": kb_id,
+        "scope": "selected",
+        "targets": [{"id": kb_id, "name": detail[0].get("name") or kb_id}],
+        "done": 0,
+        "total": 1,
+        "current": detail[0].get("name") or kb_id,
+        "progress": {"completed": 0, "total": 1, "unit": "knowledge_bases", "indeterminate": True},
+        "result": None,
+        "error": "",
+        "cancelEvent": threading.Event(),
+        "cancelRequested": False,
+        "startedAt": now,
+        "updatedAt": now,
+    }
+    with _kb_jobs_lock:
+        _kb_jobs[job_id] = job
+
+    def run_delete_kb():
+        with _kb_jobs_lock:
+            current = _kb_jobs[job_id]
+            current.update(state="running", phase="deleting", updatedAt=int(time.time()))
+        try:
+            result = backend.delete_kb(kb_id, cancelled=job["cancelEvent"].is_set)
+            if not result.get("removed"):
+                raise KeyError("knowledge_base_not_found")
+            with _kb_jobs_lock:
+                _kb_jobs[job_id].update(
+                    state="completed",
+                    phase="completed",
+                    result=result,
+                    updatedAt=int(time.time()),
+                    done=1,
+                    current="",
+                    progress={"completed": 1, "total": 1, "unit": "knowledge_bases", "indeterminate": False},
+                )
+        except Exception as error:
+            if getattr(error, "code", "") == "kb_operation_cancelled":
+                state = "cancelled"
+                detail_text = ""
+            else:
+                state = "failed"
+                detail_text = str(error)
+            with _kb_jobs_lock:
+                _kb_jobs[job_id].update(
+                    ok=state == "cancelled",
+                    state=state,
+                    phase=state,
+                    error=detail_text,
+                    updatedAt=int(time.time()),
+                    current="",
+                    cancelRequested=bool(job["cancelEvent"].is_set()),
+                    progress={"completed": 0, "total": 1, "unit": "knowledge_bases", "indeterminate": False},
+                )
+
+    threading.Thread(target=run_delete_kb, name=job_id, daemon=True).start()
+    return json_ok({"ok": True, "jobId": job_id, "state": "queued"}, status=202)
 
 
 async def kb_document_delete_handler(request):
@@ -3620,6 +3803,8 @@ async def kb_document_delete_handler(request):
         "logs": [],
         "result": None,
         "error": "",
+        "cancelEvent": threading.Event(),
+        "cancelRequested": False,
         "startedAt": now,
         "updatedAt": now,
     }
@@ -3661,6 +3846,7 @@ async def kb_document_delete_handler(request):
                 data_id=target.get("data_id") or "",
                 progress=update_progress,
                 logfn=log,
+                cancelled=job["cancelEvent"].is_set,
             )
             with _kb_jobs_lock:
                 current = _kb_jobs[job_id]
@@ -3676,13 +3862,15 @@ async def kb_document_delete_handler(request):
                     progress={"completed": 1, "total": 1, "unit": "documents", "indeterminate": False},
                 )
         except Exception as error:
+            cancelled = getattr(error, "code", "") == "kb_operation_cancelled"
             with _kb_jobs_lock:
                 _kb_jobs[job_id].update(
-                    ok=False,
-                    state="failed",
-                    phase="failed",
-                    error=str(error),
+                    ok=cancelled,
+                    state="cancelled" if cancelled else "failed",
+                    phase="cancelled" if cancelled else "failed",
+                    error="" if cancelled else str(error),
                     updatedAt=int(time.time()),
+                    cancelRequested=bool(job["cancelEvent"].is_set()),
                     progress={"completed": 0, "total": 1, "unit": "documents", "indeterminate": False},
                 )
 

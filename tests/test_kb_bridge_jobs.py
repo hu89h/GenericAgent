@@ -291,6 +291,25 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         self.assertIsNone(snapshot["usage"]["embedding_api_tokens"])
         self.assertFalse(snapshot["usage"]["embedding_token_usage_reported"])
 
+    def test_public_status_does_not_expose_managed_document_paths(self):
+        public = desktop_bridge._kb_public_status({
+            "id": "kb-test",
+            "source_path": r"C:\\private\\source",
+            "documents": [{
+                "data_id": "kb-test::documents/report.md",
+                "abspath": r"C:\\private\\data\\kbs\\kb-test\\active\\processed\\documents\\report.md",
+                "source_path": r"C:\\private\\source\\report.pdf",
+                "title": "report.pdf",
+            }],
+            "failures": [{"source": "report.pdf", "error": r"C:\\private\\tmp\\failure"}],
+            "index": {"present": True, "openable": True, "schema_valid": True},
+        })
+
+        self.assertNotIn("source_path", public)
+        self.assertNotIn("abspath", public["documents"][0])
+        self.assertNotIn("source_path", public["documents"][0])
+        self.assertNotIn(r"C:\\private", json.dumps(public, ensure_ascii=False))
+
 
 if __name__ == "__main__":
     unittest.main()

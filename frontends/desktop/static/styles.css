@@ -2911,6 +2911,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
 .kb-status svg{ width:12px; height:12px; flex:0 0 auto; stroke-width:2.4; }
 .kb-status.ready{ color:var(--ok); background:color-mix(in srgb,var(--ok) 10%,var(--line-soft)); border-color:color-mix(in srgb,var(--ok) 24%,transparent); }
 .kb-status.pending{ color:var(--amber); background:color-mix(in srgb,var(--amber) 11%,var(--line-soft)); border-color:color-mix(in srgb,var(--amber) 22%,transparent); }
+.kb-status.empty{ color:var(--muted); background:var(--line-soft); border-color:var(--line); }
 .kb-card-title-row{ display:flex; align-items:center; gap:8px; min-width:0; margin-top:10px; }
 .kb-card-title{ min-width:0; flex:1 1 auto; margin:0; color:var(--txt-strong); font-size:calc(13px * var(--ui-scale)); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
 .kb-card-title-row .kb-status{ flex:0 0 auto; max-width:52%; overflow:hidden; text-overflow:ellipsis; }

@@ -919,6 +919,7 @@ const kbPageEls = {
   taskCapsule: kbEl('kb-task-capsule'), taskCapsuleTitle: kbEl('kb-task-capsule-title'),
   taskCapsulePhase: kbEl('kb-task-capsule-phase'), taskCapsuleValue: kbEl('kb-task-capsule-value'),
   build: kbEl('kb-build-modal'),
+  maintenance: kbEl('kb-maintenance-btn'),
   buildForm: kbEl('kb-build-form'), buildScope: kbEl('kb-build-scope'),
 };
 
@@ -1141,12 +1142,14 @@ function kbPhaseText(job) {
     image_analysis: 'imageAnalysis',
     records_ready: 'recordsReady',
     indexing: 'indexing',
+    deleting: 'deleting',
     validated: 'validated',
     publishing: 'publishing',
     cancelling: 'cancelling',
     completed: 'completed',
     completed_with_failures: 'completedWithFailures',
     cancelled: 'cancelled',
+    cancelled_with_checkpoint: 'cancelledWithCheckpoint',
     failed: 'failed',
   }[phase] || 'processing';
   return t(`kb.phase.${normalized}`);
@@ -1163,6 +1166,9 @@ function kbRenderLibraries() {
   if (!grid) return;
   const query = kbText(kbEl('kb-library-search')?.value).trim().toLowerCase();
   const allKbs = kbStatusKbs();
+  if (kbPageEls.maintenance) {
+    kbPageEls.maintenance.hidden = !allKbs.some(kb => !['empty', 'missing'].includes(kb.state));
+  }
   const kbs = allKbs.filter(kb => !query || `${kb.name || ''} ${kb.id || ''}`.toLowerCase().includes(query));
   grid.innerHTML = '';
   if (!kbs.length) {
@@ -1173,14 +1179,23 @@ function kbRenderLibraries() {
     const card = document.createElement('article');
     card.className = `kb-library-card${kbState.activeKb?.id === kb.id ? ' active' : ''}`;
     card.dataset.kbId = kb.id || '';
-    const isReady = ['ready', 'ready_with_warnings'].includes(kb.state);
-    const stateText = isReady ? t('kb.ready') : t('kb.notReady');
-    const statusClass = isReady ? 'ready' : 'pending';
-    const stateIcon = isReady ? GA_ICON('check') : '';
+    const stateKey = {
+      ready: 'ready',
+      ready_with_warnings: kb.source_changed ? 'sourceChanged' : 'ready',
+      empty: 'empty',
+      broken: 'broken',
+      missing: 'missing',
+      processing: 'notReady',
+    }[kb.state] || 'notReady';
+    const stateText = t(`kb.${stateKey}`);
+    const statusClass = ['ready', 'ready_with_warnings'].includes(kb.state) && !kb.source_changed
+      ? 'ready'
+      : (kb.state === 'empty' ? 'empty' : 'pending');
+    const stateIcon = statusClass === 'ready' ? GA_ICON('check') : '';
     card.innerHTML = `
       <div class="kb-card-title-row"><h3 class="kb-card-title"></h3><span class="kb-status ${statusClass}">${stateIcon}<span>${escapeHtml(stateText)}</span></span></div>
       <div class="kb-card-meta"></div>
-      <div class="kb-card-actions"><button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
+      <div class="kb-card-actions">${kb.resume_available || kb.checkpoint?.available ? `<button type="button" class="kb-link-btn kb-resume-import">${escapeHtml(t('kb.resume'))}</button><button type="button" class="kb-link-btn kb-discard-checkpoint">${escapeHtml(t('kb.discardCheckpoint'))}</button>` : ''}<button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
     card.querySelector('.kb-card-title').textContent = kb.name || kb.id || '';
     card.querySelector('.kb-card-meta').textContent = kbFormat(t('kb.libraryMeta'), {
       documents: kb.counts?.documents || 0,
@@ -1191,6 +1206,16 @@ function kbRenderLibraries() {
       void kbOpenDocuments(kb);
     });
     card.querySelector('.kb-delete-library').addEventListener('click', () => void kbDeleteLibrary(kb));
+    card.querySelector('.kb-resume-import')?.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      void kbResumeCheckpoint(kb);
+    });
+    card.querySelector('.kb-discard-checkpoint')?.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      void kbDiscardCheckpoint(kb);
+    });
     grid.appendChild(card);
   }
 }
@@ -1650,7 +1675,35 @@ async function kbAskQuestion() {
 }
 
 function kbJobTerminal(job) {
-  return ['completed', 'completed_with_failures', 'failed', 'cancelled'].includes(kbText(job?.state));
+  return ['completed', 'completed_with_failures', 'failed', 'cancelled', 'cancelled_with_checkpoint'].includes(kbText(job?.state));
+}
+
+async function kbResumeCheckpoint(kb) {
+  if (!kb?.id) return;
+  try {
+    const result = await window.ga.kbImport({ kbId: kb.id, resume: true });
+    if (!result.jobId) throw new Error(result.error || t('err.kbImport'));
+    await kbTrackJob('import', result.jobId);
+  } catch (error) {
+    showError(`${t('err.kbImport')}: ${error.message || error}`);
+  }
+}
+
+async function kbDiscardCheckpoint(kb) {
+  if (!kb?.id) return;
+  const confirmed = await showConfirmDialog({
+    title: t('kb.discardCheckpoint'),
+    message: t('kb.discardCheckpointConfirm'),
+    okText: t('kb.discardCheckpoint'),
+    okKind: 'danger',
+  });
+  if (!confirmed) return;
+  try {
+    await window.ga.kbImport({ kbId: kb.id, discardCheckpoint: true });
+    await kbRefresh({ force: true });
+  } catch (error) {
+    showError(`${t('err.kbImport')}: ${error.message || error}`);
+  }
 }
 
 function kbJobKind(job, fallback = '') {
@@ -2129,6 +2182,9 @@ function kbSetTask(job, kind) {
       .map(action => kbGuidanceKey(action))
       .filter(Boolean)
       .map(key => `<div>${escapeHtml(t(key))}</div>`);
+    if (terminal && job.notice === 'embedding_cache_rebuilt') {
+      messages.unshift(`<div>${escapeHtml(t('kb.embeddingCacheRebuilt'))}</div>`);
+    }
     if (terminal && job.checkpointAvailable) {
       messages.unshift(`<div>${escapeHtml(t('kb.checkpointReady'))}</div>`);
     }
@@ -2150,7 +2206,7 @@ function kbSetTask(job, kind) {
   }
 
   if (kbPageEls.taskCancel) {
-    const cancellableKind = ['import', 'reindex', 'retry_image_analysis'].includes(kind);
+    const cancellableKind = ['import', 'reindex', 'retry_image_analysis', 'delete'].includes(kind);
     const cancellable = cancellableKind && job.cancellable !== false;
     kbPageEls.taskCancel.hidden = terminal || !cancellable;
     kbPageEls.taskCancel.disabled = !!job.cancelRequested || job.state === 'cancelling';
@@ -2268,7 +2324,7 @@ async function kbCancelTrackedJob() {
     !jobId
     || kbJobTerminal(job)
     || job?.cancelRequested
-    || !['import', 'reindex', 'retry_image_analysis'].includes(kind)
+    || !['import', 'reindex', 'retry_image_analysis', 'delete'].includes(kind)
     || job?.cancellable === false
   ) return;
   let cancelOptions = {};
@@ -2367,7 +2423,25 @@ async function kbPickAndAddDocuments() {
       kbOpenTrackedTask();
       return;
     }
-    const result = await window.ga.kbImport({ kbId: kb.id, sourceFiles: files });
+    let result;
+    try {
+      result = await window.ga.kbImport({ kbId: kb.id, sourceFiles: files });
+    } catch (error) {
+      const code = error?.data?.error || '';
+      if (code !== 'documents_already_exist') throw error;
+      const replace = await showConfirmDialog({
+        title: t('kb.replaceExisting'),
+        message: t('kb.replaceExistingConfirm'),
+        okText: t('kb.replaceExisting'),
+        okKind: 'primary',
+      });
+      if (!replace) return;
+      result = await window.ga.kbImport({
+        kbId: kb.id,
+        sourceFiles: files,
+        replaceExisting: true,
+      });
+    }
     if (!result.jobId) throw new Error(result.error || t('err.kbImport'));
     await kbTrackJob('import', result.jobId);
     await kbRefresh({ force: true });
@@ -2432,9 +2506,9 @@ async function kbDeleteLibrary(kb) {
   });
   if (!confirmed) return;
   try {
-    await window.ga.kbDelete(kb.id, { deleteData: true });
-    kbState.documentLists.delete(kb.id);
-    await kbRefresh({ force: true });
+    const result = await window.ga.kbDelete(kb.id, { deleteData: true });
+    if (!result.jobId) throw new Error(result.error || t('err.kbDelete'));
+    await kbTrackJob('delete', result.jobId);
   }
   catch (error) { showError(`${t('err.kbDelete')}: ${error.message || error}`); }
 }
@@ -2443,11 +2517,19 @@ async function kbOpenBuildModal(preselectedKbId = '') {
   if (!kbPageEls.buildScope) return;
   await kbRefresh();
   kbPageEls.buildScope.innerHTML = '';
-  for (const kb of kbStatusKbs()) {
+  const maintenanceKbs = kbStatusKbs().filter(kb => !['empty', 'missing'].includes(kb.state));
+  for (const kb of maintenanceKbs) {
     const option = document.createElement('option');
     option.value = kb.id;
     option.textContent = kb.name || kb.id;
     option.selected = Boolean(preselectedKbId && kb.id === preselectedKbId);
+    kbPageEls.buildScope.appendChild(option);
+  }
+  if (!maintenanceKbs.length) {
+    const option = document.createElement('option');
+    option.textContent = t('kb.noReady');
+    option.disabled = true;
+    option.selected = true;
     kbPageEls.buildScope.appendChild(option);
   }
   const reindex = kbPageEls.build?.querySelector('input[name="maintenanceOperation"][value="reindex"]');

@@ -576,20 +576,7 @@ class KnowledgeBaseRetriever:
                 if result.get("score_type") == "zvec_sparse" or item.get("score_type") not in ("zvec", "zvec_sparse"):
                     item.update(result)
 
-        dense_vector = sparse_vector = None
-        if mode in ("rrf", "vector"):
-            try:
-                dense_vector = self._embed_texts([query])[0]
-            except Exception as error:
-                self._record_search_error({"id": ""}, "dense", error)
-                raise RuntimeError(f"vector retrieval unavailable: {error}") from error
-        if mode in ("rrf", "sparse"):
-            try:
-                sparse_vector = self._embed_sparse_texts([query], text_type="query")[0]
-            except Exception as error:
-                self._record_search_error({"id": ""}, "sparse", error)
-                raise RuntimeError(f"sparse retrieval unavailable: {error}") from error
-
+        targets: list[tuple[dict, str | list[str] | None]] = []
         for kb in self._load_config():
             if kb_id and kb["id"] != kb_id:
                 continue
@@ -616,6 +603,40 @@ class KnowledgeBaseRetriever:
                     scoped_file_names = list(dict.fromkeys(scoped_file_names))
                     if not scoped_file_names:
                         continue
+            targets.append((kb, scoped_file_names))
+
+        target_health: dict[str, bool] = {}
+        for kb, _file_names in targets:
+            zvec_path = self._zvec_path(kb["path"])
+            healthy = os.path.isdir(zvec_path)
+            probe = getattr(self._index, "probe", None)
+            if healthy and callable(probe):
+                try:
+                    state = probe(kb["path"])
+                    healthy = all(
+                        bool(state.get(key))
+                        for key in ("present", "openable", "schema_valid", "embedding_matches")
+                    )
+                except Exception as error:
+                    healthy = False
+                    self._record_search_error(kb, "zvec", str(error))
+            target_health[kb["id"]] = healthy
+        has_zvec_target = any(target_health.values())
+        dense_vector = sparse_vector = None
+        if has_zvec_target and mode in ("rrf", "vector"):
+            try:
+                dense_vector = self._embed_texts([query])[0]
+            except Exception as error:
+                self._record_search_error({"id": ""}, "dense", error)
+                raise RuntimeError(f"vector retrieval unavailable: {error}") from error
+        if has_zvec_target and mode in ("rrf", "sparse"):
+            try:
+                sparse_vector = self._embed_sparse_texts([query], text_type="query")[0]
+            except Exception as error:
+                self._record_search_error({"id": ""}, "sparse", error)
+                raise RuntimeError(f"sparse retrieval unavailable: {error}") from error
+
+        for kb, scoped_file_names in targets:
             # Exact figure/table-number matches (图3-1, 表4.1, ...) are injected
             # for every mode, on purpose — including mode="vector" and
             # mode="sparse".  When the user names a specific figure/table, that
@@ -630,7 +651,7 @@ class KnowledgeBaseRetriever:
                 4.0,
                 "ref_exact",
             )
-            if not os.path.isdir(self._zvec_path(kb["path"])):
+            if not target_health.get(kb["id"], False):
                 self._record_search_error(kb, "zvec", "Zvec index directory is missing")
                 continue
             if mode in ("rrf", "vector") and dense_vector is not None:

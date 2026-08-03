@@ -140,6 +140,19 @@ class RetrievalModeTests(unittest.TestCase):
 
         self.assertEqual(self.index.sparse_calls, 0)
 
+    def test_broken_index_does_not_embed_query(self):
+        self.index.probe = lambda _path: {
+            "present": True,
+            "openable": False,
+            "schema_valid": False,
+            "embedding_matches": False,
+        }
+        self.retriever._search_exact_image_refs = lambda *_args, **_kwargs: []
+        result = self.retriever.search("query", mode="rrf")
+        self.assertEqual(self.index.dense_calls, 0)
+        self.assertEqual(self.index.sparse_calls, 0)
+        self.assertFalse(result["results"])
+
     def test_selection_scope_passes_document_filter_to_each_channel(self):
         calls = []
 
