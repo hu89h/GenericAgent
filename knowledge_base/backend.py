@@ -138,6 +138,7 @@ def import_kb(
     progress=None,
     cancelled=None,
     retain_partial=None,
+    rescan_source: bool = False,
 ) -> dict:
     source = config.canonical_source_path(source_dir)
     kb_id = config.kb_id_for_source(source)
@@ -149,6 +150,7 @@ def import_kb(
             progress=progress,
             cancelled=cancelled,
             retain_partial=retain_partial,
+            rescan_source=rescan_source,
         )
     finally:
         _mark_processing(kb_id, False)
@@ -166,7 +168,8 @@ def add_documents(
     progress=None,
     cancelled=None,
     retain_partial=None,
-    replace_existing=False,
+    duplicate_policy: str = "skip",
+    rescan_source: bool = False,
 ) -> dict:
     value = str(kb_id or "").strip()
     _mark_processing(value, True)
@@ -177,7 +180,8 @@ def add_documents(
             progress=progress,
             cancelled=cancelled,
             retain_partial=retain_partial,
-            replace_existing=replace_existing,
+            duplicate_policy=duplicate_policy,
+            rescan_source=rescan_source,
         )
     finally:
         _mark_processing(value, False)
@@ -224,7 +228,7 @@ def reindex(kb_id: str, *, progress=None, logfn=None, cancelled=None) -> dict:
 
 
 def retry_image_analysis(
-    kb_id: str, *, progress=None, logfn=None, cancelled=None
+    kb_id: str, *, progress=None, logfn=None, cancelled=None, retain_partial=None
 ) -> dict:
     value = str(kb_id or "").strip()
     _mark_processing(value, True)
@@ -234,6 +238,7 @@ def retry_image_analysis(
             progress=progress,
             logfn=logfn,
             cancelled=cancelled,
+            retain_partial=retain_partial,
         )
     finally:
         _mark_processing(value, False)
@@ -270,6 +275,35 @@ def existing_document_files(kb_id: str, source_files: list[str]) -> list[str]:
         for path in source_files or []
         if os.path.normcase(os.path.realpath(str(path))) in existing
     ]
+
+
+def source_inputs(kb_id: str) -> dict:
+    """Resolve registered source files privately for a server-side rescan."""
+    kb = config.kb_by_id(str(kb_id or "").strip())
+    if not kb:
+        return {"available": False}
+    source_path = str(kb.get("source_path") or "").strip()
+    if source_path:
+        return {
+            "available": os.path.isdir(source_path),
+            "source_dir": source_path,
+            "source_files": [],
+        }
+    manifest = _load_manifest(kb)
+    files = []
+    seen = set()
+    for entry in manifest.get("files") or []:
+        if not isinstance(entry, dict) or entry.get("kind") != "document":
+            continue
+        path = str(entry.get("source_path") or "").strip()
+        if not path or not os.path.isfile(path):
+            continue
+        identity = os.path.normcase(os.path.realpath(path))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        files.append(path)
+    return {"available": bool(files), "source_dir": "", "source_files": files}
 
 
 def _load_manifest(kb: dict) -> dict:
@@ -447,7 +481,10 @@ def kb_status(kb: dict) -> dict:
         "last_success_at": max(success_times) if success_times else None,
         "usage": usage,
         "checkpoint": checkpoint,
-        "resume_available": bool(checkpoint.get("available")),
+        "resume_available": bool(
+            checkpoint.get("available")
+            and str(checkpoint.get("mode") or "import") in {"import", "add_documents"}
+        ),
         "failures": failures,
         "documents": documents,
     }

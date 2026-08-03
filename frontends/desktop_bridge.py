@@ -2955,6 +2955,11 @@ def _kb_public_failure(item: dict) -> dict:
 def _kb_job_snapshot(job: dict) -> dict:
     """Expose only stable, user-facing task state to the desktop page."""
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    checkpoint = dict(job.get("checkpoint") or {})
+    checkpoint_available = bool(
+        job.get("checkpointAvailable")
+        and str(checkpoint.get("mode") or "import") in {"import", "add_documents"}
+    )
     failures = job.get("failures") or result.get("failures") or []
     documents = job.get("documents") or result.get("documents") or []
     snapshot = {
@@ -2971,6 +2976,9 @@ def _kb_job_snapshot(job: dict) -> dict:
         "documentProgress": dict(job.get("documentProgress") or {}),
         "summary": dict(job.get("summary") or {}),
         "notice": str(job.get("notice") or result.get("notice") or ""),
+        "skippedFiles": [str(item) for item in (job.get("skippedFiles") or result.get("skipped_files") or [])],
+        "replacedFiles": [str(item) for item in (job.get("replacedFiles") or result.get("replaced_files") or [])],
+        "processedFiles": [str(item) for item in (job.get("processedFiles") or result.get("processed_files") or [])],
         "usage": _kb_public_usage(
             job.get("usage")
             or result.get("usage")
@@ -3012,9 +3020,9 @@ def _kb_job_snapshot(job: dict) -> dict:
         "documentName": str(job.get("documentName") or ""),
         "cancelRequested": bool(job.get("cancelRequested")),
         "retainProcessed": bool(job.get("retainProcessed")),
-        "checkpointAvailable": bool(job.get("checkpointAvailable")),
-        "resumeAvailable": bool(job.get("checkpointAvailable")),
-        "checkpoint": dict(job.get("checkpoint") or {}),
+        "checkpointAvailable": checkpoint_available,
+        "resumeAvailable": checkpoint_available,
+        "checkpoint": checkpoint,
         "cancellable": (
             isinstance(job.get("cancelEvent"), threading.Event)
             and job.get("state") not in _KB_TERMINAL_JOB_STATES
@@ -3239,6 +3247,13 @@ async def kb_import_handler(request):
         if not resume_job or not resume_job.get("checkpointAvailable"):
             return json_ok({"ok": False, "error": "kb_checkpoint_not_found"}, status=404)
     source_dir = str(data.get("sourceDir") or data.get("path") or "").strip()
+    rescan_source = bool(data.get("rescanSource") or data.get("rescan_source"))
+    raw_duplicate_policy = data.get("duplicatePolicy", data.get("duplicate_policy"))
+    duplicate_policy = ""
+    if raw_duplicate_policy is not None and str(raw_duplicate_policy).strip():
+        duplicate_policy = str(raw_duplicate_policy).strip().lower()
+        if duplicate_policy not in {"skip", "replace"}:
+            return json_ok({"ok": False, "error": "invalid_duplicate_policy"}, status=400)
     raw_files = data.get("sourceFiles") or data.get("files") or []
     if isinstance(raw_files, str):
         raw_files = [raw_files]
@@ -3285,6 +3300,21 @@ async def kb_import_handler(request):
             return json_ok(_kb_backend().discard_checkpoint(kb_id))
         except Exception as error:
             return json_ok({"ok": False, "error": _kb_error_detail(error)}, status=400)
+    if rescan_source:
+        if not kb_id:
+            return json_ok({"ok": False, "error": "knowledge_base_required"}, status=400)
+        try:
+            inputs = _kb_backend().source_inputs(kb_id)
+        except Exception as error:
+            return json_ok({"ok": False, "error": _kb_error_detail(error)}, status=400)
+        if not inputs.get("available"):
+            return json_ok({"ok": False, "error": "source_not_available"}, status=400)
+        source_dir = str(inputs.get("source_dir") or "").strip()
+        source_files = [
+            str(path)
+            for path in (inputs.get("source_files") or [])
+            if str(path).strip()
+        ]
     for path in source_files:
         if not os.path.isfile(path):
             return json_ok({"ok": False, "error": "source_file_not_found"}, status=400)
@@ -3311,12 +3341,8 @@ async def kb_import_handler(request):
         detail = _kb_backend().status(kb_id).get("knowledge_bases") or []
         if not detail:
             return json_ok({"ok": False, "error": "knowledge_base_not_found"}, status=404)
-        replace_existing = bool(
-            data.get("replaceExisting")
-            or data.get("replace_existing")
-        )
         is_resume_request = bool(data.get("resume") or data.get("resumeCheckpoint") or resume_job_id)
-        if not replace_existing and not is_resume_request:
+        if not duplicate_policy and not is_resume_request and not rescan_source:
             duplicates = _kb_backend().existing_document_files(kb_id, source_files)
             if duplicates:
                 return json_ok(
@@ -3383,9 +3409,8 @@ async def kb_import_handler(request):
             or data.get("retain_processed")
             or data.get("keepProcessed")
         ),
-        "replaceExisting": bool(
-            data.get("replaceExisting") or data.get("replace_existing")
-        ),
+        "duplicatePolicy": duplicate_policy or "skip",
+        "rescanSource": rescan_source,
         "checkpointAvailable": False,
         "checkpoint": {},
         "cancelEvent": threading.Event(),
@@ -3515,7 +3540,8 @@ async def kb_import_handler(request):
                     progress=update_progress,
                     cancelled=job["cancelEvent"].is_set,
                     retain_partial=lambda: bool(job.get("retainProcessed")),
-                    replace_existing=bool(job.get("replaceExisting")),
+                    duplicate_policy=str(job.get("duplicatePolicy") or "skip"),
+                    rescan_source=bool(job.get("rescanSource")),
                 )
             else:
                 result = backend.import_kb(
@@ -3524,6 +3550,7 @@ async def kb_import_handler(request):
                     progress=update_progress,
                     cancelled=job["cancelEvent"].is_set,
                     retain_partial=lambda: bool(job.get("retainProcessed")),
+                    rescan_source=bool(job.get("rescanSource")),
                 )
             summary = result.get("summary") or {}
             failures = result.get("failures") or []
@@ -3537,6 +3564,9 @@ async def kb_import_handler(request):
                     usage=_kb_public_usage(result.get("usage")),
                     summary=summary,
                     notice=str(result.get("notice") or ""),
+                    skippedFiles=list(result.get("skipped_files") or []),
+                    replacedFiles=list(result.get("replaced_files") or []),
+                    processedFiles=list(result.get("processed_files") or []),
                     updatedAt=int(time.time()),
                     current="",
                     files=[],
@@ -4018,12 +4048,14 @@ async def _kb_maintenance_handler(request, operation: str):
                 if operation == "reindex"
                 else backend.retry_image_analysis
             )
-            result = method(
-                kb_id,
-                progress=update_progress,
-                logfn=log,
-                cancelled=job["cancelEvent"].is_set,
-            )
+            maintenance_kwargs = {
+                "progress": update_progress,
+                "logfn": log,
+                "cancelled": job["cancelEvent"].is_set,
+            }
+            if operation == "retry_image_analysis":
+                maintenance_kwargs["retain_partial"] = lambda: bool(job.get("retainProcessed"))
+            result = method(kb_id, **maintenance_kwargs)
             if operation == "reindex":
                 stats = result.get("stats") or {}
                 summary = {

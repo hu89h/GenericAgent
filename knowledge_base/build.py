@@ -50,6 +50,8 @@ class RecordBuilder:
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
         include_files: set[str] | None = None,
+        existing_image_records: dict[str, dict] | None = None,
+        retry_images_only: bool = False,
     ) -> RecordBuildResult:
         """Build records for all staged documents or a selected subset.
 
@@ -132,6 +134,8 @@ class RecordBuilder:
                         log,
                         image_jobs=image_jobs,
                         image_index=image_index,
+                        existing_images=existing_image_records,
+                        retry_only=retry_images_only,
                     )
                     image_records.extend(image_result.get("assets") or [])
                     for missing in image_result.get("missing") or []:
@@ -166,7 +170,9 @@ class RecordBuilder:
         for record in image_records:
             check_cancelled(cancelled)
             analysis = image_results.get(record.get("image_id"))
-            self.assets.apply_image_analysis(record, analysis)
+            preserved = analysis is None and record.pop("_preserved_analysis", False)
+            if not preserved:
+                self.assets.apply_image_analysis(record, analysis)
             capability_warning = str(record.get("analysis_warning") or "").strip()
             if capability_warning:
                 document = str(record.get("file_name") or "")

@@ -226,6 +226,38 @@ class IngestPipeline:
         return str(value or "").replace("\\", "/").lstrip("/")
 
     @classmethod
+    def _prune_staged_processed(cls, stage: str, manifest: dict) -> None:
+        """Remove processed files no longer referenced by a rescanned source."""
+        root = os.path.realpath(os.path.join(stage, "processed"))
+        if not os.path.isdir(root):
+            return
+        keep_files = {
+            cls._relative_key(value)
+            for entry in (manifest.get("files") or [])
+            if isinstance(entry, dict)
+            for value in (entry.get("processed") or [])
+            if cls._relative_key(value)
+        }
+        keep_assets = set()
+        for value in keep_files:
+            path = Path(value)
+            keep_assets.add(str(path.parent / f"{path.stem}.assets-").replace("\\", "/"))
+        for directory, dirnames, filenames in os.walk(root, topdown=True):
+            dirnames[:] = [name for name in dirnames if name != ".kb_index"]
+            for filename in filenames:
+                absolute = os.path.join(directory, filename)
+                relative = cls._relative_key(os.path.relpath(absolute, root))
+                if relative not in keep_files and filename.lower().endswith((".md", ".markdown")):
+                    with contextlib.suppress(OSError):
+                        os.remove(absolute)
+            for name in list(dirnames):
+                if ".assets-" not in name:
+                    continue
+                relative = cls._relative_key(os.path.relpath(os.path.join(directory, name), root))
+                if not any(relative == prefix or relative.startswith(prefix) for prefix in keep_assets):
+                    remove_tree(os.path.join(directory, name), ignore_errors=True)
+
+    @classmethod
     def _manifest_document_target(
         cls,
         manifest: dict,
@@ -403,6 +435,8 @@ class IngestPipeline:
         existing_records: list[dict] | None = None,
         include_files: set[str] | None = None,
         existing_sources: dict | None = None,
+        existing_image_records: dict[str, dict] | None = None,
+        retry_images_only: bool = False,
     ) -> dict:
         """Build a complete index from the staged processed documents and publish it."""
         check_cancelled(cancelled)
@@ -422,6 +456,10 @@ class IngestPipeline:
         }
         if include_files is not None:
             build_kwargs["include_files"] = include_files
+        if existing_image_records is not None:
+            build_kwargs["existing_image_records"] = existing_image_records
+        if retry_images_only:
+            build_kwargs["retry_images_only"] = True
         built = self.records.build(stage_kb, manifest, **build_kwargs)
         check_cancelled(cancelled)
         records = list(existing_records or [])
@@ -573,6 +611,7 @@ class IngestPipeline:
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
         retain_partial: Callable[[], bool] | None = None,
+        rescan_source: bool = False,
     ) -> dict:
         source_path = config.canonical_source_path(source_dir)
         kb_id = config.kb_id_for_source(source_path)
@@ -589,6 +628,20 @@ class IngestPipeline:
                 == os.path.normcase(source_path)
                 else None
             )
+            active_manifest = None
+            if resume_manifest is None and rescan_source and os.path.isdir(config.active_root(kb_id)):
+                try:
+                    with open(os.path.join(config.active_root(kb_id), "manifest.json"), encoding="utf-8") as handle:
+                        candidate = json.load(handle)
+                    if (
+                        isinstance(candidate, dict)
+                        and os.path.normcase(os.path.realpath(str(candidate.get("source_path") or "")))
+                        == os.path.normcase(source_path)
+                    ):
+                        active_manifest = candidate
+                        resume_manifest = candidate
+                except Exception:
+                    active_manifest = None
             if resume_manifest:
                 self._emit(
                     progress,
@@ -599,6 +652,8 @@ class IngestPipeline:
                 )
             else:
                 remove_tree(stage)
+            if active_manifest is not None:
+                shutil.copytree(config.active_root(kb_id), stage, dirs_exist_ok=True)
             remove_tree(os.path.join(root, "rollback"))
             try:
                 self.index_builder.begin_build()
@@ -616,6 +671,8 @@ class IngestPipeline:
                     prepare_kwargs["retain_on_cancel"] = retain_partial
                 prepared = self.documents.prepare(source_path, **prepare_kwargs)
                 check_cancelled(cancelled)
+                if active_manifest is not None:
+                    self._prune_staged_processed(stage, prepared["manifest"])
                 self._ensure_image_cache(kb_id)
                 check_cancelled(cancelled)
                 return self._build_and_publish(
@@ -655,7 +712,8 @@ class IngestPipeline:
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
         retain_partial: Callable[[], bool] | None = None,
-        replace_existing: bool = False,
+        duplicate_policy: str = "skip",
+        rescan_source: bool = False,
     ) -> dict:
         """Append selected external files and rebuild one complete staged index."""
         value = str(kb_id or "").strip()
@@ -663,6 +721,11 @@ class IngestPipeline:
             raise ValueError("知识库 ID 不能为空")
         with mutation_lock:
             check_cancelled(cancelled)
+            duplicate_policy = str(duplicate_policy or "skip").strip().lower()
+            if duplicate_policy not in {"skip", "replace"}:
+                raise ValueError("duplicatePolicy 必须是 skip 或 replace")
+            replace_existing = duplicate_policy == "replace"
+            rescan_source = bool(rescan_source)
             kb = config.kb_by_id(value)
             if kb is None:
                 raise KeyError("knowledge_base_not_found")
@@ -715,13 +778,48 @@ class IngestPipeline:
                         identity = os.path.normcase(os.path.realpath(source_value))
                         existing_source_paths.add(identity)
                         existing_entries_by_path[identity] = entry
+                current_fingerprints = {
+                    os.path.normcase(os.path.realpath(str(item.get("path") or ""))): item
+                    for item in (old_manifest.get("source_fingerprint") or [])
+                    if isinstance(item, dict) and item.get("path") and os.path.isabs(str(item.get("path") or ""))
+                }
+
+                def source_changed(path: str) -> bool:
+                    if not rescan_source:
+                        return False
+                    fingerprint = current_fingerprints.get(os.path.normcase(os.path.realpath(path)))
+                    if not fingerprint:
+                        return True
+                    try:
+                        stat = os.stat(path)
+                    except OSError:
+                        return True
+                    if (
+                        int(fingerprint.get("size") or -1) != stat.st_size
+                        or int(fingerprint.get("mtime_ns") or -1) != stat.st_mtime_ns
+                    ):
+                        return True
+                    expected_sha = str(fingerprint.get("sha256") or "").strip().lower()
+                    if expected_sha:
+                        import hashlib
+                        digest = hashlib.sha256()
+                        with open(path, "rb") as handle:
+                            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                                digest.update(block)
+                        return digest.hexdigest().lower() != expected_sha
+                    return False
                 selected = []
+                skipped_files = []
+                replaced_files = []
                 selected_keys = set()
                 for raw in source_files or []:
                     path = os.path.realpath(os.path.expanduser(str(raw or "")))
                     if not os.path.isfile(path):
                         raise ValueError(f"source file not found: {path}")
                     identity = os.path.normcase(path)
+                    if identity in existing_source_paths and not resume_checkpoint and not replace_existing and not source_changed(path):
+                        skipped_files.append(os.path.basename(path))
+                        continue
                     if (
                         resume_checkpoint
                         or replace_existing
@@ -729,8 +827,46 @@ class IngestPipeline:
                     ) and identity not in selected_keys:
                         selected.append(path)
                         selected_keys.add(identity)
-                if not selected:
-                    raise ValueError("所选文件均已在知识库中")
+                        if (replace_existing or source_changed(path)) and identity in existing_source_paths:
+                            replaced_files.append(os.path.basename(path))
+                removed_entries = []
+                if rescan_source and not resume_checkpoint:
+                    selected_identities_for_rescan = {
+                        os.path.normcase(os.path.realpath(path)) for path in source_files or []
+                    }
+                    removed_entries = [
+                        item for item in (old_manifest.get("files") or [])
+                        if isinstance(item, dict)
+                        and item.get("kind") == "document"
+                        and str(item.get("source_path") or "").strip()
+                        and os.path.normcase(os.path.realpath(str(item.get("source_path")))) not in selected_identities_for_rescan
+                    ]
+                if not selected and not removed_entries:
+                    remove_tree(stage)
+                    return {
+                        "ok": True,
+                        "state": str(old_manifest.get("state") or "ready"),
+                        "kb_id": value,
+                        "summary": dict(old_manifest.get("summary") or {}),
+                        "usage": {},
+                        "failures": list(old_manifest.get("failures") or []),
+                        "documents": list(old_manifest.get("document_results") or []),
+                        "skipped_files": skipped_files,
+                        "replaced_files": [],
+                        "processed_files": [],
+                        "notice": "all_documents_skipped",
+                        "noop": True,
+                    }
+                if rescan_source and not selected and removed_entries:
+                    # A rescan that only detects deleted files still needs a
+                    # source representative so DocumentProcessor can rebuild
+                    # the manifest while reusing every unchanged document.
+                    selected = list(source_files or [])
+                build_selected_identities = {
+                    os.path.normcase(os.path.realpath(path))
+                    for path in selected
+                    if not (rescan_source and not replace_existing and not source_changed(path))
+                }
                 prepare_kwargs = {
                     "stage_root": stage,
                     "kb_id": value,
@@ -740,18 +876,30 @@ class IngestPipeline:
                 }
                 if resume_checkpoint:
                     prepare_kwargs["resume_manifest"] = old_manifest
+                elif rescan_source:
+                    prepare_kwargs["resume_manifest"] = old_manifest
                 if retain_partial is not None:
                     prepare_kwargs["retain_on_cancel"] = retain_partial
                 prepared = self.documents.prepare_files(selected, **prepare_kwargs)
                 merged = dict(old_manifest)
                 prepared_files = list(prepared["manifest"].get("files") or [])
-                new_processed_files = {
-                    str(processed).replace("\\", "/").lstrip("/")
-                    for entry in prepared_files
-                    if isinstance(entry, dict)
-                    for processed in entry.get("processed") or []
-                    if str(processed or "").strip()
-                }
+                if rescan_source:
+                    new_processed_files = {
+                        str(processed).replace("\\", "/").lstrip("/")
+                        for entry in prepared_files
+                        if isinstance(entry, dict)
+                        and os.path.normcase(os.path.realpath(str(entry.get("source_path") or ""))) in build_selected_identities
+                        for processed in entry.get("processed") or []
+                        if str(processed or "").strip()
+                    }
+                else:
+                    new_processed_files = {
+                        str(processed).replace("\\", "/").lstrip("/")
+                        for entry in prepared_files
+                        if isinstance(entry, dict)
+                        for processed in entry.get("processed") or []
+                        if str(processed or "").strip()
+                    }
                 existing_records = None
                 existing_index_sources = None
                 records_file = os.path.join(stage, "records.jsonl")
@@ -763,8 +911,10 @@ class IngestPipeline:
                     for path in selected
                 }
                 replaced_processed_files = set()
-                if replace_existing and not resume_checkpoint:
+                if (replace_existing or rescan_source) and not resume_checkpoint:
                     for path in selected:
+                        if rescan_source and not replace_existing and not source_changed(path):
+                            continue
                         old_entry = existing_entries_by_path.get(
                             os.path.normcase(os.path.realpath(path))
                         )
@@ -774,6 +924,12 @@ class IngestPipeline:
                                 for item in (old_entry.get("processed") or [])
                                 if str(item).strip()
                             )
+                    for old_entry in removed_entries:
+                        replaced_processed_files.update(
+                            str(item).replace("\\", "/").lstrip("/")
+                            for item in (old_entry.get("processed") or [])
+                            if str(item).strip()
+                        )
                 selected_identities = {
                     os.path.normcase(os.path.realpath(path)) for path in selected
                 }
@@ -781,6 +937,13 @@ class IngestPipeline:
                 def keep_existing_entry(item: dict) -> bool:
                     if resume_checkpoint:
                         return item.get("source") not in selected_labels
+                    if rescan_source:
+                        source_value = str(item.get("source_path") or "").strip()
+                        if not source_value:
+                            return True
+                        return os.path.normcase(os.path.realpath(source_value)) in {
+                            os.path.normcase(os.path.realpath(path)) for path in source_files or []
+                        }
                     if not replace_existing:
                         return True
                     source_value = str(item.get("source_path") or "").strip()
@@ -796,7 +959,7 @@ class IngestPipeline:
                     if isinstance(item, dict)
                     and keep_existing_entry(item)
                 ]
-                if replace_existing and replaced_processed_files:
+                if (replace_existing or rescan_source) and replaced_processed_files:
                     processed_root = os.path.realpath(os.path.join(stage, "processed"))
                     for relative in replaced_processed_files:
                         target = os.path.realpath(os.path.join(processed_root, relative))
@@ -808,6 +971,26 @@ class IngestPipeline:
                         stem = os.path.splitext(os.path.basename(target))[0]
                         for asset_dir in glob.glob(os.path.join(parent, f"{stem}.assets-*")):
                             remove_tree(asset_dir)
+                if rescan_source and isinstance(existing_index_sources, dict):
+                    stale_records = [
+                        record for record in (existing_records or [])
+                        if self._relative_key(record.get("file_name")) in replaced_processed_files
+                    ]
+                    stale_images = {
+                        self._relative_key(record.get("image_path"))
+                        for record in stale_records
+                        if record.get("kind") == "image" and record.get("image_path")
+                    }
+                    existing_index_sources = dict(existing_index_sources)
+                    existing_index_sources["documents"] = [
+                        item for item in (existing_index_sources.get("documents") or [])
+                        if self._relative_key(item.get("path")) not in replaced_processed_files
+                    ]
+                    existing_index_sources["images"] = {
+                        key: value
+                        for key, value in (existing_index_sources.get("images") or {}).items()
+                        if self._relative_key(key) not in stale_images
+                    }
                 merged["files"] = existing_files + prepared_files
                 merged["source_path"] = kb.get("source_path") or ""
                 fingerprints = {
@@ -815,11 +998,15 @@ class IngestPipeline:
                     for item in old_manifest.get("source_fingerprint") or []
                     if isinstance(item, dict) and item.get("path")
                 }
-                fingerprints.update({
+                prepared_fingerprints = {
                     str(item.get("path") or "").casefold(): item
                     for item in prepared["manifest"].get("source_fingerprint") or []
                     if isinstance(item, dict) and item.get("path")
-                })
+                }
+                if rescan_source:
+                    fingerprints = prepared_fingerprints
+                else:
+                    fingerprints.update(prepared_fingerprints)
                 merged["source_fingerprint"] = sorted(
                     fingerprints.values(), key=lambda item: str(item.get("path") or "").casefold()
                 )
@@ -835,7 +1022,7 @@ class IngestPipeline:
                 ]
                 merged["failures"] = failures
                 merged["name"] = kb.get("name") or value
-                return self._build_and_publish(
+                result = self._build_and_publish(
                     kb_id=value,
                     name=kb.get("name") or value,
                     source_path=kb.get("source_path") or "",
@@ -854,6 +1041,12 @@ class IngestPipeline:
                     ),
                     existing_sources=(existing_index_sources if existing_records else None),
                 )
+                result.update({
+                    "skipped_files": skipped_files,
+                    "replaced_files": replaced_files,
+                    "processed_files": [os.path.basename(path) for path in selected],
+                })
+                return result
             except KnowledgeBaseCancelled:
                 if callable(retain_partial) and retain_partial():
                     self._write_checkpoint_marker(
@@ -904,6 +1097,7 @@ class IngestPipeline:
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        retain_partial: Callable[[], bool] | None = None,
     ) -> dict:
         """Retry image understanding against the published processed content."""
         with mutation_lock:
@@ -911,18 +1105,12 @@ class IngestPipeline:
             if kb is None or not kb.get("exists"):
                 raise KeyError("knowledge_base_not_found")
             check_cancelled(cancelled)
-            try:
-                from .providers import vision
-                available = bool(vision.enabled())
-            except Exception:
-                available = False
-            if not available:
-                raise RuntimeError("知识库图片理解未启用或没有可用的多模态配置")
             return self._repair_processed_content(
                 kb,
                 progress=progress,
                 logfn=logfn,
                 cancelled=cancelled,
+                retain_partial=retain_partial,
             )
 
     def _reindex_records(
@@ -1022,6 +1210,7 @@ class IngestPipeline:
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        retain_partial: Callable[[], bool] | None = None,
     ) -> dict:
         """Retry processed image analyses and publish a rebuilt complete index."""
         kb_id = str(kb.get("id") or "")
@@ -1033,10 +1222,78 @@ class IngestPipeline:
         if not isinstance(manifest, dict):
             raise ValueError("知识库清单格式无效")
 
+        from .providers import vision
+
+        try:
+            records = self.records.read_records(kb["records_path"])
+        except FileNotFoundError:
+            # Older or manually assembled active packages may not have the
+            # unified record stream yet.  The staged Markdown is still a
+            # valid source for a one-time image retry and will produce the
+            # records during the transactional rebuild.
+            records = []
+        image_records = {
+            str(record.get("data_id") or ""): record
+            for record in records
+            if record.get("kind") == "image" and record.get("data_id")
+        }
+        current_image_meta = dict(vision.build_analysis_meta() or {})
+        old_image_meta = dict(
+            (manifest.get("processing_fingerprint") or {}).get("image_analysis")
+            or (manifest.get("index_sources") or {}).get("image_analysis")
+            or {}
+        )
+        image_meta_changed = bool(image_records) and old_image_meta != current_image_meta
+        pending_count = sum(
+            1
+            for record in image_records.values()
+            if image_meta_changed
+            or bool(record.get("analysis_error"))
+            or not str(record.get("description") or record.get("table_markdown") or "").strip()
+        )
+        has_image_failures = any(
+            isinstance(item, dict)
+            and str(item.get("stage") or "") in {"image_analysis", "image_capability"}
+            for item in (manifest.get("failures") or [])
+        )
+        if not pending_count and not has_image_failures:
+            summary = dict(manifest.get("summary") or {})
+            summary.update({"image_retry_pending": 0, "image_retry_processed": 0})
+            return {
+                "ok": True,
+                "state": str(manifest.get("state") or "ready"),
+                "kb_id": kb_id,
+                "summary": summary,
+                "usage": {},
+                "failures": list(manifest.get("failures") or []),
+                "documents": list(manifest.get("document_results") or []),
+                "notice": "no_pending_image_analysis",
+                "noop": True,
+            }
+        try:
+            if not vision.enabled():
+                raise RuntimeError("知识库图片理解未启用或没有可用的多模态配置")
+        except RuntimeError:
+            raise
+        except Exception as error:
+            raise RuntimeError("知识库图片理解未启用或没有可用的多模态配置") from error
+
         # Start a fresh usage window before retrying image analysis.  The
         # subsequent index build must retain those image counters and the
         # model snapshot instead of resetting them after analysis completes.
         self.index_builder.begin_build()
+        retry_existing_images = image_records
+        if image_meta_changed:
+            # A changed model/prompt/encoding fingerprint invalidates every
+            # successful description.  Omit complete entries from the reuse
+            # map so RecordBuilder schedules them again; failed entries stay
+            # in the map and are still considered incomplete.
+            retry_existing_images = {
+                key: value
+                for key, value in image_records.items()
+                if bool(value.get("analysis_error"))
+                or not str(value.get("description") or value.get("table_markdown") or "").strip()
+            }
         stage = config.staging_root(kb_id)
         remove_tree(stage)
         try:
@@ -1055,6 +1312,7 @@ class IngestPipeline:
                 current=name,
                 processed=0,
                 total=total_documents,
+                pending_images=pending_count,
             )
             # RecordBuilder recomputes image failures from the staged Markdown.
             # Keep unrelated source/parse failures, but do not carry stale VLM
@@ -1076,8 +1334,32 @@ class IngestPipeline:
                 progress=progress,
                 logfn=logfn,
                 cancelled=cancelled,
+                existing_image_records=retry_existing_images,
+                retry_images_only=True,
             )
+            retry_failures = sum(
+                1
+                for item in (result.get("failures") or [])
+                if isinstance(item, dict)
+                and str(item.get("stage") or "") == "image_analysis"
+            )
+            result.setdefault("summary", {}).update({
+                "image_retry_pending": pending_count,
+                "image_retry_processed": max(0, pending_count - retry_failures),
+            })
             return result
+        except KnowledgeBaseCancelled:
+            if callable(retain_partial) and retain_partial():
+                self._write_checkpoint_marker(
+                    stage=stage,
+                    kb_id=kb_id,
+                    name=name,
+                    source_path=source_path,
+                    mode="retry_image_analysis",
+                )
+            else:
+                remove_tree(stage)
+            raise
         except Exception:
             remove_tree(stage)
             raise
@@ -1139,6 +1421,7 @@ class IngestPipeline:
                     empty_manifest.update({
                         "state": "empty",
                         "files": [],
+                        "source_fingerprint": [],
                         "failures": [],
                         "document_results": [],
                         "index_sources": {},
@@ -1232,6 +1515,28 @@ class IngestPipeline:
                         failures.append(dict(failure))
 
                 sources = dict(manifest.get("index_sources") or {})
+                kept_file_names = {
+                    self._relative_key(record.get("file_name"))
+                    for record in kept_records
+                    if self._relative_key(record.get("file_name"))
+                }
+                if isinstance(sources.get("documents"), dict):
+                    sources["documents"] = {
+                        key: value
+                        for key, value in sources["documents"].items()
+                        if self._relative_key(key) in kept_file_names
+                    }
+                if isinstance(sources.get("images"), dict):
+                    kept_images = {
+                        self._relative_key(record.get("image_path"))
+                        for record in kept_records
+                        if record.get("kind") == "image" and record.get("image_path")
+                    }
+                    sources["images"] = {
+                        key: value
+                        for key, value in sources["images"].items()
+                        if self._relative_key(key) in kept_images
+                    }
                 sources["records_sha256"] = self.records.records_sha256(records_path)
                 stage_kb = {
                     **kb,
@@ -1252,6 +1557,21 @@ class IngestPipeline:
                 next_manifest = dict(manifest)
                 next_manifest["files"] = remaining_files
                 next_manifest["failures"] = failures
+                removed_source_path = str(entry.get("source_path") or "").strip()
+                expected_fingerprints = []
+                for fingerprint in manifest.get("source_fingerprint") or []:
+                    if not isinstance(fingerprint, dict):
+                        continue
+                    fingerprint_source = self._relative_key(
+                        fingerprint.get("source") or fingerprint.get("path")
+                    )
+                    if removed_source and fingerprint_source == removed_source:
+                        continue
+                    if removed_source_path and fingerprint.get("path"):
+                        if os.path.normcase(os.path.realpath(str(fingerprint.get("path")))) == os.path.normcase(os.path.realpath(removed_source_path)):
+                            continue
+                    expected_fingerprints.append(fingerprint)
+                next_manifest["source_fingerprint"] = expected_fingerprints
                 next_manifest["index_sources"] = sources
                 next_manifest["index_stats"] = stats
                 next_manifest["state"] = "ready_with_warnings" if failures else "ready"

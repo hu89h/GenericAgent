@@ -675,7 +675,7 @@ class ImageAssetProcessor:
 
     def image_records_for_document(
         self, kb, rel, data_id, body, title, log,
-        image_jobs=None, image_index=None,
+        image_jobs=None, image_index=None, existing_images=None, retry_only=False,
     ):
         """Build one canonical asset record for every image reference in a document.
 
@@ -700,6 +700,7 @@ class ImageAssetProcessor:
         analysis_meta = self._image_client.analysis_meta()
         analysis_enabled = client is not None and getattr(client, "enabled", lambda: False)()
         local_jobs = image_jobs if image_jobs is not None else {}
+        existing_images = existing_images or {}
         for occurrence in occurrences:
             image_rel = os.path.normpath(
                 os.path.join(os.path.dirname(rel), occurrence.path)
@@ -728,44 +729,6 @@ class ImageAssetProcessor:
                 if client is not None
                 else "general"
             )
-            if analysis_enabled:
-                job = ImageContent(
-                    image_sha=image_sha,
-                    image_path=image_rel,
-                    image_abspath=image_abs,
-                    focus=focus,
-                    title=occurrence.title,
-                    near_text=occurrence.near_text,
-                    ref_candidates=list(occurrence.ref_candidates),
-                    analysis_meta=analysis_meta,
-                    origins=[{"key": rel, "name": title}],
-                )
-                existing = local_jobs.get(image_sha)
-                if existing is None:
-                    job.focus_rank = {"general": 0, "figure": 1, "table": 2}.get(focus, 0)
-                    job.contexts = [occurrence.near_text] if occurrence.near_text else []
-                    local_jobs[image_sha] = job
-                else:
-                    current_rank = int(existing.focus_rank)
-                    new_rank = {"general": 0, "figure": 1, "table": 2}.get(focus, 0)
-                    if new_rank > current_rank:
-                        existing.focus = focus
-                        existing.title = occurrence.title
-                        existing.near_text = occurrence.near_text
-                        existing.ref_candidates = list(occurrence.ref_candidates)
-                        existing.focus_rank = new_rank
-                    else:
-                        merged = list(existing.ref_candidates or [])
-                        for candidate in occurrence.ref_candidates:
-                            if candidate not in merged:
-                                merged.append(candidate)
-                        existing.ref_candidates = merged
-                    contexts = existing.contexts
-                    if occurrence.near_text and occurrence.near_text not in contexts and len(contexts) < 3:
-                        contexts.append(occurrence.near_text)
-                        existing.near_text = "\n".join(contexts)[:1200]
-                    if not any(origin.get("key") == rel for origin in existing.origins):
-                        existing.origins.append({"key": rel, "name": title})
             ref_sig = f"occ{occurrence.occurrence_id:06d}"
             # Occurrence-level data_id layered on the document-level id (see
             # build.py). The "::image::" marker lets callers tell the two
@@ -804,6 +767,58 @@ class ImageAssetProcessor:
                 "uncertain": [],
                 "analysis_error": "",
             }
+            existing = existing_images.get(image_data_id)
+            needs_analysis = (
+                existing is None
+                or bool(existing.get("analysis_error"))
+                or not str(existing.get("description") or existing.get("table_markdown") or "").strip()
+            )
+            if retry_only and existing is not None and not needs_analysis:
+                for key in (
+                    "description", "table_markdown", "uncertain", "analysis_error",
+                    "analysis_warning", "ref_key", "display_label",
+                ):
+                    if key in existing:
+                        asset[key] = existing[key]
+                asset["_preserved_analysis"] = True
+            if analysis_enabled and (not retry_only or needs_analysis):
+                job = ImageContent(
+                    image_sha=image_sha,
+                    image_path=image_rel,
+                    image_abspath=image_abs,
+                    focus=focus,
+                    title=occurrence.title,
+                    near_text=occurrence.near_text,
+                    ref_candidates=list(occurrence.ref_candidates),
+                    analysis_meta=analysis_meta,
+                    origins=[{"key": rel, "name": title}],
+                )
+                current_job = local_jobs.get(image_sha)
+                if current_job is None:
+                    job.focus_rank = {"general": 0, "figure": 1, "table": 2}.get(focus, 0)
+                    job.contexts = [occurrence.near_text] if occurrence.near_text else []
+                    local_jobs[image_sha] = job
+                else:
+                    current_rank = int(current_job.focus_rank)
+                    new_rank = {"general": 0, "figure": 1, "table": 2}.get(focus, 0)
+                    if new_rank > current_rank:
+                        current_job.focus = focus
+                        current_job.title = occurrence.title
+                        current_job.near_text = occurrence.near_text
+                        current_job.ref_candidates = list(occurrence.ref_candidates)
+                        current_job.focus_rank = new_rank
+                    else:
+                        merged = list(current_job.ref_candidates or [])
+                        for candidate in occurrence.ref_candidates:
+                            if candidate not in merged:
+                                merged.append(candidate)
+                        current_job.ref_candidates = merged
+                    contexts = current_job.contexts
+                    if occurrence.near_text and occurrence.near_text not in contexts and len(contexts) < 3:
+                        contexts.append(occurrence.near_text)
+                        current_job.near_text = "\n".join(contexts)[:1200]
+                    if not any(origin.get("key") == rel for origin in current_job.origins):
+                        current_job.origins.append({"key": rel, "name": title})
             asset["body"] = self.asset_body(asset)
             assets.append(asset)
         if image_jobs is None and local_jobs:
