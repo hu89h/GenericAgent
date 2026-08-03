@@ -351,6 +351,8 @@ def kb_status(kb: dict) -> dict:
         if value
     ]
     checkpoint = _runtime().pipeline.checkpoint_status(kb["id"])
+    usage_raw = _runtime().usage.load(kb["path"]) if kb.get("exists") else {}
+    usage = IndexBuilder.usage_summary(usage_raw) if usage_raw else {}
     return {
         "id": kb["id"],
         "name": kb["name"],
@@ -371,6 +373,7 @@ def kb_status(kb: dict) -> dict:
             "failures": len(failures),
         },
         "last_success_at": max(success_times) if success_times else None,
+        "usage": usage,
         "checkpoint": checkpoint,
         "failures": failures,
         "documents": documents,

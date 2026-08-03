@@ -176,6 +176,46 @@ class ZvecIndex:
             tokens = embeddings.drain_usage()
             dense_usage["api_tokens"] += int(tokens.get("dense") or 0)
             sparse_usage["api_tokens"] += int(tokens.get("sparse") or 0)
+            dense_usage["input_tokens"] += int(tokens.get("dense_input_tokens") or 0)
+            sparse_usage["input_tokens"] += int(tokens.get("sparse_input_tokens") or 0)
+            dense_usage["output_tokens"] += int(tokens.get("dense_output_tokens") or 0)
+            sparse_usage["output_tokens"] += int(tokens.get("sparse_output_tokens") or 0)
+            dense_usage["token_usage_reported"] = bool(
+                dense_usage.get("token_usage_reported")
+                or tokens.get("dense_reported")
+            )
+            sparse_usage["token_usage_reported"] = bool(
+                sparse_usage.get("token_usage_reported")
+                or tokens.get("sparse_reported")
+            )
+            dense_usage["input_token_usage_reported"] = bool(
+                dense_usage.get("input_token_usage_reported")
+                or tokens.get("dense_input_reported")
+            )
+            sparse_usage["input_token_usage_reported"] = bool(
+                sparse_usage.get("input_token_usage_reported")
+                or tokens.get("sparse_input_reported")
+            )
+            dense_usage["output_token_usage_reported"] = bool(
+                dense_usage.get("output_token_usage_reported")
+                or tokens.get("dense_output_reported")
+            )
+            sparse_usage["output_token_usage_reported"] = bool(
+                sparse_usage.get("output_token_usage_reported")
+                or tokens.get("sparse_output_reported")
+            )
+            dense_usage["cache_hits"] = int(dense_usage.get("cache_hits") or 0) + int(
+                tokens.get("dense_cache_hits") or 0
+            )
+            sparse_usage["cache_hits"] = int(sparse_usage.get("cache_hits") or 0) + int(
+                tokens.get("sparse_cache_hits") or 0
+            )
+            dense_usage["api_calls"] = int(dense_usage.get("api_calls") or 0) + int(
+                tokens.get("dense_api_calls") or 0
+            )
+            sparse_usage["api_calls"] = int(sparse_usage.get("api_calls") or 0) + int(
+                tokens.get("sparse_api_calls") or 0
+            )
 
             docs = [
                 zvec.Doc(

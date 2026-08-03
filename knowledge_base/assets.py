@@ -845,7 +845,14 @@ class ImageAssetProcessor:
         cancelled: Callable[[], bool] | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ):
-        delta = {"calls": 0, "cached": 0, "failed": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        delta = {
+            "calls": 0,
+            "cached": 0,
+            "failed": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "token_usage_reported": False,
+        }
         image_sha = job.image_sha
         analysis_meta = job.analysis_meta
         focus = str(job.focus or "general")
@@ -891,6 +898,14 @@ class ImageAssetProcessor:
             prompt_tokens, completion_tokens = self._usage_tokens(usage)
             delta["prompt_tokens"] += prompt_tokens
             delta["completion_tokens"] += completion_tokens
+            if isinstance(usage, dict):
+                delta["token_usage_reported"] = any(
+                    key in usage
+                    for key in (
+                        "prompt_tokens", "input_tokens",
+                        "completion_tokens", "output_tokens",
+                    )
+                )
             # S1: a failed parse/analysis (error-marked) must NOT be cached —
             # otherwise garbage freezes into the permanent VLM cache and is
             # never retried.  The API call still happened, so usage above is
@@ -1077,6 +1092,7 @@ class ImageAssetProcessor:
                 "analysis_total": len(jobs),
                 "image_documents": progress_snapshot(),
                 "image_activity": activity,
+                "usage": self._usage_tracker.summary(self._usage_tracker.snapshot()),
             })
 
         def handle_job_progress(job: ImageContent, payload: dict) -> None:

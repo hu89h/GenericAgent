@@ -49,6 +49,23 @@ class FakeResponse:
 
 
 class KnowledgeBaseRateLimitTests(unittest.TestCase):
+    def test_embedding_usage_records_api_response_and_missing_usage_separately(self):
+        embeddings.drain_usage()
+
+        embeddings._add_api_tokens("dense", {"data": []})
+        missing = embeddings.drain_usage()
+        self.assertEqual(missing["dense_api_calls"], 1)
+        self.assertFalse(missing["dense_reported"])
+
+        embeddings._add_api_tokens("dense", {"usage": {"input_tokens": 7}})
+        reported = embeddings.drain_usage()
+        self.assertEqual(reported["dense_api_calls"], 1)
+        self.assertTrue(reported["dense_reported"])
+        self.assertEqual(reported["dense"], 7)
+        self.assertTrue(reported["dense_input_reported"])
+        self.assertEqual(reported["dense_input_tokens"], 7)
+        self.assertFalse(reported["dense_output_reported"])
+
     def test_cancelled_request_does_not_start_or_retry_http(self):
         cancelled = threading.Event()
         cancelled.set()

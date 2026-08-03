@@ -24,27 +24,73 @@ from . import provider_http, provider_settings, rate_limit
 # to record true ``api_tokens``; cache hits never call the API and so add
 # nothing here.
 _usage_lock = threading.Lock()
-_usage_acc: Dict[str, int] = {"dense": 0, "sparse": 0}
+_usage_acc: Dict[str, int | bool] = {
+    "dense": 0,
+    "sparse": 0,
+    "dense_input_tokens": 0,
+    "sparse_input_tokens": 0,
+    "dense_output_tokens": 0,
+    "sparse_output_tokens": 0,
+    "dense_reported": False,
+    "sparse_reported": False,
+    "dense_input_reported": False,
+    "sparse_input_reported": False,
+    "dense_output_reported": False,
+    "sparse_output_reported": False,
+    "dense_cache_hits": 0,
+    "sparse_cache_hits": 0,
+    "dense_api_calls": 0,
+    "sparse_api_calls": 0,
+}
 
 
 def _add_api_tokens(output_type: str, body: Dict) -> None:
+    with _usage_lock:
+        call_key = f"{output_type}_api_calls"
+        _usage_acc[call_key] = int(_usage_acc.get(call_key) or 0) + 1
     usage = body.get("usage") if isinstance(body, dict) else None
     if not isinstance(usage, dict):
         return
+    reported = any(
+        key in usage for key in ("total_tokens", "prompt_tokens", "input_tokens")
+    )
+    input_reported = any(key in usage for key in ("prompt_tokens", "input_tokens"))
+    output_reported = any(key in usage for key in ("completion_tokens", "output_tokens"))
     tokens = int(usage.get("total_tokens") or usage.get("prompt_tokens")
                  or usage.get("input_tokens") or 0)
-    if tokens <= 0:
+    if not reported and tokens <= 0:
         return
     with _usage_lock:
+        _usage_acc[f"{output_type}_reported"] = bool(
+            _usage_acc.get(f"{output_type}_reported") or reported
+        )
         _usage_acc[output_type] = _usage_acc.get(output_type, 0) + tokens
+        if input_reported:
+            _usage_acc[f"{output_type}_input_reported"] = True
+            _usage_acc[f"{output_type}_input_tokens"] = int(
+                _usage_acc.get(f"{output_type}_input_tokens") or 0
+            ) + int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        if output_reported:
+            _usage_acc[f"{output_type}_output_reported"] = True
+            _usage_acc[f"{output_type}_output_tokens"] = int(
+                _usage_acc.get(f"{output_type}_output_tokens") or 0
+            ) + int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
 
 
-def drain_usage() -> Dict[str, int]:
+def _add_cache_hits(output_type: str, count: int) -> None:
+    if count <= 0:
+        return
+    with _usage_lock:
+        key = f"{output_type}_cache_hits"
+        _usage_acc[key] = int(_usage_acc.get(key) or 0) + int(count)
+
+
+def drain_usage() -> Dict[str, int | bool]:
     """Return accumulated embedding token usage and reset the accumulator."""
     with _usage_lock:
         drained = dict(_usage_acc)
         for key in _usage_acc:
-            _usage_acc[key] = 0
+            _usage_acc[key] = False if key.endswith("_reported") else 0
     return drained
 
 
@@ -287,6 +333,7 @@ def _embed_cached(texts, *, batch_size, output_type, text_type, request_fn, norm
             missing.append((i, text, key))
         else:
             out[i] = normalize_fn(cached)
+    _add_cache_hits(output_type, len(texts) - len(missing))
     if missing:
         size = max(1, int(batch_size))
         missing_batches = _partition_batches(

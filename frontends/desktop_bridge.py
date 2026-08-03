@@ -2765,6 +2765,39 @@ def _kb_public_job_item(item: dict) -> dict:
     return public
 
 
+def _kb_public_usage(value: dict | None) -> dict:
+    """Expose provider-reported KB usage without leaking raw provider data."""
+    if not isinstance(value, dict):
+        return {}
+    integer_fields = (
+        "image_calls", "image_cached", "image_failed",
+        "image_prompt_tokens", "image_completion_tokens",
+        "embedding_calls", "embedding_texts", "embedding_cache_hits",
+        "embedding_api_calls",
+        "embedding_api_tokens",
+        "embedding_input_tokens", "embedding_output_tokens",
+    )
+    public = {"available": bool(value.get("available"))}
+    for field in ("image_model", "embedding_model"):
+        # Model names are display metadata; cap them defensively and never
+        # expose endpoint/key configuration through this endpoint.
+        public[field] = str(value.get(field) or "")[:160]
+    for field in integer_fields:
+        raw = value.get(field)
+        if raw is None:
+            public[field] = None
+            continue
+        try:
+            public[field] = max(0, int(raw))
+        except (TypeError, ValueError):
+            public[field] = None
+    public["image_token_usage_reported"] = bool(value.get("image_token_usage_reported"))
+    public["embedding_token_usage_reported"] = bool(value.get("embedding_token_usage_reported"))
+    public["embedding_input_token_usage_reported"] = bool(value.get("embedding_input_token_usage_reported"))
+    public["embedding_output_token_usage_reported"] = bool(value.get("embedding_output_token_usage_reported"))
+    return public
+
+
 def _kb_public_document_result(item: dict) -> dict:
     if not isinstance(item, dict):
         return {}
@@ -2925,6 +2958,11 @@ def _kb_job_snapshot(job: dict) -> dict:
         "counts": dict(job.get("counts") or {}),
         "documentProgress": dict(job.get("documentProgress") or {}),
         "summary": dict(job.get("summary") or {}),
+        "usage": _kb_public_usage(
+            job.get("usage")
+            or result.get("usage")
+            or (result.get("stats") or {}).get("usage")
+        ),
         "progress": dict(job.get("progress") or {}),
         "documents": [
             public
@@ -3224,6 +3262,7 @@ async def kb_import_handler(request):
         "files": [],
         "documents": [],
         "imageDocuments": [],
+        "usage": {},
         "progress": {
             "completed": 0,
             "total": 0,
@@ -3272,6 +3311,8 @@ async def kb_import_handler(request):
             }:
                 current["current"] = ""
             current["progress"] = _kb_progress_from_event(event)
+            if isinstance(event.get("usage"), dict):
+                current["usage"] = _kb_public_usage(event["usage"])
             if isinstance(event.get("image_documents"), list) and event["image_documents"]:
                 current["imageDocuments"] = [
                     dict(item)
@@ -3380,6 +3421,7 @@ async def kb_import_handler(request):
                     state=state,
                     phase=state,
                     result=result,
+                    usage=_kb_public_usage(result.get("usage")),
                     summary=summary,
                     updatedAt=int(time.time()),
                     current="",
@@ -3680,6 +3722,7 @@ async def _kb_maintenance_handler(request, operation: str):
         "documents": [],
         "imageDocuments": [],
         "imageActivity": {},
+        "usage": {},
         "failures": [],
         "counts": {
             "analysis_completed": 0,
@@ -3755,6 +3798,8 @@ async def _kb_maintenance_handler(request, operation: str):
             # The top-level counter is set to 1 only after the operation
             # publishes successfully below.
             current["progress"] = _kb_progress_from_event(event)
+            if isinstance(event.get("usage"), dict):
+                current["usage"] = _kb_public_usage(event["usage"])
             if isinstance(event.get("image_documents"), list) and event["image_documents"]:
                 current["imageDocuments"] = [
                     dict(item)
@@ -3815,6 +3860,9 @@ async def _kb_maintenance_handler(request, operation: str):
                     state=state,
                     phase=state,
                     result=result,
+                    usage=_kb_public_usage(
+                        result.get("usage") or (result.get("stats") or {}).get("usage")
+                    ),
                     updatedAt=int(time.time()),
                     done=1,
                     current="",

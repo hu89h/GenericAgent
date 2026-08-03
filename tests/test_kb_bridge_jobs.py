@@ -261,6 +261,36 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
             "reindex",
         )
 
+    def test_snapshot_exposes_provider_usage_and_keeps_unknown_tokens_unknown(self):
+        snapshot = desktop_bridge._kb_job_snapshot({
+            "jobId": "kbimp-usage",
+            "mode": "import",
+            "state": "completed",
+            "result": {
+                "usage": {
+                    "available": True,
+                    "image_calls": 2,
+                    "image_model": "vision-model",
+                    "image_prompt_tokens": None,
+                    "image_completion_tokens": None,
+                    "image_token_usage_reported": False,
+                    "embedding_calls": 2,
+                    "embedding_model": "embedding-model",
+                    "embedding_texts": 10,
+                    "embedding_api_calls": 2,
+                    "embedding_api_tokens": None,
+                    "embedding_token_usage_reported": False,
+                },
+            },
+        })
+
+        self.assertEqual(snapshot["usage"]["image_calls"], 2)
+        self.assertEqual(snapshot["usage"]["image_model"], "vision-model")
+        self.assertEqual(snapshot["usage"]["embedding_model"], "embedding-model")
+        self.assertIsNone(snapshot["usage"]["image_prompt_tokens"])
+        self.assertIsNone(snapshot["usage"]["embedding_api_tokens"])
+        self.assertFalse(snapshot["usage"]["embedding_token_usage_reported"])
+
 
 if __name__ == "__main__":
     unittest.main()

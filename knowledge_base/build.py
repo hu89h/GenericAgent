@@ -11,8 +11,9 @@ from typing import Callable
 from . import documents
 from .assets import ImageAssetProcessor
 from .cancellation import KnowledgeBaseCancelled, check_cancelled
-from .providers import vision
+from .providers import provider_settings, vision
 from .schema import normalize_record
+from .usage import UsageTracker
 
 
 @dataclass
@@ -279,26 +280,23 @@ class IndexBuilder:
         self.usage = usage_tracker
 
     def begin_build(self) -> None:
-        self.usage.set_current(self.usage.empty())
+        usage = self.usage.empty()
+        # Snapshot model names at the start of the mutation.  These names are
+        # display metadata only; credentials and endpoints never enter the
+        # persisted usage report.
+        try:
+            usage["models"] = {
+                "image": str(provider_settings.vision_config().get("model") or ""),
+                "embedding": str(provider_settings.embedding_config().get("model") or ""),
+            }
+        except Exception:
+            # Usage reporting must not make an otherwise valid build fail.
+            pass
+        self.usage.set_current(usage)
 
     @staticmethod
     def usage_summary(usage: dict) -> dict:
-        image = usage.get("image_analysis") or {}
-        dense = usage.get("embedding") or {}
-        sparse = usage.get("sparse_embedding") or {}
-        return {
-            "image_calls": image.get("calls", 0),
-            "image_cached": image.get("cached", 0),
-            "image_failed": image.get("failed", 0),
-            "image_prompt_tokens": image.get("prompt_tokens", 0),
-            "image_completion_tokens": image.get("completion_tokens", 0),
-            "embedding_calls": dense.get("calls", 0),
-            "embedding_texts": dense.get("texts", 0),
-            "embedding_api_tokens": dense.get("api_tokens", 0),
-            "sparse_embedding_calls": sparse.get("calls", 0),
-            "sparse_embedding_texts": sparse.get("texts", 0),
-            "sparse_embedding_api_tokens": sparse.get("api_tokens", 0),
-        }
+        return UsageTracker.summary(usage)
 
     def build(
         self,
@@ -338,6 +336,7 @@ class IndexBuilder:
                 "phase": "validated",
                 "processed": len(records),
                 "total": len(records),
+                "usage": self.usage_summary(usage),
                 **stats,
             })
         return {**stats, "usage": self.usage_summary(usage)}

@@ -503,6 +503,7 @@ class IngestPipeline:
             "state": manifest["state"],
             "kb": kb,
             "summary": summary,
+            "usage": dict(index_stats.get("usage") or {}),
             "failures": failures,
             "documents": document_results,
         }
@@ -512,6 +513,7 @@ class IngestPipeline:
             current="",
             documents=document_results,
             result=result,
+            usage=result["usage"],
             **summary,
         )
         return result
@@ -876,6 +878,10 @@ class IngestPipeline:
         if not isinstance(manifest, dict):
             raise ValueError("知识库清单格式无效")
 
+        # Start a fresh usage window before retrying image analysis.  The
+        # subsequent index build must retain those image counters and the
+        # model snapshot instead of resetting them after analysis completes.
+        self.index_builder.begin_build()
         stage = config.staging_root(kb_id)
         remove_tree(stage)
         try:
