@@ -54,8 +54,13 @@ def _config() -> Dict[str, object]:
         "api_key": cfg.get("apikey") or "",
         "model": cfg.get("model") or "",
         "protocol": str(cfg.get("protocol") or "openai").strip().lower(),
-        "timeout": int(cfg.get("read_timeout") or cfg.get("timeout") or 120),
-        "retries": int(cfg.get("max_retries") or 4),
+        # Allow each image request to wait up to three minutes.  Retries are
+        # still bounded by the configured attempt count, but there is no
+        # separate wall-clock cap that can abort a slow model prematurely.
+        "timeout": max(180, int(cfg.get("read_timeout") or cfg.get("timeout") or 180)),
+        # ``post_json.retries`` is the total attempt count.  Four attempts
+        # means the initial request plus at most three retries.
+        "retries": min(4, max(1, int(cfg.get("max_retries") or 4))),
         "max_tokens": int(cfg.get("max_tokens") or 8192),
         "rpm_limit": max(1, int(os.environ.get("GA_KB_VLM_RPM", "30000"))),
         "tpm_limit": max(1, int(os.environ.get("GA_KB_VLM_TPM", "5000000"))),
@@ -232,6 +237,7 @@ def _vision_chat(
     prompt_text: str,
     *,
     cancelled: Callable[[], bool] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> Dict[str, object]:
     """POST one build-time text+image request and parse its JSON reply."""
     cfg = _config()
@@ -282,6 +288,8 @@ def _vision_chat(
             estimated_tokens=cfg["token_reserve"],
             usage_tokens=usage_tokens,
             cancelled=cancelled,
+            on_progress=on_progress,
+            total_timeout=None,
         )
         content = "".join(
             str(block.get("text") or "")
@@ -310,6 +318,8 @@ def _vision_chat(
             estimated_tokens=cfg["token_reserve"],
             usage_tokens=usage_tokens,
             cancelled=cancelled,
+            on_progress=on_progress,
+            total_timeout=None,
         )
         choice = body["choices"][0]
         content = choice["message"]["content"]
@@ -334,6 +344,7 @@ def analyze_image(
     near_text: str = "",
     ref_candidates: list[str] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> Dict[str, object]:
     if not enabled():
         return {}
@@ -341,4 +352,5 @@ def analyze_image(
         path,
         _prompt(focus, title, near_text, ref_candidates or []),
         cancelled=cancelled,
+        on_progress=on_progress,
     )

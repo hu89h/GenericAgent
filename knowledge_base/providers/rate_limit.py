@@ -114,6 +114,7 @@ class SlidingWindowRateLimiter:
         estimated_tokens: int,
         *,
         cancelled: Callable[[], bool] | None = None,
+        deadline: float | None = None,
     ) -> Reservation:
         requested_tokens = max(1, int(estimated_tokens or 1))
         if requested_tokens > self.tpm:
@@ -128,6 +129,8 @@ class SlidingWindowRateLimiter:
             check_cancelled(cancelled)
             with self._lock:
                 now = self._clock()
+                if deadline is not None and now >= float(deadline):
+                    raise TimeoutError("rate limiter wait exceeded request deadline")
                 self._purge(now)
                 recent = (
                     [
@@ -156,16 +159,20 @@ class SlidingWindowRateLimiter:
                     self._tokens += requested_tokens
                     return reservation
                 wait_seconds = self._wait_seconds(now, requested_tokens)
+                if deadline is not None:
+                    wait_seconds = min(wait_seconds, max(0.0, float(deadline) - now))
+                    if wait_seconds <= 0:
+                        raise TimeoutError("rate limiter wait exceeded request deadline")
             # Wake periodically so configuration changes, clock jumps, and test
             # clocks do not leave a worker sleeping for a whole minute.
             if callable(cancelled):
                 # Keep the limiter responsive to cancellation without changing
                 # the injected sleep behavior used by existing tests.
                 responsive_wait = min(wait_seconds, 1.0)
-                deadline = time.monotonic() + responsive_wait
+                wake_deadline = time.monotonic() + responsive_wait
                 while True:
                     check_cancelled(cancelled)
-                    remaining = deadline - time.monotonic()
+                    remaining = wake_deadline - time.monotonic()
                     if remaining <= 0:
                         break
                     self._sleep(min(0.1, remaining))

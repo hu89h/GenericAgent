@@ -86,6 +86,9 @@ class ImageProgressTests(unittest.TestCase):
             {"key": "documents/a.md", "name": "alpha.pdf", "completed": 2, "total": 2},
             {"key": "documents/b.md", "name": "beta.pdf", "completed": 1, "total": 1},
         ])
+        self.assertEqual(final["image_activity"]["total"], 2)
+        self.assertEqual(final["image_activity"]["completed"], 2)
+        self.assertEqual(final["image_activity"]["cached"], 0)
 
     def test_cancellation_stops_before_submitting_more_sequential_images(self):
         processor = ImageAssetProcessor(usage_tracker=UsageTracker(), concurrency=1)

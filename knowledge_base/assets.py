@@ -843,6 +843,7 @@ class ImageAssetProcessor:
         job: ImageContent,
         *,
         cancelled: Callable[[], bool] | None = None,
+        on_progress: Callable[[dict], None] | None = None,
     ):
         delta = {"calls": 0, "cached": 0, "failed": 0, "prompt_tokens": 0, "completion_tokens": 0}
         image_sha = job.image_sha
@@ -859,6 +860,8 @@ class ImageAssetProcessor:
         cached = self.load_cached_analysis(kb_path, image_sha, analysis_meta, focus, context_key)
         if cached:
             delta["cached"] += 1
+            if callable(on_progress):
+                on_progress({"event": "cache_hit"})
             result = cached.get("result", cached)
             return result, delta
         if os.environ.get("GA_KB_IMAGE_ANALYSIS_CACHE_ONLY", "").strip().lower() in ("1", "true", "yes", "on"):
@@ -875,6 +878,9 @@ class ImageAssetProcessor:
             }
             if callable(cancelled):
                 analysis_kwargs["cancelled"] = cancelled
+            if callable(on_progress):
+                on_progress({"event": "request_started"})
+                analysis_kwargs["on_progress"] = on_progress
             analysis = client.analyze_image(image_abs, **analysis_kwargs)
             # Do not persist a response that completed after the user asked to
             # stop.  The surrounding pipeline will remove staging, but this
@@ -962,6 +968,10 @@ class ImageAssetProcessor:
         workers = max(1, int(os.environ.get("GA_KB_IMAGE_CONCURRENCY", str(self._concurrency))))
         workers = min(workers, len(jobs))
         log(f"  图片分析任务 {len(jobs)} 个，并发 {workers}...")
+        activity_lock = threading.Lock()
+        job_activity: dict[str, dict[str, Any]] = {}
+        done = 0
+        cached_count = 0
         document_progress: dict[str, dict[str, Any]] = {}
         for job in jobs:
             for origin in job.origins:
@@ -977,13 +987,79 @@ class ImageAssetProcessor:
                 item["total"] += 1
 
         def progress_snapshot() -> list[dict[str, Any]]:
-            return [dict(item) for item in document_progress.values()]
+            with activity_lock:
+                return [dict(item) for item in document_progress.values()]
 
         def mark_document_progress(job: ImageContent) -> None:
+            with activity_lock:
+                for origin in job.origins:
+                    item = document_progress.get(str(origin.get("key") or ""))
+                    if item is not None:
+                        item["completed"] += 1
+
+        def job_name(job: ImageContent) -> str:
             for origin in job.origins:
-                item = document_progress.get(str(origin.get("key") or ""))
-                if item is not None:
-                    item["completed"] += 1
+                name = str(origin.get("name") or "").strip()
+                if name:
+                    return name
+            return os.path.basename(str(job.image_path or ""))
+
+        def mark_job(job: ImageContent, state: str, payload: dict | None = None) -> None:
+            now = time.monotonic()
+            with activity_lock:
+                item = job_activity.setdefault(job.image_sha, {
+                    "name": job_name(job),
+                    "state": "queued",
+                    "started_at": now,
+                    "attempt": 0,
+                    "attempts": 0,
+                    "reason": "",
+                })
+                item["state"] = state
+                if payload:
+                    for key in ("attempt", "attempts", "reason", "delay", "timeout"):
+                        if key in payload:
+                            item[key] = payload[key]
+                if state in {"cached", "completed", "failed", "skipped"}:
+                    item["finished_at"] = now
+
+        def activity_snapshot(completed: int) -> dict[str, Any]:
+            now = time.monotonic()
+            with activity_lock:
+                active = []
+                retrying = 0
+                waiting = 0
+                for item in job_activity.values():
+                    state = str(item.get("state") or "")
+                    if state == "retrying":
+                        retrying += 1
+                    if state == "rate_limited":
+                        waiting += 1
+                    if state not in {"running", "retrying", "rate_limited"}:
+                        continue
+                    active_item = {
+                        "name": str(item.get("name") or ""),
+                        "state": state,
+                        "attempt": max(0, int(item.get("attempt") or 0)),
+                        "attempts": max(0, int(item.get("attempts") or 0)),
+                        "elapsed": max(0, int(now - float(item.get("started_at") or now))),
+                    }
+                    if item.get("reason"):
+                        active_item["reason"] = str(item["reason"])
+                    if item.get("delay") is not None:
+                        active_item["delay"] = max(0, float(item["delay"]))
+                    active.append(active_item)
+                active.sort(key=lambda value: (-int(value.get("elapsed") or 0), value.get("name") or ""))
+                return {
+                    "completed": max(0, int(completed)),
+                    "total": len(jobs),
+                    "cached": max(0, int(cached_count)),
+                    "active": len(active),
+                    "retrying": retrying,
+                    "waiting": waiting,
+                    "current": active[0].get("name", "") if active else "",
+                    "items": active[:3],
+                }
 
         def emit_progress(job: ImageContent | None, completed: int) -> None:
             if not callable(progress):
@@ -993,26 +1069,77 @@ class ImageAssetProcessor:
                 for origin in (job.origins if job is not None else [])
                 if origin.get("name")
             ]
+            activity = activity_snapshot(completed)
             progress({
                 "phase": "image_analysis",
-                "current": names[0] if names else "",
+                "current": names[0] if names else activity.get("current", ""),
                 "analysis_completed": completed,
                 "analysis_total": len(jobs),
                 "image_documents": progress_snapshot(),
+                "image_activity": activity,
             })
+
+        def handle_job_progress(job: ImageContent, payload: dict) -> None:
+            if not isinstance(payload, dict):
+                return
+            event = str(payload.get("event") or "")
+            state = {
+                "cache_hit": "cached",
+                "request_started": "running",
+                "attempt_started": "running",
+                "retry_scheduled": "retrying",
+                "rate_limit_wait": "rate_limited",
+                "deadline_exceeded": "failed",
+            }.get(event)
+            if state:
+                mark_job(job, state, payload)
+            if callable(progress):
+                emit_progress(job, done)
 
         def run_image_job(job: ImageContent):
             cache_base = self._cache_base(kb)
+            mark_job(job, "running")
+            on_progress = lambda payload: handle_job_progress(job, payload)
             if callable(cancelled):
                 return self.analyze_image_job(
-                    cache_base, job, cancelled=cancelled
+                    cache_base, job, cancelled=cancelled, on_progress=on_progress
                 )
-            return self.analyze_image_job(cache_base, job)
+            return self.analyze_image_job(cache_base, job, on_progress=on_progress)
+
+        def finish_job(job: ImageContent, analysis: dict, delta: dict) -> None:
+            nonlocal cached_count
+            analysis = analysis or {}
+            delta = delta or {}
+            with activity_lock:
+                cached_count += max(0, int(delta.get("cached") or 0))
+            mark_job(job, "failed" if analysis.get("error") else (
+                "cached" if delta.get("cached") else "completed"
+            ))
 
         if callable(progress):
             emit_progress(None, 0)
         results = {}
-        done = 0
+        heartbeat_stop = threading.Event()
+        heartbeat_thread = None
+
+        def heartbeat() -> None:
+            while not heartbeat_stop.wait(2.0):
+                if callable(cancelled) and cancelled():
+                    return
+                emit_progress(None, done)
+
+        if callable(progress):
+            heartbeat_thread = threading.Thread(
+                target=heartbeat,
+                name="ga-kb-image-progress",
+                daemon=True,
+            )
+            heartbeat_thread.start()
+
+        def stop_heartbeat() -> None:
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=0.5)
 
         # Use the first image as a capability probe before opening the worker
         # pool.  A text-only model must not receive dozens of doomed image
@@ -1020,11 +1147,24 @@ class ImageAssetProcessor:
         # capability.  This is intentionally based on the provider's error
         # classification, never on a model-name heuristic.
         first_job = jobs[0]
-        check_cancelled(cancelled)
-        first_analysis, first_delta = run_image_job(first_job)
-        check_cancelled(cancelled)
+        try:
+            check_cancelled(cancelled)
+        except KnowledgeBaseCancelled:
+            stop_heartbeat()
+            raise
+        try:
+            first_analysis, first_delta = run_image_job(first_job)
+        except KnowledgeBaseCancelled:
+            stop_heartbeat()
+            raise
+        try:
+            check_cancelled(cancelled)
+        except KnowledgeBaseCancelled:
+            stop_heartbeat()
+            raise
         self._usage_tracker.merge_image_analysis(first_delta)
         first_analysis = first_analysis or {}
+        finish_job(first_job, first_analysis, first_delta)
         try:
             from .providers import vision as vision_provider
             unsupported = vision_provider.is_vision_unsupported_error(first_analysis)
@@ -1045,11 +1185,18 @@ class ImageAssetProcessor:
                 f"{len(jobs)} 个图片分析请求，保留基础图片引用。"
             )
             for job in jobs:
-                check_cancelled(cancelled)
+                try:
+                    check_cancelled(cancelled)
+                except KnowledgeBaseCancelled:
+                    stop_heartbeat()
+                    raise
                 results[job.image_sha] = dict(fallback)
+                if job.image_sha != first_job.image_sha:
+                    mark_job(job, "skipped")
                 done += 1
                 mark_document_progress(job)
                 emit_progress(job, done)
+            stop_heartbeat()
             return results
 
         results[first_job.image_sha] = first_analysis
@@ -1058,20 +1205,36 @@ class ImageAssetProcessor:
         emit_progress(first_job, done)
         remaining_jobs = jobs[1:]
         if not remaining_jobs:
+            stop_heartbeat()
             return results
 
         if workers <= 1:
             for job in remaining_jobs:
-                check_cancelled(cancelled)
-                analysis, delta = run_image_job(job)
-                check_cancelled(cancelled)
+                try:
+                    check_cancelled(cancelled)
+                except KnowledgeBaseCancelled:
+                    stop_heartbeat()
+                    raise
+                try:
+                    analysis, delta = run_image_job(job)
+                except KnowledgeBaseCancelled:
+                    stop_heartbeat()
+                    raise
+                try:
+                    check_cancelled(cancelled)
+                except KnowledgeBaseCancelled:
+                    stop_heartbeat()
+                    raise
                 self._usage_tracker.merge_image_analysis(delta)
+                analysis = analysis or {}
+                finish_job(job, analysis, delta)
                 results[job.image_sha] = analysis
                 done += 1
                 mark_document_progress(job)
                 emit_progress(job, done)
                 if done % 50 == 0 or done == len(jobs):
                     log(f"  图片分析进度 {done}/{len(jobs)}")
+            stop_heartbeat()
             return results
         executor = ThreadPoolExecutor(max_workers=workers)
         futures = {}
@@ -1091,6 +1254,8 @@ class ImageAssetProcessor:
                     analysis, delta = {"error": str(exc), "uncertain": [str(exc)]}, {"failed": 1}
                 check_cancelled(cancelled)
                 self._usage_tracker.merge_image_analysis(delta)
+                analysis = analysis or {}
+                finish_job(job, analysis, delta)
                 results[job.image_sha] = analysis
                 done += 1
                 mark_document_progress(job)
@@ -1103,7 +1268,9 @@ class ImageAssetProcessor:
             for future in futures:
                 future.cancel()
             executor.shutdown(wait=False, cancel_futures=True)
+            stop_heartbeat()
             raise
         else:
             executor.shutdown(wait=True)
+            stop_heartbeat()
         return results

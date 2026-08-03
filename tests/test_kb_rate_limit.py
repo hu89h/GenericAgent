@@ -171,6 +171,7 @@ class KnowledgeBaseRateLimitTests(unittest.TestCase):
             io.BytesIO(b'{"error":"limited"}'),
         )
         limiter = FakeLimiter()
+        progress = []
         with mock.patch.object(
             provider_http.urllib.request,
             "urlopen",
@@ -187,12 +188,37 @@ class KnowledgeBaseRateLimitTests(unittest.TestCase):
                 rate_limiter=limiter,
                 estimated_tokens=11,
                 usage_tokens=lambda body: body["usage"]["total_tokens"],
+                on_progress=progress.append,
             )
 
         self.assertTrue(result["ok"])
         self.assertEqual(len(limiter.reservations), 2)
         self.assertEqual(limiter.actual[0][1], 7)
         sleep.assert_called_once_with(7.0)
+        self.assertEqual(progress[1]["event"], "retry_scheduled")
+        self.assertEqual(progress[1]["reason"], "rate_limited")
+        self.assertEqual(progress[-1]["event"], "attempt_succeeded")
+
+    def test_total_timeout_stops_a_slow_image_request_before_more_retries(self):
+        progress = []
+
+        def slow_request(*_args, **_kwargs):
+            provider_http.time.sleep(0.02)
+            raise TimeoutError("read operation timed out")
+
+        with mock.patch.object(provider_http, "_request_once", side_effect=slow_request):
+            with self.assertRaisesRegex(RuntimeError, "总等待上限"):
+                provider_http.post_json(
+                    "/v1",
+                    {"value": 1},
+                    base="https://example.test",
+                    key="secret",
+                    retries=4,
+                    total_timeout=0.01,
+                    on_progress=progress.append,
+                )
+
+        self.assertTrue(any(item.get("event") == "deadline_exceeded" for item in progress))
 
     def test_embedding_request_uses_shared_headroom_limiter(self):
         config = {
