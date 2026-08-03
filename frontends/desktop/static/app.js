@@ -239,7 +239,7 @@ let bridgeUiOffline = false;
       case 'kb/job/cancel': {
         const id = params.jobId || params.id || '';
         if (!id) throw new Error('kb/job/cancel missing jobId');
-        return http(`/kb/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+        return http(`/kb/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: params || {} });
       }
       case 'kb/reindex': {
         const id = params.kbId || params.id || '';
@@ -378,7 +378,7 @@ let bridgeUiOffline = false;
     kbImport: (params = {}) => rpc('kb/import', params),
     kbJobs: () => rpc('kb/jobs'),
     kbJob: (jobId) => rpc('kb/job', { jobId }),
-    kbCancelJob: (jobId) => rpc('kb/job/cancel', { jobId }),
+    kbCancelJob: (jobId, options = {}) => rpc('kb/job/cancel', { jobId, ...options }),
     kbReindex: (kbId) => rpc('kb/reindex', { kbId }),
     kbRetryImageAnalysis: (kbId) => rpc('kb/retry-image-analysis', { kbId }),
     kbDeleteDocument: (kbId, params = {}) => rpc('kb/delete-document', Object.assign({}, params, { kbId })),
@@ -912,8 +912,8 @@ const kbPageEls = {
   qaLog: kbEl('kb-qa-log'), question: kbEl('kb-question'), ask: kbEl('kb-ask-btn'), open: kbEl('kb-open-doc'), openProcessed: kbEl('kb-open-processed'),
   task: kbEl('kb-task-modal'), taskTitle: kbEl('kb-task-title'), taskPhase: kbEl('kb-task-phase'),
   taskProgress: kbEl('kb-task-progress-bar'), taskProgressValue: kbEl('kb-task-progress-value'),
-  taskCurrent: kbEl('kb-task-current'), taskCounts: kbEl('kb-task-counts'), taskSuccess: kbEl('kb-task-successes'),
-  taskImages: kbEl('kb-task-image-documents'), taskWarning: kbEl('kb-task-warnings'),
+  taskCurrent: kbEl('kb-task-current'), taskDocumentProgress: kbEl('kb-task-document-progress'), taskCounts: kbEl('kb-task-counts'), taskSuccess: kbEl('kb-task-successes'),
+  taskImages: kbEl('kb-task-image-documents'), taskImageStatus: kbEl('kb-task-image-status'), taskWarning: kbEl('kb-task-warnings'),
   taskFailure: kbEl('kb-task-failures'), taskGuidance: kbEl('kb-task-guidance'), taskCancel: kbEl('kb-task-cancel'),
   taskBackground: kbEl('kb-task-background'), taskClose: kbEl('kb-task-close'),
   taskCapsule: kbEl('kb-task-capsule'), taskCapsuleTitle: kbEl('kb-task-capsule-title'),
@@ -1091,6 +1091,7 @@ function kbPhaseText(job) {
   const phase = kbText(job.phase || job.state).toLowerCase();
   const normalized = {
     queued: 'queued',
+    resuming: 'preparing',
     scanning: 'scanning',
     scanned: 'preparing',
     starting: 'preparing',
@@ -1757,7 +1758,18 @@ function kbRenderTaskCapsule() {
         : (kind === 'retry_image_analysis' ? 'kb.taskCapsuleImageRetry' : 'kb.taskCapsuleReindex'));
     kbPageEls.taskCapsuleTitle.textContent = t(titleKey);
   }
-  if (kbPageEls.taskCapsulePhase) kbPageEls.taskCapsulePhase.textContent = kbPhaseText(job);
+  if (kbPageEls.taskCapsulePhase) {
+    let phaseText = kbPhaseText(job);
+    const activity = job.imageActivity && typeof job.imageActivity === 'object'
+      ? job.imageActivity
+      : {};
+    if (Number(activity.retrying) > 0) {
+      phaseText += ` · ${kbFormat(t('kb.imageRetryProgress'), { count: Number(activity.retrying) || 0 })}`;
+    } else if (Number(activity.active) > 0) {
+      phaseText += ` · ${kbFormat(t('kb.imageActiveProgress'), { count: Number(activity.active) || 0 })}`;
+    }
+    kbPageEls.taskCapsulePhase.textContent = phaseText;
+  }
   if (kbPageEls.taskCapsuleValue) {
     kbPageEls.taskCapsuleValue.textContent = total && !progress.indeterminate
       ? `${Math.min(completed, total)}/${total}`
@@ -1826,6 +1838,18 @@ function kbResultGuidanceHtml(actions) {
     : '';
 }
 
+function kbDocumentProgressStatus(status) {
+  const value = kbText(status).toLowerCase();
+  if (value === 'failed') return t('kb.documentProgressFailed');
+  if (['ready', 'downloaded', 'completed'].includes(value)) {
+    return t('kb.documentProgressReady');
+  }
+  if (['queued', 'asset', 'ignored'].includes(value)) {
+    return t('kb.documentProgressQueued');
+  }
+  return t('kb.documentProgressProcessing');
+}
+
 function kbSetTask(job, kind) {
   kbState.job = job;
   kind = kbJobKind(job, kind);
@@ -1838,6 +1862,11 @@ function kbSetTask(job, kind) {
   const total = Math.max(0, Number(progress.total) || 0);
   const indeterminate = !terminal && !!progress.indeterminate;
   const successfulTerminal = ['completed', 'completed_with_failures'].includes(job.state);
+  const imagePhase = kbText(job.phase || job.state).toLowerCase() === 'image_analysis';
+  const documentRows = !terminal && kind === 'import' && Array.isArray(job.files)
+    ? job.files.filter(item => item && item.name)
+    : [];
+  const showDocumentRows = documentRows.length > 0 && !imagePhase;
   const percent = total > 0
     ? Math.min(100, Math.round((completed / total) * 100))
     : (successfulTerminal ? 100 : 0);
@@ -1856,7 +1885,10 @@ function kbSetTask(job, kind) {
   if (kbPageEls.taskCurrent) {
     let current = kbText(job.current);
     if (job.errorCode) current = kbErrorText(job.errorCode);
-    kbPageEls.taskCurrent.hidden = !current;
+    // A concurrent image phase already has a stable per-document list.  Do
+    // not keep replacing one highlighted "current document" row as futures
+    // finish in a different order.
+    kbPageEls.taskCurrent.hidden = !current || imagePhase || showDocumentRows;
     kbPageEls.taskCurrent.textContent = current;
   }
   if (kbPageEls.taskProgress) {
@@ -1868,6 +1900,22 @@ function kbSetTask(job, kind) {
   if (kbPageEls.taskProgressValue) {
     kbPageEls.taskProgressValue.textContent = total && !indeterminate
       ? `${Math.min(completed, total)}/${total}`
+      : '';
+  }
+
+  if (kbPageEls.taskDocumentProgress) {
+    kbPageEls.taskDocumentProgress.hidden = !showDocumentRows;
+    kbPageEls.taskDocumentProgress.innerHTML = showDocumentRows
+      ? documentRows.map(item => {
+        const status = kbText(item.status || '');
+        const statusClass = status === 'failed'
+          ? ' failed'
+          : (['ready', 'downloaded', 'completed'].includes(status) ? ' ready' : '');
+        return `<div class="kb-task-document-row${statusClass}">`
+          + `<span>${escapeHtml(item.name || '')}</span>`
+          + `<span>${escapeHtml(kbDocumentProgressStatus(status))}</span>`
+          + '</div>';
+      }).join('')
       : '';
   }
 
@@ -1884,6 +1932,46 @@ function kbSetTask(job, kind) {
         + `<span>${Number(item.completed) || 0}/${Number(item.total) || 0}</span></div>`
       )).join('')
       : '';
+  }
+  if (kbPageEls.taskImageStatus) {
+    const activity = job.imageActivity && typeof job.imageActivity === 'object'
+      ? job.imageActivity
+      : {};
+    const activeItems = Array.isArray(activity.items) ? activity.items : [];
+    const statusLines = [];
+    if (Number(activity.cached) > 0) {
+      statusLines.push(kbFormat(t('kb.imageCacheProgress'), {
+        cached: Number(activity.cached) || 0,
+      }));
+    }
+    if (Number(activity.retrying) > 0) {
+      statusLines.push(kbFormat(t('kb.imageRetryProgress'), {
+        count: Number(activity.retrying) || 0,
+      }));
+    } else if (Number(activity.active) > 0) {
+      statusLines.push(kbFormat(t('kb.imageActiveProgress'), {
+        count: Number(activity.active) || 0,
+      }));
+    }
+    for (const item of activeItems.slice(0, 2)) {
+      const attempt = Number(item.attempt) || 0;
+      const attempts = Number(item.attempts) || 0;
+      if (!item.name || !attempt || !attempts) continue;
+      const label = item.state === 'rate_limited'
+        ? t('kb.imageRateLimitProgress')
+        : kbFormat(t('kb.imageAttemptProgress'), {
+          name: item.name,
+          attempt,
+          attempts,
+          elapsed: Number(item.elapsed) || 0,
+        });
+      statusLines.push(label);
+    }
+    if (activeItems.some(item => Number(item.elapsed) >= 30)) {
+      statusLines.push(t('kb.imageSlowProgress'));
+    }
+    kbPageEls.taskImageStatus.hidden = !imagePhase || !statusLines.length;
+    kbPageEls.taskImageStatus.textContent = statusLines.join('\n');
   }
 
   if (kbPageEls.taskCounts) {
@@ -1922,6 +2010,12 @@ function kbSetTask(job, kind) {
         images: summary.image_chunks || 0,
       });
       kbPageEls.taskCounts.hidden = false;
+    } else if (kind === 'reindex' || kind === 'retry_image_analysis') {
+      // Maintenance progress is reported in the phase-specific progress bar
+      // (records or images).  Do not reuse the top-level one-KB counter for
+      // internal record/image counts such as "5/1 knowledge bases".
+      kbPageEls.taskCounts.textContent = '';
+      kbPageEls.taskCounts.hidden = true;
     } else {
       kbPageEls.taskCounts.textContent = kbFormat(t('kb.buildCounts'), {
         completed: job.done || 0,
@@ -1980,6 +2074,9 @@ function kbSetTask(job, kind) {
       .map(action => kbGuidanceKey(action))
       .filter(Boolean)
       .map(key => `<div>${escapeHtml(t(key))}</div>`);
+    if (terminal && job.checkpointAvailable) {
+      messages.unshift(`<div>${escapeHtml(t('kb.checkpointReady'))}</div>`);
+    }
     const canOpenMaintenance = actions.some(action =>
       ['retry_image_analysis', 'reindex', 'retry_operation'].includes(action)
     );
@@ -1998,7 +2095,8 @@ function kbSetTask(job, kind) {
   }
 
   if (kbPageEls.taskCancel) {
-    const cancellable = kind === 'import' && job.cancellable !== false;
+    const cancellableKind = ['import', 'reindex', 'retry_image_analysis'].includes(kind);
+    const cancellable = cancellableKind && job.cancellable !== false;
     kbPageEls.taskCancel.hidden = terminal || !cancellable;
     kbPageEls.taskCancel.disabled = !!job.cancelRequested || job.state === 'cancelling';
     kbPageEls.taskCancel.textContent = t(
@@ -2110,23 +2208,31 @@ function kbOpenTrackedTask() {
 async function kbCancelTrackedJob() {
   const job = kbState.job;
   const jobId = kbState.jobId;
+  const kind = kbJobKind(job, kbState.jobKind);
   if (
     !jobId
     || kbJobTerminal(job)
     || job?.cancelRequested
-    || kbJobKind(job, kbState.jobKind) !== 'import'
+    || !['import', 'reindex', 'retry_image_analysis'].includes(kind)
     || job?.cancellable === false
   ) return;
-  const confirmed = await showConfirmDialog({
-    title: t('kb.cancelTask'),
-    message: t('kb.cancelTaskConfirm'),
-    okText: t('kb.cancelTask'),
-    okKind: 'danger',
-  });
-  if (!confirmed || jobId !== kbState.jobId) return;
+  let cancelOptions = {};
+  if (kind === 'import') {
+    const choice = await showImportCancelChoice();
+    if (!choice || jobId !== kbState.jobId) return;
+    cancelOptions = { retainProcessed: choice === 'keep' };
+  } else {
+    const confirmed = await showConfirmDialog({
+      title: t('kb.cancelTask'),
+      message: t('kb.cancelTaskConfirm'),
+      okText: t('kb.cancelTask'),
+      okKind: 'danger',
+    });
+    if (!confirmed || jobId !== kbState.jobId) return;
+  }
   if (kbPageEls.taskCancel) kbPageEls.taskCancel.disabled = true;
   try {
-    const result = await window.ga.kbCancelJob(jobId);
+    const result = await window.ga.kbCancelJob(jobId, cancelOptions);
     if (jobId !== kbState.jobId) return;
     kbSetTask(result, kbState.jobKind);
     kbScheduleJobPoll(250);
@@ -2305,8 +2411,6 @@ function initKbPage() {
   });
   kbApplyPanelCollapseState();
   kbBindTaskCapsule();
-  bindClick('kb-refresh-btn', () => void kbRefresh({ force: true }));
-  bindClick('kb-doc-refresh-btn', () => kbState.activeKb && void kbOpenDocuments(kbState.activeKb, { force: true }));
   bindClick('kb-add-docs-btn', () => void kbPickAndAddDocuments());
   bindClick('kb-folder-import-btn', () => void kbPickAndImport());
   bindClick('kb-maintenance-btn', () => void kbOpenBuildModal(kbState.activeKb?.id || ''));
@@ -2923,6 +3027,49 @@ function showConfirmDialog({ title, message, okText, okKind = 'primary', cancelT
     };
     okBtn?.addEventListener('click', onOk);
     cancelBtn?.addEventListener('click', onCancel);
+    modal.addEventListener('click', onClose, true);
+    document.addEventListener('keydown', onKey, true);
+    okBtn?.focus();
+  });
+}
+
+function showImportCancelChoice() {
+  const modal = document.getElementById('confirm-modal');
+  if (!modal) return Promise.resolve(null);
+  const titleEl = document.getElementById('confirm-title');
+  const msgEl = document.getElementById('confirm-message');
+  const okBtn = document.getElementById('confirm-ok');
+  const cancelBtn = document.getElementById('confirm-cancel');
+  if (titleEl) titleEl.textContent = t('kb.cancelTask');
+  if (msgEl) msgEl.textContent = t('kb.cancelTaskChoice');
+  if (cancelBtn) cancelBtn.textContent = t('kb.cancelAndClean');
+  if (okBtn) {
+    okBtn.textContent = t('kb.cancelAndKeep');
+    okBtn.classList.remove('danger');
+    okBtn.classList.add('primary');
+  }
+  modal.hidden = false;
+  return new Promise(resolve => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      modal.hidden = true;
+      cleanup();
+      resolve(value);
+    };
+    const onKeep = (e) => { e.preventDefault(); e.stopPropagation(); finish('keep'); };
+    const onClean = (e) => { e.preventDefault(); e.stopPropagation(); finish('clean'); };
+    const onClose = (e) => { if (e.target.closest('[data-close]')) finish(null); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(null); } };
+    const cleanup = () => {
+      okBtn?.removeEventListener('click', onKeep);
+      cancelBtn?.removeEventListener('click', onClean);
+      modal.removeEventListener('click', onClose, true);
+      document.removeEventListener('keydown', onKey, true);
+    };
+    okBtn?.addEventListener('click', onKeep);
+    cancelBtn?.addEventListener('click', onClean);
     modal.addEventListener('click', onClose, true);
     document.addEventListener('keydown', onKey, true);
     okBtn?.focus();

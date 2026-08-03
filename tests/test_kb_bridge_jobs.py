@@ -74,6 +74,37 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         self.assertTrue(payload["cancelRequested"])
         self.assertTrue(payload["cancellable"])
 
+    def test_cancel_can_request_processed_checkpoint_retention(self):
+        cancel_event = threading.Event()
+
+        class Request:
+            match_info = {"job_id": "kbimp-keep"}
+            can_read_body = True
+
+            @staticmethod
+            async def json():
+                return {"retainProcessed": True}
+
+        with desktop_bridge._kb_jobs_lock:
+            desktop_bridge._kb_jobs["kbimp-keep"] = {
+                "ok": True,
+                "jobId": "kbimp-keep",
+                "mode": "import",
+                "state": "running",
+                "phase": "chunking",
+                "cancelEvent": cancel_event,
+                "startedAt": int(time.time()),
+                "updatedAt": int(time.time()),
+            }
+
+        response = asyncio.run(desktop_bridge.kb_job_cancel_handler(Request()))
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 202)
+        self.assertTrue(payload["retainProcessed"])
+        self.assertTrue(payload["cancelRequested"])
+        self.assertTrue(cancel_event.is_set())
+
     def test_classifies_transient_mineru_download_failures_as_network_errors(self):
         error = (
             "下载 MinerU 解析结果失败：HTTPSConnectionPool(host='cdn.example', "
@@ -165,6 +196,21 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
             "imageDocuments": [
                 {"key": "internal/a.md", "name": "alpha.pdf", "completed": 3, "total": 3},
             ],
+            "imageActivity": {
+                "completed": 3,
+                "total": 4,
+                "cached": 2,
+                "active": 1,
+                "retrying": 1,
+                "items": [{
+                    "name": "alpha.pdf",
+                    "state": "retrying",
+                    "attempt": 2,
+                    "attempts": 4,
+                    "elapsed": 42,
+                    "reason": "timeout",
+                }],
+            },
             "failures": [
                 {
                     "source": "documents/internal-a.md:assets/internal.png",
@@ -190,6 +236,8 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         self.assertEqual(snapshot["imageDocuments"], [
             {"name": "alpha.pdf", "completed": 3, "total": 3},
         ])
+        self.assertEqual(snapshot["imageActivity"]["cached"], 2)
+        self.assertEqual(snapshot["imageActivity"]["items"][0]["reason"], "timeout")
         self.assertEqual(snapshot["failures"][0]["source"], "books/alpha.pdf")
         self.assertNotIn("internal-a.md", snapshot["failures"][0]["source"])
 

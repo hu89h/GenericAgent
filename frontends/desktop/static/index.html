@@ -285,14 +285,13 @@
                       <button type="button" class="kb-btn kb-btn-compact" id="kb-create-btn" data-i18n-title="kb.create" title=""><span data-ga-icon="plus"></span><span data-i18n="kb.create"></span></button>
                       <button type="button" class="kb-btn kb-btn-compact" id="kb-folder-import-btn" data-i18n-title="kb.importFolder" title=""><span data-ga-icon="folderSimplePlus"></span><span data-i18n="kb.importFolder"></span></button>
                       <button type="button" class="kb-btn kb-btn-compact" id="kb-maintenance-btn" data-i18n-title="kb.maintenanceHint" title=""><span data-ga-icon="gear"></span><span data-i18n="kb.maintenanceAction"></span></button>
-                      <button type="button" class="ic-btn" id="kb-refresh-btn" data-i18n-title="kb.refresh" title=""><span data-ga-icon="arrowClockwise"></span></button>
                     </div>
                   </div>
                   <div class="kb-library-grid" id="kb-library-grid"></div>
                 </div>
                 <div class="kb-browser-splitter" id="kb-browser-splitter" role="separator" aria-orientation="horizontal" aria-label="调整知识库与文档列表高度" tabindex="0"></div>
                 <div class="kb-view" id="kb-documents-view" hidden>
-                  <div class="kb-view-head"><div class="kb-view-title" id="kb-active-kb-title"></div><div class="kb-view-actions"><button type="button" class="kb-btn kb-btn-compact" id="kb-add-docs-btn" data-i18n-title="kb.import" title=""><span data-ga-icon="fileText"></span><span data-i18n="kb.import"></span></button><button type="button" class="ic-btn" id="kb-doc-refresh-btn" data-i18n-title="kb.refresh" title=""><span data-ga-icon="arrowClockwise"></span></button></div></div>
+                  <div class="kb-view-head"><div class="kb-view-title" id="kb-active-kb-title"></div><div class="kb-view-actions"><button type="button" class="kb-btn kb-btn-compact" id="kb-add-docs-btn" data-i18n-title="kb.import" title=""><span data-ga-icon="fileText"></span><span data-i18n="kb.import"></span></button></div></div>
                   <input class="kb-doc-search" id="kb-doc-search" data-i18n-ph="kb.searchDocs" placeholder="">
                   <div class="kb-doc-grid" id="kb-doc-list"></div>
                 </div>
@@ -599,7 +598,9 @@
           <div class="kb-task-progress-bar" id="kb-task-progress-bar"></div>
         </div>
         <div class="kb-task-current" id="kb-task-current"></div>
+        <div class="kb-task-document-progress" id="kb-task-document-progress" hidden></div>
         <div class="kb-task-image-documents" id="kb-task-image-documents" hidden></div>
+        <div class="kb-task-image-status" id="kb-task-image-status" hidden></div>
         <div class="kb-task-counts" id="kb-task-counts"></div>
         <div class="kb-task-result" id="kb-task-successes" hidden></div>
         <div class="kb-task-result kb-task-warnings" id="kb-task-warnings" hidden></div>

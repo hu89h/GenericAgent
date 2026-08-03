@@ -2804,6 +2804,43 @@ def _kb_public_image_document(item: dict) -> dict:
     }
 
 
+def _kb_public_image_activity(activity: dict) -> dict:
+    """Expose bounded image-request activity without internal paths/errors."""
+    if not isinstance(activity, dict):
+        return {}
+    items = []
+    for raw in activity.get("items") or []:
+        if not isinstance(raw, dict):
+            continue
+        item = {
+            "name": _kb_display_name(raw.get("name")),
+            "state": str(raw.get("state") or ""),
+            "attempt": max(0, int(raw.get("attempt") or 0)),
+            "attempts": max(0, int(raw.get("attempts") or 0)),
+            "elapsed": max(0, int(raw.get("elapsed") or 0)),
+        }
+        reason = str(raw.get("reason") or "")
+        if reason in {"rate_limited", "server_error", "timeout", "network_error", "request_error"}:
+            item["reason"] = reason
+        if raw.get("delay") is not None:
+            try:
+                item["delay"] = max(0, float(raw.get("delay") or 0))
+            except (TypeError, ValueError):
+                pass
+        if item["name"]:
+            items.append(item)
+    return {
+        "completed": max(0, int(activity.get("completed") or 0)),
+        "total": max(0, int(activity.get("total") or 0)),
+        "cached": max(0, int(activity.get("cached") or 0)),
+        "active": max(0, int(activity.get("active") or 0)),
+        "retrying": max(0, int(activity.get("retrying") or 0)),
+        "waiting": max(0, int(activity.get("waiting") or 0)),
+        "current": _kb_display_name(activity.get("current")),
+        "items": items[:3],
+    }
+
+
 def _kb_progress_from_event(event: dict) -> dict:
     phase = str(event.get("phase") or "")
     if isinstance(event.get("progress"), dict):
@@ -2902,6 +2939,7 @@ def _kb_job_snapshot(job: dict) -> dict:
             )
             if public.get("name")
         ],
+        "imageActivity": _kb_public_image_activity(job.get("imageActivity") or {}),
         "files": [
             public
             for public in (_kb_public_job_item(item) for item in (job.get("files") or []))
@@ -2922,6 +2960,9 @@ def _kb_job_snapshot(job: dict) -> dict:
         "dataId": str(job.get("dataId") or ""),
         "documentName": str(job.get("documentName") or ""),
         "cancelRequested": bool(job.get("cancelRequested")),
+        "retainProcessed": bool(job.get("retainProcessed")),
+        "checkpointAvailable": bool(job.get("checkpointAvailable")),
+        "checkpoint": dict(job.get("checkpoint") or {}),
         "cancellable": (
             isinstance(job.get("cancelEvent"), threading.Event)
             and job.get("state") not in _KB_TERMINAL_JOB_STATES
@@ -3193,6 +3234,9 @@ async def kb_import_handler(request):
         "result": None,
         "error": "",
         "cancelRequested": False,
+        "retainProcessed": False,
+        "checkpointAvailable": False,
+        "checkpoint": {},
         "cancelEvent": threading.Event(),
         "startedAt": int(time.time()),
         "updatedAt": int(time.time()),
@@ -3317,6 +3361,7 @@ async def kb_import_handler(request):
                     source_files,
                     progress=update_progress,
                     cancelled=job["cancelEvent"].is_set,
+                    retain_partial=lambda: bool(job.get("retainProcessed")),
                 )
             else:
                 result = backend.import_kb(
@@ -3324,6 +3369,7 @@ async def kb_import_handler(request):
                     name=str(data.get("name") or ""),
                     progress=update_progress,
                     cancelled=job["cancelEvent"].is_set,
+                    retain_partial=lambda: bool(job.get("retainProcessed")),
                 )
             summary = result.get("summary") or {}
             failures = result.get("failures") or []
@@ -3359,6 +3405,11 @@ async def kb_import_handler(request):
                 })
         except Exception as error:
             if getattr(error, "code", "") == "kb_operation_cancelled":
+                checkpoint = {}
+                try:
+                    checkpoint = backend.checkpoint_status(job.get("kbId") or "")
+                except Exception:
+                    checkpoint = {}
                 with _kb_jobs_lock:
                     current = _kb_jobs[job_id]
                     current.update(
@@ -3369,6 +3420,8 @@ async def kb_import_handler(request):
                         updatedAt=int(time.time()),
                         current="",
                         cancelRequested=True,
+                        checkpointAvailable=bool(checkpoint.get("available")),
+                        checkpoint=dict(checkpoint),
                     )
                     current["progress"] = {
                         **dict(current.get("progress") or {}),
@@ -3419,6 +3472,15 @@ async def kb_job_status_handler(request):
 
 async def kb_job_cancel_handler(request):
     job_id = str(request.match_info.get("job_id") or "")
+    try:
+        data = await read_json(request)
+    except Exception:
+        data = {}
+    retain_processed = bool(
+        data.get("retainProcessed")
+        or data.get("retain_processed")
+        or data.get("keepProcessed")
+    ) if isinstance(data, dict) else False
     with _kb_jobs_lock:
         _kb_prune_jobs_locked()
         job = _kb_jobs.get(job_id)
@@ -3434,6 +3496,7 @@ async def kb_job_cancel_handler(request):
         cancel_event = job.get("cancelEvent")
         if not isinstance(cancel_event, threading.Event):
             return json_ok({"ok": False, "error": "kb_job_not_cancellable"}, status=409)
+        job["retainProcessed"] = retain_processed
         cancel_event.set()
         job.update(
             state="cancelling",
@@ -3616,6 +3679,7 @@ async def _kb_maintenance_handler(request, operation: str):
         "files": [],
         "documents": [],
         "imageDocuments": [],
+        "imageActivity": {},
         "failures": [],
         "counts": {
             "analysis_completed": 0,
@@ -3685,7 +3749,11 @@ async def _kb_maintenance_handler(request, operation: str):
                 )
             else:
                 current["phase"] = str(event.get("phase") or current["phase"])
-            current["done"] = int(event.get("processed") or current.get("done") or 0)
+            # ``processed`` belongs to the maintenance sub-phase (records or
+            # images), not to the top-level knowledge-base operation.  Using
+            # it as ``done`` makes a one-KB job render values such as 5/1.
+            # The top-level counter is set to 1 only after the operation
+            # publishes successfully below.
             current["progress"] = _kb_progress_from_event(event)
             if isinstance(event.get("image_documents"), list) and event["image_documents"]:
                 current["imageDocuments"] = [
@@ -3693,6 +3761,8 @@ async def _kb_maintenance_handler(request, operation: str):
                     for item in event["image_documents"]
                     if isinstance(item, dict)
                 ]
+            if isinstance(event.get("image_activity"), dict):
+                current["imageActivity"] = dict(event["image_activity"])
             for key in ("analysis_completed", "analysis_total"):
                 if key in event:
                     try:
