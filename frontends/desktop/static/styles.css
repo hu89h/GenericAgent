@@ -1295,6 +1295,11 @@ span.flatpickr-weekday{ color:var(--muted) !important; font-size:calc(11px * var
 .tok-table--conductor td:nth-child(n+2):nth-child(-n+5),
 .tok-table--conductor th:nth-child(6),
 .tok-table--conductor td:nth-child(6){ width:auto; }
+.tok-table--knowledge{ table-layout:fixed; }
+.tok-table--knowledge th, .tok-table--knowledge td{ width:12.5%; }
+.tok-table--knowledge th:first-child, .tok-table--knowledge td:first-child{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tok-table--knowledge th:not(:first-child){ text-align:center; white-space:normal; overflow-wrap:anywhere; }
+.tok-table--knowledge td:not(:first-child){ text-align:center; white-space:normal; overflow-wrap:anywhere; }
 .tok-row-session{ cursor:pointer; }
 .tok-row-session:hover td{ background:var(--hover-dim); }
 .tok-row-session td:first-child::before{ content:'▶'; margin-right:6px; font-size:calc(10px * var(--ui-scale)); color:var(--muted2); transition:transform .15s; display:inline-block; }
@@ -3012,7 +3017,9 @@ svg.kb-doc-icon{ width:20px; height:20px; }
 .kb-task-image-document span:first-child{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .kb-task-image-document span:last-child{ color:var(--muted); font-variant-numeric:tabular-nums; }
 .kb-task-image-status{ padding:9px 11px; border:1px solid var(--line-soft); border-radius:5px; color:var(--muted); background:var(--field-bg); font-size:calc(12px * var(--ui-scale)); line-height:1.55; white-space:pre-line; }
-.kb-task-counts{ padding:10px 11px; border:1px solid var(--line-soft); border-radius:5px; color:var(--muted); font-size:calc(12px * var(--ui-scale)); line-height:1.55; white-space:pre-line; }
+.kb-task-counts,.kb-task-usage{ padding:10px 11px; border:1px solid var(--line-soft); border-radius:5px; color:var(--muted); font-size:calc(12px * var(--ui-scale)); line-height:1.55; white-space:pre-line; }
+.kb-task-usage{ color:var(--txt-2); background:color-mix(in srgb,var(--accent) 4%,var(--field-bg)); font-variant-numeric:tabular-nums; }
+.kb-task-usage[hidden]{ display:none; }
 .kb-task-result{ border:1px solid color-mix(in srgb, var(--ok) 28%, var(--line)); border-radius:5px; padding:10px 11px; color:var(--ok); white-space:pre-wrap; font-size:calc(12px * var(--ui-scale)); line-height:1.5; }
 .kb-task-result strong{ display:block; margin-bottom:5px; font-size:calc(12px * var(--ui-scale)); font-weight:600; }
 .kb-task-result > div{ overflow-wrap:anywhere; }

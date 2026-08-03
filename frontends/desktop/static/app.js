@@ -912,7 +912,7 @@ const kbPageEls = {
   qaLog: kbEl('kb-qa-log'), question: kbEl('kb-question'), ask: kbEl('kb-ask-btn'), open: kbEl('kb-open-doc'), openProcessed: kbEl('kb-open-processed'),
   task: kbEl('kb-task-modal'), taskTitle: kbEl('kb-task-title'), taskPhase: kbEl('kb-task-phase'),
   taskProgress: kbEl('kb-task-progress-bar'), taskProgressValue: kbEl('kb-task-progress-value'),
-  taskCurrent: kbEl('kb-task-current'), taskDocumentProgress: kbEl('kb-task-document-progress'), taskCounts: kbEl('kb-task-counts'), taskSuccess: kbEl('kb-task-successes'),
+  taskCurrent: kbEl('kb-task-current'), taskDocumentProgress: kbEl('kb-task-document-progress'), taskCounts: kbEl('kb-task-counts'), taskUsage: kbEl('kb-task-usage'), taskSuccess: kbEl('kb-task-successes'),
   taskImages: kbEl('kb-task-image-documents'), taskImageStatus: kbEl('kb-task-image-status'), taskWarning: kbEl('kb-task-warnings'),
   taskFailure: kbEl('kb-task-failures'), taskGuidance: kbEl('kb-task-guidance'), taskCancel: kbEl('kb-task-cancel'),
   taskBackground: kbEl('kb-task-background'), taskClose: kbEl('kb-task-close'),
@@ -1028,6 +1028,46 @@ function kbFormatBytes(value) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function kbUsageHasActivity(usage) {
+  if (!usage || usage.available === false) return false;
+  return [
+    'image_calls', 'image_cached', 'image_failed',
+    'embedding_calls', 'embedding_texts', 'embedding_cache_hits',
+    'embedding_api_calls',
+  ].some(key => Number(usage[key]) > 0)
+    || usage.image_token_usage_reported === true
+    || usage.embedding_token_usage_reported === true;
+}
+
+function kbUsageToken(value, reported, apiCalls = 0) {
+  if (reported) return fmtTok(Number(value) || 0);
+  return Number(apiCalls) > 0 ? t('kb.usageUnavailable') : t('kb.usageNoApi');
+}
+
+function kbUsageHtml(usage) {
+  if (!kbUsageHasActivity(usage)) return '';
+  const lines = [];
+  if (Number(usage.image_calls) > 0 || Number(usage.image_cached) > 0 || Number(usage.image_failed) > 0) {
+    lines.push(kbFormat(t('kb.usageImage'), {
+      input: kbUsageToken(usage.image_prompt_tokens, usage.image_token_usage_reported, usage.image_calls),
+      output: kbUsageToken(usage.image_completion_tokens, usage.image_token_usage_reported, usage.image_calls),
+      calls: Number(usage.image_calls) || 0,
+      cached: Number(usage.image_cached) || 0,
+      failed: Number(usage.image_failed) || 0,
+    }));
+  }
+  if (Number(usage.embedding_calls) > 0 || Number(usage.embedding_texts) > 0) {
+    lines.push(kbFormat(t('kb.usageEmbedding'), {
+      input: kbUsageToken(usage.embedding_input_tokens, usage.embedding_input_token_usage_reported, usage.embedding_api_calls),
+      output: kbUsageToken(usage.embedding_output_tokens, usage.embedding_output_token_usage_reported, usage.embedding_api_calls),
+      calls: Number(usage.embedding_api_calls) || 0,
+      texts: Number(usage.embedding_texts) || 0,
+      cached: Number(usage.embedding_cache_hits) || 0,
+    }));
+  }
+  return lines.join('\n');
 }
 
 function kbDocumentName(doc) {
@@ -1858,11 +1898,12 @@ function kbSetTask(job, kind) {
   const summary = job.summary || {};
   const terminal = kbJobTerminal(job);
   const progress = job.progress || {};
+  const phase = kbText(job.phase || job.state).toLowerCase();
   const completed = Math.max(0, Number(progress.completed) || 0);
   const total = Math.max(0, Number(progress.total) || 0);
   const indeterminate = !terminal && !!progress.indeterminate;
   const successfulTerminal = ['completed', 'completed_with_failures'].includes(job.state);
-  const imagePhase = kbText(job.phase || job.state).toLowerCase() === 'image_analysis';
+  const imagePhase = phase === 'image_analysis';
   const documentRows = !terminal && kind === 'import' && Array.isArray(job.files)
     ? job.files.filter(item => item && item.name)
     : [];
@@ -1982,9 +2023,11 @@ function kbSetTask(job, kind) {
         warning: summary.documents_with_warnings || 0,
         failure: summary.documents_failed || 0,
       });
-    } else if (kind === 'import') {
+    } else if (kind === 'import' && !terminal) {
       const lines = [];
-      if (documentProgress.total) {
+      const preparationPhase = !['records_ready', 'indexing', 'validated', 'publishing'].includes(phase)
+        && !imagePhase;
+      if (documentProgress.total && preparationPhase) {
         lines.push(kbFormat(t('kb.prepareCounts'), {
           completed: Math.min(documentProgress.completed || 0, documentProgress.total || 0),
           total: documentProgress.total || 0,
@@ -1998,6 +2041,12 @@ function kbSetTask(job, kind) {
       }
       kbPageEls.taskCounts.textContent = lines.join('\n');
       kbPageEls.taskCounts.hidden = !lines.length;
+    } else if (kind === 'import') {
+      // A terminal import without a published summary is represented by the
+      // failure/result panels below; do not leave the last preparation count
+      // visible as if it were the current operation.
+      kbPageEls.taskCounts.textContent = '';
+      kbPageEls.taskCounts.hidden = true;
     } else if (kind === 'delete') {
       kbPageEls.taskCounts.textContent = kbFormat(t('kb.deleteCounts'), {
         name: job.documentName || '',
@@ -2028,6 +2077,12 @@ function kbSetTask(job, kind) {
     if (kind === 'import' && terminal && summary.documents_total != null) {
       kbPageEls.taskCounts.hidden = false;
     }
+  }
+
+  if (kbPageEls.taskUsage) {
+    const usageText = kbUsageHtml(job.usage);
+    kbPageEls.taskUsage.hidden = !usageText;
+    kbPageEls.taskUsage.textContent = usageText;
   }
 
   const documents = terminal && Array.isArray(job.documents) ? job.documents : [];
@@ -6488,7 +6543,9 @@ function setModelVisionState({ success = false, error = false, busy = false, cle
     ? t('model.visionTesting')
     : (success ? t('model.visionProbeAgain') : t('model.visionProbe'));
   const provider = form.dataset.provider || '';
-  let statusText = t('model.visionPending');
+  let statusText = mode === 'multimodal'
+    ? t('model.visionMultimodalPending')
+    : t('model.visionPending');
   if (mode === 'text') statusText = t('model.visionTextSelected');
   else if (provider === 'deepseek') statusText = t('model.visionUnsupported');
   else if (error) statusText = t('model.visionProbeFailed');
@@ -6668,26 +6725,13 @@ window.gaRefreshModelGuide = () => {
   if (box && !box.hidden && box.dataset.provider) setModelGuide(box.dataset.provider);
 };
 
-function providerCardProfile(key) {
-  const needle = String(key || '').toLowerCase();
-  const matches = state.modelProfiles.filter(profile => {
-    if (profile.kind !== 'native') return false;
-    const haystack = `${profile.model || ''} ${profile.name || ''} ${profile.varName || ''}`.toLowerCase();
-    return needle === 'qwen'
-      ? /qwen|通义|dashscope/.test(haystack)
-      : needle === 'deepseek' && /deepseek/.test(haystack);
-  });
-  return matches.find(profile => profile.active) || matches[0] || null;
-}
-
 async function openAddModelFormForProvider(key) {
   const p = PROVIDER_PRESETS[key];
   if (!p) return openAddModelForm();
-  const existing = providerCardProfile(key);
-  if (existing) {
-    await openEditModelForm(existing.id, { revealApiKey: true, providerKey: key });
-    return;
-  }
+  // The quickstart cards are creation entry points.  Do not resolve an
+  // existing profile by provider here: that made an "add" card silently
+  // edit/overwrite the first matching Qwen or DeepSeek profile.  Existing
+  // profiles remain editable from the model list in Settings.
   modelFormRequestSeq += 1;
   editingModelId = null;
   const form = document.getElementById('add-model-form');
@@ -7973,6 +8017,66 @@ function renderTokPager(host, totalPages, currentPage, onJump) {
 
 async function loadTokenPage(){await tokPollBridge();const f=tokGetFiltered();const all=tokLoadHistory();tokRenderStats(f,all);tokRenderTable(f);}
 
+let _kbUsageRows = [];
+function tokSetKnowledgeColumns(enabled) {
+  const head = tokTable?.querySelector('thead tr');
+  if (!head) return;
+  if (enabled) {
+    head.innerHTML = `<th>${escapeHtml(t('tok.kbName'))}</th><th>${escapeHtml(t('tok.kbModel'))}</th><th>${escapeHtml(t('tok.kbImageIn'))}</th><th>${escapeHtml(t('tok.kbImageOut'))}</th><th>${escapeHtml(t('tok.kbImageCalls'))}</th><th>${escapeHtml(t('tok.kbEmbeddingIn'))}</th><th>${escapeHtml(t('tok.kbEmbeddingCalls'))}</th><th>${escapeHtml(t('tok.kbLastRun'))}</th>`;
+  } else {
+    head.innerHTML = `<th>${escapeHtml(t('tok.colSession'))}</th><th>${escapeHtml(t('tok.colIn'))}</th><th>${escapeHtml(t('tok.colOut'))}</th><th>${escapeHtml(t('tok.colCacheW'))}</th><th>${escapeHtml(t('tok.colCache'))}</th><th>${escapeHtml(t('tok.cost'))}</th>`;
+  }
+}
+
+function tokKnowledgeToken(value, reported, calls) {
+  if (reported) return fmtTok(Number(value) || 0);
+  if (Number(calls) > 0) return t('kb.usageUnavailable');
+  return '—';
+}
+
+function tokKnowledgeModelHtml(usage) {
+  const image = String(usage?.image_model || '').trim();
+  const embedding = String(usage?.embedding_model || '').trim();
+  const lines = [];
+  if (image) lines.push(`${escapeHtml(t('tok.kbImageModel'))}：${escapeHtml(image)}`);
+  if (embedding) lines.push(`${escapeHtml(t('tok.kbEmbeddingModel'))}：${escapeHtml(embedding)}`);
+  return lines.length ? lines.join('<br>') : '—';
+}
+
+function tokRenderKnowledgeTable(rows) {
+  if (!tokTbody) return;
+  tokTbody.innerHTML = '';
+  if (!rows.length) {
+    tokTbody.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">${escapeHtml(t('tok.kbNoData'))}</td></tr>`;
+    if (tokPager) tokPager.innerHTML = '';
+    return;
+  }
+  for (const row of rows) {
+    const usage = row.usage || {};
+    const imageCalls = Number(usage.image_calls) || 0;
+    const embeddingCalls = Number(usage.embedding_api_calls) || 0;
+    const lastRun = Number(row.last_success_at) > 0 ? fmtTime(row.last_success_at) : '—';
+    const tr = document.createElement('tr');
+    const modelTitle = [usage.image_model, usage.embedding_model].filter(Boolean).join(' / ');
+    tr.innerHTML = `<td title="${escapeHtml(row.name || row.id || '')}">${escapeHtml(row.name || row.id || '')}</td><td title="${escapeHtml(modelTitle)}">${tokKnowledgeModelHtml(usage)}</td><td>${escapeHtml(tokKnowledgeToken(usage.image_prompt_tokens, usage.image_token_usage_reported === true, imageCalls))}</td><td>${escapeHtml(tokKnowledgeToken(usage.image_completion_tokens, usage.image_token_usage_reported === true, imageCalls))}</td><td>${fmtTok(imageCalls)}</td><td>${escapeHtml(tokKnowledgeToken(usage.embedding_input_tokens, usage.embedding_input_token_usage_reported === true, embeddingCalls))}</td><td>${fmtTok(embeddingCalls)}</td><td>${escapeHtml(lastRun)}</td>`;
+    tokTbody.appendChild(tr);
+  }
+  if (tokPager) tokPager.innerHTML = '';
+}
+
+async function loadKnowledgeTokens() {
+  try {
+    const data = await bridgeFetch('/kb');
+    _kbUsageRows = (data.knowledge_bases || [])
+      .filter(row => kbUsageHasActivity(row.usage))
+      .sort((a, b) => Number(b.last_success_at || 0) - Number(a.last_success_at || 0));
+    tokRenderKnowledgeTable(_kbUsageRows);
+  } catch (_) {
+    _kbUsageRows = [];
+    if (tokTbody) tokTbody.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">${escapeHtml(t('tok.kbNoData'))}</td></tr>`;
+  }
+}
+
 const _COND_HIST_KEY = 'conductor_token_hist';
 const _COND_LAST_KEY = 'conductor_token_last';
 const _condZero = {input:0,output:0,cacheCreate:0,cacheRead:0,cost:0};
@@ -7999,8 +8103,9 @@ if (tokTabs) tokTabs.addEventListener('click', e => {
   btn.classList.add('active');
   _tokTab = btn.dataset.tab;
   _tokPage = 0;
-  if (_tokTab === 'conductor') { if (tokFilter) tokFilter.style.display = 'none'; if (tokStatRow) tokStatRow.style.display = 'none'; if (tokTable) tokTable.classList.add('tok-table--conductor'); loadConductorTokens(); }
-  else { if (tokFilter) tokFilter.style.display = ''; if (tokStatRow) tokStatRow.style.display = ''; if (tokTable) tokTable.classList.remove('tok-table--conductor'); loadTokenPage(); }
+  if (_tokTab === 'conductor') { if (tokFilter) tokFilter.style.display = 'none'; if (tokStatRow) tokStatRow.style.display = 'none'; if (tokTable) tokTable.classList.add('tok-table--conductor'); tokSetKnowledgeColumns(false); loadConductorTokens(); }
+  else if (_tokTab === 'knowledge') { if (tokFilter) tokFilter.style.display = 'none'; if (tokStatRow) tokStatRow.style.display = 'none'; if (tokTable) { tokTable.classList.remove('tok-table--conductor'); tokTable.classList.add('tok-table--knowledge'); } tokSetKnowledgeColumns(true); loadKnowledgeTokens(); }
+  else { if (tokFilter) tokFilter.style.display = ''; if (tokStatRow) tokStatRow.style.display = ''; if (tokTable) { tokTable.classList.remove('tok-table--conductor', 'tok-table--knowledge'); } tokSetKnowledgeColumns(false); loadTokenPage(); }
 });
 
 async function loadConductorTokens() {
@@ -8045,7 +8150,7 @@ const tokResetBtn=document.getElementById('tok-reset');
 if(tokResetBtn)tokResetBtn.addEventListener('click',()=>{if(fpSince)fpSince.clear();if(fpUntil)fpUntil.clear();_tokPage=0;loadTokenPage();});
 
 /* ─── Token trend chart ─── */
-nav.addEventListener('click',(e)=>{const item=e.target.closest('.nav-item');if(item&&item.dataset.page==='token'){if(_tokTab==='conductor')loadConductorTokens();else loadTokenPage();}if(item&&item.dataset.page==='services')refreshServicesPanel();});
+nav.addEventListener('click',(e)=>{const item=e.target.closest('.nav-item');if(item&&item.dataset.page==='token'){if(_tokTab==='conductor')loadConductorTokens();else if(_tokTab==='knowledge')loadKnowledgeTokens();else loadTokenPage();}if(item&&item.dataset.page==='services')refreshServicesPanel();});
 /* ═══════════════ 自定义预设 ═══════════════ */
 const CP_KEY = 'ga_custom_presets';
 const HB_KEY = 'ga_hidden_builtins';
