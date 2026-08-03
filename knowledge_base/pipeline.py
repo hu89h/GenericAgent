@@ -101,6 +101,8 @@ class IngestPipeline:
 
     @staticmethod
     def _checkpoint_manifest(stage: str) -> dict | None:
+        if not os.path.isdir(stage):
+            return None
         path = os.path.join(stage, "manifest.json")
         try:
             with open(path, encoding="utf-8") as handle:
@@ -110,7 +112,20 @@ class IngestPipeline:
         if not isinstance(manifest, dict) or manifest.get("state") != "checkpoint":
             return None
         checkpoint = manifest.get("checkpoint")
-        return manifest if isinstance(checkpoint, dict) else None
+        if not isinstance(checkpoint, dict):
+            return None
+        mode = str(checkpoint.get("mode") or "import").strip().lower()
+        if mode not in {"import", "add_documents", "retry_image_analysis"}:
+            return None
+        if not isinstance(manifest.get("files"), list):
+            return None
+        try:
+            created_at = int(checkpoint.get("created_at") or 0)
+        except (TypeError, ValueError):
+            return None
+        if created_at <= 0:
+            return None
+        return manifest
 
     @classmethod
     def _write_checkpoint_marker(

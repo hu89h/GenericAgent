@@ -3,6 +3,7 @@ import hashlib
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -345,6 +346,56 @@ class IngestRollbackTests(unittest.TestCase):
                 checkpoint = Path(config.staging_root(kb_id)) / "manifest.json"
                 self.assertTrue(checkpoint.is_file())
                 self.assertEqual(json.loads(checkpoint.read_text(encoding="utf-8"))["state"], "checkpoint")
+
+    def test_startup_cleanup_removes_invalid_checkpoint_but_keeps_valid_image_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data_root = os.path.join(temp, "kbs")
+            config_path = os.path.join(temp, "kb.yaml")
+            source = os.path.join(temp, "source")
+            os.makedirs(source)
+            with mock.patch.object(config, "DATA_ROOT", data_root), mock.patch.object(
+                config, "CONFIG_PATH", config_path
+            ):
+                kb_id = config.kb_id_for_source(source)
+                root = Path(config.kb_root(kb_id))
+                invalid_stage = root / "staging"
+                invalid_stage.mkdir(parents=True)
+                (invalid_stage / "manifest.json").write_text(
+                    json.dumps({
+                        "state": "checkpoint",
+                        "files": [],
+                        "checkpoint": {
+                            "mode": "unknown",
+                            "created_at": int(time.time()),
+                        },
+                    }),
+                    encoding="utf-8",
+                )
+                pipeline = IngestPipeline(
+                    document_processor=_PreparedDocuments(),
+                    record_builder=_OneRecord(),
+                    index_builder=_FailingIndexBuilder("unused"),
+                    publisher=Publisher(),
+                    index=_ProbeIndex(),
+                )
+                pipeline.cleanup_orphans()
+                self.assertFalse(invalid_stage.exists())
+
+                valid_stage = root / "staging"
+                valid_stage.mkdir(parents=True)
+                (valid_stage / "manifest.json").write_text(
+                    json.dumps({
+                        "state": "checkpoint",
+                        "files": [],
+                        "checkpoint": {
+                            "mode": "retry_image_analysis",
+                            "created_at": int(time.time()),
+                        },
+                    }),
+                    encoding="utf-8",
+                )
+                pipeline.cleanup_orphans()
+                self.assertTrue(valid_stage.exists())
 
 
 class DocumentResultTests(unittest.TestCase):

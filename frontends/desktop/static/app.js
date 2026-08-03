@@ -1193,10 +1193,15 @@ function kbRenderLibraries() {
       : (kb.state === 'empty' ? 'empty' : 'pending');
     const stateIcon = statusClass === 'ready' ? GA_ICON('check') : '';
     const canResume = kb.resume_available === true;
+    const hasCheckpoint = kb.checkpoint?.available === true;
+    const checkpointMode = kb.checkpoint?.mode || '';
+    const discardLabel = checkpointMode === 'retry_image_analysis'
+      ? t('kb.discardImageCheckpoint')
+      : t('kb.discardCheckpoint');
     card.innerHTML = `
       <div class="kb-card-title-row"><h3 class="kb-card-title"></h3><span class="kb-status ${statusClass}">${stateIcon}<span>${escapeHtml(stateText)}</span></span></div>
       <div class="kb-card-meta"></div>
-      <div class="kb-card-actions">${kb.source_changed === true ? `<button type="button" class="kb-link-btn kb-rescan-source">${escapeHtml(t('kb.rescanSource'))}</button>` : ''}${canResume ? `<button type="button" class="kb-link-btn kb-resume-import">${escapeHtml(t('kb.resume'))}</button><button type="button" class="kb-link-btn kb-discard-checkpoint">${escapeHtml(t('kb.discardCheckpoint'))}</button>` : ''}<button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
+      <div class="kb-card-actions">${kb.source_changed === true ? `<button type="button" class="kb-link-btn kb-rescan-source">${escapeHtml(t('kb.rescanSource'))}</button>` : ''}${canResume ? `<button type="button" class="kb-link-btn kb-resume-import">${escapeHtml(t('kb.resume'))}</button>` : ''}${hasCheckpoint ? `<button type="button" class="kb-link-btn kb-discard-checkpoint">${escapeHtml(discardLabel)}</button>` : ''}<button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
     card.querySelector('.kb-card-title').textContent = kb.name || kb.id || '';
     card.querySelector('.kb-card-meta').textContent = kbFormat(t('kb.libraryMeta'), {
       documents: kb.counts?.documents || 0,
@@ -1697,10 +1702,12 @@ async function kbResumeCheckpoint(kb) {
 
 async function kbDiscardCheckpoint(kb) {
   if (!kb?.id) return;
+  const imageCheckpoint = kb?.checkpoint?.mode === 'retry_image_analysis';
+  const actionLabel = imageCheckpoint ? t('kb.discardImageCheckpoint') : t('kb.discardCheckpoint');
   const confirmed = await showConfirmDialog({
-    title: t('kb.discardCheckpoint'),
-    message: t('kb.discardCheckpointConfirm'),
-    okText: t('kb.discardCheckpoint'),
+    title: actionLabel,
+    message: imageCheckpoint ? t('kb.discardImageCheckpointConfirm') : t('kb.discardCheckpointConfirm'),
+    okText: actionLabel,
     okKind: 'danger',
   });
   if (!confirmed) return;
@@ -2195,6 +2202,9 @@ function kbSetTask(job, kind) {
     }
     if (terminal && job.checkpointAvailable) {
       messages.unshift(`<div>${escapeHtml(t('kb.checkpointReady'))}</div>`);
+    }
+    if (terminal && job.maintenanceCheckpointAvailable) {
+      messages.unshift(`<div>${escapeHtml(t('kb.imageCheckpointReady'))}</div>`);
     }
     const canOpenMaintenance = actions.some(action =>
       ['retry_image_analysis', 'reindex', 'retry_operation'].includes(action)

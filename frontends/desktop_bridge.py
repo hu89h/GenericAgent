@@ -2956,9 +2956,17 @@ def _kb_job_snapshot(job: dict) -> dict:
     """Expose only stable, user-facing task state to the desktop page."""
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
     checkpoint = dict(job.get("checkpoint") or {})
-    checkpoint_available = bool(
+    checkpoint_raw_available = bool(
         job.get("checkpointAvailable")
-        and str(checkpoint.get("mode") or "import") in {"import", "add_documents"}
+        or checkpoint.get("available")
+    )
+    checkpoint_mode = str(checkpoint.get("mode") or "import")
+    checkpoint_available = bool(
+        checkpoint_raw_available
+        and checkpoint_mode in {"import", "add_documents"}
+    )
+    maintenance_checkpoint_available = bool(
+        checkpoint_raw_available and checkpoint_mode == "retry_image_analysis"
     )
     failures = job.get("failures") or result.get("failures") or []
     documents = job.get("documents") or result.get("documents") or []
@@ -3022,6 +3030,7 @@ def _kb_job_snapshot(job: dict) -> dict:
         "retainProcessed": bool(job.get("retainProcessed")),
         "checkpointAvailable": checkpoint_available,
         "resumeAvailable": checkpoint_available,
+        "maintenanceCheckpointAvailable": maintenance_checkpoint_available,
         "checkpoint": checkpoint,
         "cancellable": (
             isinstance(job.get("cancelEvent"), threading.Event)
@@ -4116,15 +4125,35 @@ async def _kb_maintenance_handler(request, operation: str):
                 )
         except Exception as error:
             if getattr(error, "code", "") == "kb_operation_cancelled":
+                checkpoint = {}
+                try:
+                    checkpoint = backend.checkpoint_status(kb_id)
+                except Exception:
+                    checkpoint = {}
+                has_checkpoint = bool(checkpoint.get("available"))
+                checkpoint_mode = str(checkpoint.get("mode") or "")
                 with _kb_jobs_lock:
                     _kb_jobs[job_id].update(
                         ok=True,
-                        state="cancelled",
-                        phase="cancelled",
+                        state=(
+                            "cancelled_with_checkpoint"
+                            if has_checkpoint
+                            else "cancelled"
+                        ),
+                        phase=(
+                            "cancelled_with_checkpoint"
+                            if has_checkpoint
+                            else "cancelled"
+                        ),
                         error="",
                         updatedAt=int(time.time()),
                         current="",
                         cancelRequested=True,
+                        checkpointAvailable=(
+                            has_checkpoint
+                            and checkpoint_mode in {"import", "add_documents"}
+                        ),
+                        checkpoint=dict(checkpoint),
                         progress={
                             "completed": 0,
                             "total": 0,

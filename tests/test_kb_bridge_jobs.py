@@ -241,6 +241,23 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         self.assertEqual(snapshot["failures"][0]["source"], "books/alpha.pdf")
         self.assertNotIn("internal-a.md", snapshot["failures"][0]["source"])
 
+    def test_snapshot_distinguishes_retained_image_checkpoint_from_import_resume(self):
+        snapshot = desktop_bridge._kb_job_snapshot({
+            "jobId": "kbimageretry-cancelled",
+            "mode": "retry_image_analysis",
+            "state": "cancelled_with_checkpoint",
+            "phase": "cancelled_with_checkpoint",
+            "checkpointAvailable": False,
+            "checkpoint": {
+                "available": True,
+                "mode": "retry_image_analysis",
+            },
+        })
+
+        self.assertFalse(snapshot["checkpointAvailable"])
+        self.assertFalse(snapshot["resumeAvailable"])
+        self.assertTrue(snapshot["maintenanceCheckpointAvailable"])
+
     def test_failure_actions_follow_the_failed_stage(self):
         self.assertEqual(
             desktop_bridge._kb_recommended_action(
