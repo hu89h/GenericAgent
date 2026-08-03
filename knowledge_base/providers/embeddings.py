@@ -12,8 +12,10 @@ import json
 import hashlib
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Iterable, List
+from concurrent.futures import ThreadPoolExecutor, wait
+from typing import Callable, Dict, Iterable, List
+
+from ..cancellation import KnowledgeBaseCancelled, wait_with_cancellation
 
 from . import provider_http, provider_settings, rate_limit
 
@@ -210,7 +212,12 @@ def _prepared_inputs(batch: List[str], config: dict) -> List[str]:
     return [text]
 
 
-def _post_embeddings(batch: List[str], config: dict) -> List[List[float]]:
+def _post_embeddings(
+    batch: List[str],
+    config: dict,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> List[List[float]]:
     if not (config["api_key"] and config["base_url"] and config["model"]):
         raise RuntimeError("mykey.py 需要配置 kb_embedding_config.apikey/apibase/model")
     inputs = _prepared_inputs(batch, config)
@@ -224,6 +231,7 @@ def _post_embeddings(batch: List[str], config: dict) -> List[List[float]]:
         rate_limiter=_embedding_limiter(config),
         estimated_tokens=_rate_limit_token_estimate(inputs),
         usage_tokens=_usage_input_tokens,
+        cancelled=cancelled,
     )
     _add_api_tokens("dense", body)
     rows = sorted(body.get("data") or [], key=lambda x: x.get("index", 0))
@@ -236,7 +244,12 @@ def _post_embeddings(batch: List[str], config: dict) -> List[List[float]]:
     return vectors
 
 
-def embed_texts(texts: Iterable[str], batch_size: int | None = None) -> List[List[float]]:
+def embed_texts(
+    texts: Iterable[str],
+    batch_size: int | None = None,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> List[List[float]]:
     config = _runtime_config()
     texts = list(texts)
     return _embed_cached(
@@ -244,13 +257,20 @@ def embed_texts(texts: Iterable[str], batch_size: int | None = None) -> List[Lis
         batch_size=config["batch_size"] if batch_size is None else batch_size,
         output_type="dense",
         text_type="document",
-        request_fn=lambda batch: _post_embeddings(batch, config),
+        request_fn=lambda batch, **kwargs: _post_embeddings(batch, config, **kwargs),
         normalize_fn=lambda x: list(map(float, x)),
         config=config,
+        cancelled=cancelled,
     )
 
 
-def _post_sparse_embeddings(batch: List[str], text_type: str, config: dict) -> List[Dict[int, float]]:
+def _post_sparse_embeddings(
+    batch: List[str],
+    text_type: str,
+    config: dict,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> List[Dict[int, float]]:
     if not (config["api_key"] and config["base_url"] and config["model"]):
         raise RuntimeError("mykey.py 需要配置 kb_embedding_config.apikey/apibase/model")
     inputs = _prepared_inputs(batch, config)
@@ -271,6 +291,7 @@ def _post_sparse_embeddings(batch: List[str], text_type: str, config: dict) -> L
         rate_limiter=_embedding_limiter(config),
         estimated_tokens=_rate_limit_token_estimate(inputs),
         usage_tokens=_usage_input_tokens,
+        cancelled=cancelled,
     )
     _add_api_tokens("sparse", body)
     rows = sorted(body.get("data") or [], key=lambda x: x.get("index", 0))
@@ -297,6 +318,7 @@ def embed_sparse_texts(
     *,
     text_type: str = "document",
     batch_size: int | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> List[Dict[int, float]]:
     config = _runtime_config()
     texts = list(texts)
@@ -306,13 +328,26 @@ def embed_sparse_texts(
         batch_size=config["batch_size"] if batch_size is None else batch_size,
         output_type="sparse",
         text_type=text_type,
-        request_fn=lambda batch: _post_sparse_embeddings(batch, text_type, config),
+        request_fn=lambda batch, **kwargs: _post_sparse_embeddings(
+            batch, text_type, config, **kwargs
+        ),
         normalize_fn=_normalize_sparse_cached,
         config=config,
+        cancelled=cancelled,
     )
 
 
-def _embed_cached(texts, *, batch_size, output_type, text_type, request_fn, normalize_fn, config):
+def _embed_cached(
+    texts,
+    *,
+    batch_size,
+    output_type,
+    text_type,
+    request_fn,
+    normalize_fn,
+    config,
+    cancelled: Callable[[], bool] | None = None,
+):
     if not config["cache_enabled"]:
         out = []
         for _, vectors in _run_batches(
@@ -320,6 +355,7 @@ def _embed_cached(texts, *, batch_size, output_type, text_type, request_fn, norm
             request_fn,
             concurrency=config["concurrency"],
             request_interval=config["request_interval"],
+            cancelled=cancelled,
         ):
             out.extend(vectors)
         return out
@@ -347,6 +383,7 @@ def _embed_cached(texts, *, batch_size, output_type, text_type, request_fn, norm
             request_fn,
             concurrency=config["concurrency"],
             request_interval=config["request_interval"],
+            cancelled=cancelled,
         ):
             batch_rows = dict(missing_batches)[_]
             for (idx, _text, key), vector in zip(batch_rows, rows):
@@ -439,44 +476,68 @@ def _make_batches(
     )
 
 
-def _run_batches(batches, fn, *, concurrency=1, request_interval=0.0):
+def _run_batches(
+    batches,
+    fn,
+    *,
+    concurrency=1,
+    request_interval=0.0,
+    cancelled: Callable[[], bool] | None = None,
+):
     if not batches:
         return []
     if concurrency <= 1 or len(batches) == 1:
         results = []
         for pos, (i, batch) in enumerate(batches):
+            if callable(cancelled) and cancelled():
+                raise KnowledgeBaseCancelled()
             if pos and request_interval:
-                time.sleep(request_interval)
+                wait_with_cancellation(request_interval, cancelled)
             try:
-                vectors = fn(batch)
+                vectors = fn(batch, cancelled=cancelled)
             except Exception:
                 # DashScope occasionally returns a transient 403/429 on an
                 # otherwise valid batch. Wait longer than the per-request retry
                 # backoff, then retry the same batch once before surfacing it.
-                time.sleep(10)
-                vectors = fn(batch)
+                wait_with_cancellation(10, cancelled)
+                vectors = fn(batch, cancelled=cancelled)
             results.append((i, vectors))
         return results
     results = {}
     failed = {}
-    with ThreadPoolExecutor(max_workers=min(concurrency, len(batches))) as ex:
-        futures = {ex.submit(fn, batch): i for i, batch in batches}
-        for fut in as_completed(futures):
-            idx = futures[fut]
-            try:
-                results[idx] = fut.result()
-            except Exception as exc:
-                failed[idx] = exc
+    ex = ThreadPoolExecutor(max_workers=min(concurrency, len(batches)))
+    futures = {ex.submit(fn, batch, cancelled=cancelled): i for i, batch in batches}
+    try:
+        pending = set(futures)
+        while pending:
+            if callable(cancelled) and cancelled():
+                raise KnowledgeBaseCancelled()
+            done, pending = wait(pending, timeout=0.2)
+            for fut in done:
+                idx = futures[fut]
+                try:
+                    results[idx] = fut.result()
+                except Exception as exc:
+                    failed[idx] = exc
+    except BaseException:
+        for fut in futures:
+            fut.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        ex.shutdown(wait=True)
     if failed:
         # DashScope may reject a burst even when the same batch succeeds moments
         # later. Keep global concurrency high, but retry only failed batches
         # serially so one transient 403/429 does not abort a full KB rebuild.
-        time.sleep(2)
+        wait_with_cancellation(2, cancelled)
         batch_map = dict(batches)
         for pos, idx in enumerate(sorted(failed)):
             if pos and request_interval:
-                time.sleep(request_interval)
-            results[idx] = fn(batch_map[idx])
+                wait_with_cancellation(request_interval, cancelled)
+            if callable(cancelled) and cancelled():
+                raise KnowledgeBaseCancelled()
+            results[idx] = fn(batch_map[idx], cancelled=cancelled)
     return [(i, results[i]) for i, _batch in sorted(batches, key=lambda x: x[0])]
 
 

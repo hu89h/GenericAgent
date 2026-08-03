@@ -845,6 +845,7 @@ class ImageAssetProcessor:
         cancelled: Callable[[], bool] | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ):
+        check_cancelled(cancelled)
         delta = {
             "calls": 0,
             "cached": 0,
@@ -1113,6 +1114,7 @@ class ImageAssetProcessor:
                 emit_progress(job, done)
 
         def run_image_job(job: ImageContent):
+            check_cancelled(cancelled)
             cache_base = self._cache_base(kb)
             mark_job(job, "running")
             on_progress = lambda payload: handle_job_progress(job, payload)
@@ -1281,6 +1283,12 @@ class ImageAssetProcessor:
                 if done % 50 == 0 or done == len(jobs):
                     log(f"  图片分析进度 {done}/{len(jobs)}")
         except KnowledgeBaseCancelled:
+            for future in futures:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            stop_heartbeat()
+            raise
+        except BaseException:
             for future in futures:
                 future.cancel()
             executor.shutdown(wait=False, cancel_futures=True)

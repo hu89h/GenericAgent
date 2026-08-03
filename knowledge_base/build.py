@@ -311,7 +311,14 @@ class IndexBuilder:
         check_cancelled(cancelled)
         if callable(progress):
             progress({"phase": "indexing", "processed": 0, "total": len(records)})
-        stats = self.index.build(kb, records, sources, logfn=logfn)
+        stats = self.index.build(
+            kb,
+            records,
+            sources,
+            logfn=logfn,
+            cancelled=cancelled,
+            progress=progress,
+        )
         check_cancelled(cancelled)
         usage = self.usage.current()
         usage["stats"] = dict(stats)

@@ -1,5 +1,6 @@
 import io
 import threading
+import time
 import unittest
 import urllib.error
 from email.message import Message
@@ -111,6 +112,35 @@ class KnowledgeBaseRateLimitTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
             self.assertIsInstance(result.get("error"), KnowledgeBaseCancelled)
             release.set()
+
+    def test_embedding_batch_cancellation_does_not_wait_for_executor_workers(self):
+        cancelled = threading.Event()
+        release = threading.Event()
+        result = {}
+
+        def blocking(_batch, **_kwargs):
+            release.wait(5)
+            return [[0.0]]
+
+        def run():
+            try:
+                embeddings._run_batches(
+                    [(0, ["one"]), (1, ["two"])],
+                    blocking,
+                    concurrency=2,
+                    cancelled=cancelled.is_set,
+                )
+            except Exception as error:
+                result["error"] = error
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        time.sleep(0.05)
+        cancelled.set()
+        worker.join(1)
+        release.set()
+        self.assertFalse(worker.is_alive())
+        self.assertIsInstance(result.get("error"), KnowledgeBaseCancelled)
 
     @staticmethod
     def _run_cancelled_request(cancelled):

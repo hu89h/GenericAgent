@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import os
 import hashlib
+import threading
+import contextlib
 import shutil
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -47,6 +50,67 @@ MAX_BATCH_FILES = 50
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_MODEL_VERSION = "vlm"
 DEFAULT_TIMEOUT = (15, 300)
+
+
+class _CancelableReader:
+    """File wrapper that lets requests abort an upload at the next read."""
+
+    def __init__(self, handle, cancelled: Callable[[], bool] | None = None):
+        self._handle = handle
+        self._cancelled = cancelled
+
+    def read(self, size=-1):
+        check_cancelled(self._cancelled)
+        return self._handle.read(size)
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+
+def _run_cancelable(
+    operation: Callable[[], Any],
+    cancelled: Callable[[], bool] | None,
+    *,
+    response_holder: dict | None = None,
+):
+    """Run one requests operation while allowing the caller to close its response.
+
+    requests cannot interrupt a blocking socket from the calling thread.  The
+    worker owns the response and the supervising thread closes it as soon as
+    cancellation is observed.  Uploads additionally use ``_CancelableReader``
+    so cancellation can abort while the request body is still being sent.
+    """
+    if not callable(cancelled):
+        return operation()
+    result: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+    state = response_holder if isinstance(response_holder, dict) else {"response": None}
+    lock = threading.Lock()
+
+    def worker() -> None:
+        try:
+            result.put((True, operation()))
+        except BaseException as error:
+            result.put((False, error))
+
+    thread = threading.Thread(target=worker, name="ga-kb-mineru-http", daemon=True)
+    thread.start()
+    while True:
+        try:
+            check_cancelled(cancelled)
+        except KnowledgeBaseCancelled:
+            with lock:
+                response = state.get("response")
+            if response is not None:
+                with contextlib.suppress(Exception):
+                    response.close()
+            raise
+        try:
+            ok, value = result.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if ok:
+            return value
+        raise value
 MINERU_CACHE_VERSION = 1
 MINERU_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 MINERU_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024
@@ -260,15 +324,30 @@ def _request_json(
     json_body: dict[str, Any] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    response_holder: dict = {"response": None}
+
     def operation() -> dict[str, Any]:
-        with requests.request(
-            method,
-            url,
-            headers=headers,
-            json=json_body,
-            timeout=DEFAULT_TIMEOUT,
-        ) as response:
-            return _json_response(response, context)
+        def request_once() -> dict[str, Any]:
+            response = requests.request(
+                method,
+                url,
+                headers=headers,
+                json=json_body,
+                timeout=DEFAULT_TIMEOUT,
+            )
+            response_holder["response"] = response
+            try:
+                return _json_response(response, context)
+            finally:
+                response_holder["response"] = None
+                with contextlib.suppress(Exception):
+                    response.close()
+
+        return _run_cancelable(
+            request_once,
+            cancelled,
+            response_holder=response_holder,
+        )
 
     return _retry(
         context,
@@ -318,14 +397,24 @@ def _upload(
     item: MinerUFile,
     cancelled: Callable[[], bool] | None = None,
 ) -> MinerUFile:
+    response_holder: dict = {"response": None}
+
     def operation() -> MinerUFile:
         try:
-            with item.source_path.open("rb") as handle, requests.put(
+            with item.source_path.open("rb") as handle:
+                reader = _CancelableReader(handle, cancelled)
+                response = requests.put(
                     item.upload_url,
-                    data=handle,
+                    data=reader,
                     timeout=DEFAULT_TIMEOUT,
-            ) as response:
-                status = int(response.status_code)
+                )
+                response_holder["response"] = response
+                try:
+                    status = int(response.status_code)
+                finally:
+                    response_holder["response"] = None
+                    with contextlib.suppress(Exception):
+                        response.close()
         except requests.RequestException:
             raise
         if status in (408, 409, 425, 429) or status >= 500:
@@ -336,7 +425,11 @@ def _upload(
 
     return _retry(
         f"上传 {item.relative_path}",
-        operation,
+        lambda: _run_cancelable(
+            operation,
+            cancelled,
+            response_holder=response_holder,
+        ),
         cancelled=cancelled,
     )
 
@@ -412,17 +505,21 @@ def _download(
     # complete response has been consumed.
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
 
+    response_holder: dict = {"response": None}
+
     def operation() -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary.unlink(missing_ok=True)
         received = 0
         try:
-            with requests.get(
+            response = requests.get(
                 url,
                 stream=True,
                 timeout=DEFAULT_TIMEOUT,
                 headers={"Accept": "application/zip", "User-Agent": "GenericAgent/KB"},
-            ) as response:
+            )
+            response_holder["response"] = response
+            try:
                 status = int(response.status_code)
                 if status in (408, 409, 425, 429) or status >= 500:
                     raise _RetryableMinerUError(f"下载解析结果 HTTP {status}")
@@ -445,6 +542,10 @@ def _download(
                         pass
                 if received <= 0:
                     raise requests.exceptions.ConnectionError("下载结果为空")
+            finally:
+                response_holder["response"] = None
+                with contextlib.suppress(Exception):
+                    response.close()
             check_cancelled(cancelled)
             os.replace(temporary, target)
         except BaseException:
@@ -454,7 +555,11 @@ def _download(
     try:
         _retry(
             "下载 MinerU 解析结果",
-            operation,
+            lambda: _run_cancelable(
+                operation,
+                cancelled,
+                response_holder=response_holder,
+            ),
             attempts=5,
             cancelled=cancelled,
         )
@@ -545,22 +650,30 @@ def process_batches(
                 pool.submit(_upload, item, cancelled): item
                 for item in batch
             }
-            for future in as_completed(futures):
+            pending = set(futures)
+            while pending:
                 check_cancelled(cancelled)
-                item = futures[future]
-                try:
-                    future.result()
-                    item.state = "processing"
-                except KnowledgeBaseCancelled:
-                    raise
-                except Exception as error:
-                    item.state = "failed"
-                    item.error = str(error)
-                on_update(item)
+                done, pending = wait(pending, timeout=0.2)
+                for future in done:
+                    item = futures[future]
+                    try:
+                        future.result()
+                        item.state = "processing"
+                    except KnowledgeBaseCancelled:
+                        raise
+                    except Exception as error:
+                        item.state = "failed"
+                        item.error = str(error)
+                    on_update(item)
         except KnowledgeBaseCancelled:
             for future in futures:
                 future.cancel()
-            pool.shutdown(wait=True, cancel_futures=True)
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
             raise
         else:
             pool.shutdown(wait=True)
