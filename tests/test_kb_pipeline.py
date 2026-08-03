@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -32,6 +33,8 @@ class _PreparedDocuments:
         name="",
         progress=None,
         cancelled=None,
+        resume_manifest=None,
+        retain_on_cancel=None,
     ):
         processed = os.path.join(stage_root, "processed")
         os.makedirs(processed)
@@ -310,6 +313,38 @@ class IngestRollbackTests(unittest.TestCase):
 
                 self.assertTrue(os.path.isfile(sentinel))
                 self.assertFalse(os.path.exists(config.staging_root(kb_id)))
+
+    def test_cancellation_can_retain_a_checkpoint_without_publishing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = os.path.join(temp, "source")
+            os.makedirs(source)
+            data_root = os.path.join(temp, "kbs")
+            config_path = os.path.join(temp, "kb.yaml")
+            cancel_event = threading.Event()
+            with mock.patch.object(config, "DATA_ROOT", data_root), mock.patch.object(
+                config, "CONFIG_PATH", config_path
+            ):
+                kb_id = config.kb_id_for_source(source)
+                config.upsert_kb(kb_id, name="old", source_path=source)
+                pipeline = IngestPipeline(
+                    document_processor=_CancellingDocuments(cancel_event),
+                    record_builder=_OneRecord(),
+                    index_builder=_FailingIndexBuilder("must not build"),
+                    publisher=Publisher(),
+                    index=_ProbeIndex(),
+                )
+
+                with self.assertRaises(KnowledgeBaseCancelled):
+                    pipeline.import_kb(
+                        source,
+                        name="new",
+                        cancelled=cancel_event.is_set,
+                        retain_partial=lambda: True,
+                    )
+
+                checkpoint = Path(config.staging_root(kb_id)) / "manifest.json"
+                self.assertTrue(checkpoint.is_file())
+                self.assertEqual(json.loads(checkpoint.read_text(encoding="utf-8"))["state"], "checkpoint")
 
 
 class DocumentResultTests(unittest.TestCase):

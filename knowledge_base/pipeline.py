@@ -8,12 +8,13 @@ import os
 import shutil
 import tempfile
 import time
+from pathlib import Path
 from typing import Callable
 
 from . import config
 from .build import IndexBuilder, RecordBuilder
 from .assets import cleanup_image_cache
-from .cancellation import check_cancelled
+from .cancellation import KnowledgeBaseCancelled, check_cancelled
 from .fs import remove_tree
 from .importer import DocumentProcessor
 from .locking import mutation_lock
@@ -97,6 +98,77 @@ class IngestPipeline:
         self.index_builder = index_builder
         self.publisher = publisher
         self.index = index
+
+    @staticmethod
+    def _checkpoint_manifest(stage: str) -> dict | None:
+        path = os.path.join(stage, "manifest.json")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+        except Exception:
+            return None
+        if not isinstance(manifest, dict) or manifest.get("state") != "checkpoint":
+            return None
+        checkpoint = manifest.get("checkpoint")
+        return manifest if isinstance(checkpoint, dict) else None
+
+    @classmethod
+    def _write_checkpoint_marker(
+        cls,
+        *,
+        stage: str,
+        kb_id: str,
+        name: str,
+        source_path: str,
+        mode: str,
+        source_files: list[str] | None = None,
+    ) -> dict:
+        path = os.path.join(stage, "manifest.json")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+        except Exception:
+            manifest = {}
+        if not isinstance(manifest, dict):
+            manifest = {}
+        manifest.update({
+            "schema_version": int(manifest.get("schema_version") or 1),
+            "kb_id": kb_id,
+            "name": str(name or manifest.get("name") or kb_id),
+            "source_path": str(source_path or manifest.get("source_path") or ""),
+            "state": "checkpoint",
+        })
+        manifest["checkpoint"] = {
+            "created_at": int(time.time()),
+            "mode": str(mode or "import"),
+            "source_files": [str(item) for item in (source_files or []) if item],
+            "ready_documents": sum(
+                item.get("status") == "ready"
+                for item in manifest.get("files") or []
+                if isinstance(item, dict) and item.get("kind") == "document"
+            ),
+            "total_documents": sum(
+                item.get("kind") == "document"
+                for item in manifest.get("files") or []
+                if isinstance(item, dict)
+            ),
+        }
+        _write_json_atomic(path, manifest)
+        return manifest
+
+    def checkpoint_status(self, kb_id: str) -> dict:
+        stage = config.staging_root(str(kb_id or "").strip())
+        manifest = self._checkpoint_manifest(stage)
+        if not manifest:
+            return {"available": False}
+        checkpoint = manifest.get("checkpoint") or {}
+        return {
+            "available": True,
+            "created_at": checkpoint.get("created_at"),
+            "mode": str(checkpoint.get("mode") or "import"),
+            "ready_documents": int(checkpoint.get("ready_documents") or 0),
+            "total_documents": int(checkpoint.get("total_documents") or 0),
+        }
 
     @staticmethod
     def _emit(progress: Callable[[dict], None] | None, **event) -> None:
@@ -260,11 +332,13 @@ class IngestPipeline:
                     continue
                 if not config.valid_kb_id(name) or not os.path.isdir(candidate):
                     continue
-                for transient in ("staging", "rollback"):
-                    remove_tree(
-                        os.path.join(candidate, transient),
-                        ignore_errors=True,
-                    )
+                stage = os.path.join(candidate, "staging")
+                if self._checkpoint_manifest(stage):
+                    for transient in (".mineru_downloads", ".mineru_extract", ".selected_sources"):
+                        remove_tree(os.path.join(stage, transient), ignore_errors=True)
+                else:
+                    remove_tree(stage, ignore_errors=True)
+                remove_tree(os.path.join(candidate, "rollback"), ignore_errors=True)
                 mineru.cleanup_cache(config.mineru_cache_root(name))
                 cleanup_image_cache(config.image_cache_root(name))
                 index_root = os.path.join(
@@ -292,6 +366,9 @@ class IngestPipeline:
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        existing_records: list[dict] | None = None,
+        include_files: set[str] | None = None,
+        existing_sources: dict | None = None,
     ) -> dict:
         """Build a complete index from the staged processed documents and publish it."""
         check_cancelled(cancelled)
@@ -304,24 +381,54 @@ class IngestPipeline:
             "image_cache_path": self._ensure_image_cache(kb_id),
             "exists": True,
         }
-        built = self.records.build(
-            stage_kb,
-            manifest,
-            progress=progress,
-            logfn=logfn,
-            cancelled=cancelled,
-        )
-        check_cancelled(cancelled)
-        records_file = os.path.join(stage, "records.jsonl")
-        self.records.write_records(records_file, built.records, kb_id=kb_id)
-        check_cancelled(cancelled)
-        sources = {
-            **built.sources,
-            "records_sha256": self.records.records_sha256(records_file),
+        build_kwargs = {
+            "progress": progress,
+            "logfn": logfn,
+            "cancelled": cancelled,
         }
+        if include_files is not None:
+            build_kwargs["include_files"] = include_files
+        built = self.records.build(stage_kb, manifest, **build_kwargs)
+        check_cancelled(cancelled)
+        records = list(existing_records or [])
+        if include_files is not None:
+            normalized_files = {
+                str(value or "").replace("\\", "/").lstrip("/")
+                for value in include_files
+            }
+            records = [
+                record for record in records
+                if str(record.get("file_name") or "").replace("\\", "/").lstrip("/")
+                not in normalized_files
+            ]
+        records.extend(built.records)
+        records_file = os.path.join(stage, "records.jsonl")
+        self.records.write_records(records_file, records, kb_id=kb_id)
+        check_cancelled(cancelled)
+        sources = dict(existing_sources or {})
+        for key, value in built.sources.items():
+            if key == "documents" and isinstance(value, list):
+                previous = {
+                    str(item.get("path") or "").replace("\\", "/"): item
+                    for item in sources.get(key) or []
+                    if isinstance(item, dict) and item.get("path")
+                }
+                previous.update({
+                    str(item.get("path") or "").replace("\\", "/"): item
+                    for item in value
+                    if isinstance(item, dict) and item.get("path")
+                })
+                sources[key] = sorted(previous.values(), key=lambda item: str(item.get("path") or ""))
+            elif key == "images" and isinstance(value, dict):
+                merged_images = dict(sources.get(key) or {})
+                merged_images.update(value)
+                sources[key] = merged_images
+            else:
+                sources[key] = value
+        sources["records_sha256"] = self.records.records_sha256(records_file)
         index_stats = self.index_builder.build(
             stage_kb,
-            records=built.records,
+            records=records,
             sources=sources,
             progress=progress,
             logfn=logfn,
@@ -331,7 +438,7 @@ class IngestPipeline:
 
         document_results, failures = self._document_results(
             manifest,
-            built.records,
+            records,
             list(prepared_failures) + list(built.failures),
         )
         documents_succeeded = sum(
@@ -417,6 +524,7 @@ class IngestPipeline:
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        retain_partial: Callable[[], bool] | None = None,
     ) -> dict:
         source_path = config.canonical_source_path(source_dir)
         kb_id = config.kb_id_for_source(source_path)
@@ -425,19 +533,40 @@ class IngestPipeline:
         with mutation_lock:
             check_cancelled(cancelled)
             os.makedirs(root, exist_ok=True)
-            remove_tree(stage)
+            checkpoint = self._checkpoint_manifest(stage)
+            resume_manifest = (
+                checkpoint
+                if checkpoint
+                and os.path.normcase(os.path.realpath(str(checkpoint.get("source_path") or "")))
+                == os.path.normcase(source_path)
+                else None
+            )
+            if resume_manifest:
+                self._emit(
+                    progress,
+                    phase="resuming",
+                    current="继续使用已保留的文档处理结果",
+                    completed=(resume_manifest.get("checkpoint") or {}).get("ready_documents", 0),
+                    total=(resume_manifest.get("checkpoint") or {}).get("total_documents", 0),
+                )
+            else:
+                remove_tree(stage)
             remove_tree(os.path.join(root, "rollback"))
             try:
                 self.index_builder.begin_build()
                 check_cancelled(cancelled)
-                prepared = self.documents.prepare(
-                    source_path,
-                    stage_root=stage,
-                    kb_id=kb_id,
-                    name=name,
-                    progress=progress,
-                    cancelled=cancelled,
-                )
+                prepare_kwargs = {
+                    "stage_root": stage,
+                    "kb_id": kb_id,
+                    "name": name,
+                    "progress": progress,
+                    "cancelled": cancelled,
+                }
+                if resume_manifest is not None:
+                    prepare_kwargs["resume_manifest"] = resume_manifest
+                if retain_partial is not None:
+                    prepare_kwargs["retain_on_cancel"] = retain_partial
+                prepared = self.documents.prepare(source_path, **prepare_kwargs)
                 check_cancelled(cancelled)
                 self._ensure_image_cache(kb_id)
                 check_cancelled(cancelled)
@@ -453,6 +582,18 @@ class IngestPipeline:
                     logfn=logfn,
                     cancelled=cancelled,
                 )
+            except KnowledgeBaseCancelled:
+                if callable(retain_partial) and retain_partial():
+                    self._write_checkpoint_marker(
+                        stage=stage,
+                        kb_id=kb_id,
+                        name=name,
+                        source_path=source_path,
+                        mode="import",
+                    )
+                else:
+                    remove_tree(stage)
+                raise
             except Exception:
                 remove_tree(stage)
                 raise
@@ -465,6 +606,7 @@ class IngestPipeline:
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        retain_partial: Callable[[], bool] | None = None,
     ) -> dict:
         """Append selected external files and rebuild one complete staged index."""
         value = str(kb_id or "").strip()
@@ -477,10 +619,29 @@ class IngestPipeline:
                 raise KeyError("knowledge_base_not_found")
             self.index_builder.begin_build()
             stage = config.staging_root(value)
-            remove_tree(stage)
+            checkpoint = self._checkpoint_manifest(stage)
+            checkpoint_meta = (checkpoint or {}).get("checkpoint") or {}
+            requested_keys = {
+                os.path.normcase(os.path.realpath(str(raw)))
+                for raw in source_files or []
+                if raw
+            }
+            checkpoint_keys = {
+                os.path.normcase(os.path.realpath(str(raw)))
+                for raw in checkpoint_meta.get("source_files") or []
+                if raw
+            }
+            resume_checkpoint = bool(
+                checkpoint
+                and checkpoint_meta.get("mode") == "add_documents"
+                and requested_keys
+                and requested_keys == checkpoint_keys
+            )
+            if not resume_checkpoint:
+                remove_tree(stage)
             try:
                 active = config.active_root(value)
-                if os.path.isdir(active):
+                if not resume_checkpoint and os.path.isdir(active):
                     shutil.copytree(active, stage, dirs_exist_ok=True)
                 os.makedirs(os.path.join(stage, "processed"), exist_ok=True)
                 old_manifest = {}
@@ -490,7 +651,7 @@ class IngestPipeline:
                         old_manifest = json.load(handle)
                 old_manifest = old_manifest if isinstance(old_manifest, dict) else {}
                 source_root = str(kb.get("source_path") or "").strip()
-                existing_sources = set()
+                existing_source_paths = set()
                 for entry in old_manifest.get("files") or []:
                     if not isinstance(entry, dict) or entry.get("kind") != "document":
                         continue
@@ -500,8 +661,8 @@ class IngestPipeline:
                         candidate = os.path.realpath(os.path.join(source_root, relative))
                         if os.path.isfile(candidate):
                             source_value = candidate
-                    if source_value:
-                        existing_sources.add(os.path.normcase(os.path.realpath(source_value)))
+                    if source_value and not resume_checkpoint:
+                        existing_source_paths.add(os.path.normcase(os.path.realpath(source_value)))
                 selected = []
                 selected_keys = set()
                 for raw in source_files or []:
@@ -509,38 +670,70 @@ class IngestPipeline:
                     if not os.path.isfile(path):
                         raise ValueError(f"source file not found: {path}")
                     identity = os.path.normcase(path)
-                    if identity not in existing_sources and identity not in selected_keys:
+                    if (resume_checkpoint or identity not in existing_source_paths) and identity not in selected_keys:
                         selected.append(path)
                         selected_keys.add(identity)
                 if not selected:
                     raise ValueError("所选文件均已在知识库中")
-                prepared = self.documents.prepare_files(
-                    selected,
-                    stage_root=stage,
-                    kb_id=value,
-                    name=kb.get("name") or value,
-                    progress=progress,
-                    cancelled=cancelled,
-                )
+                prepare_kwargs = {
+                    "stage_root": stage,
+                    "kb_id": value,
+                    "name": kb.get("name") or value,
+                    "progress": progress,
+                    "cancelled": cancelled,
+                }
+                if resume_checkpoint:
+                    prepare_kwargs["resume_manifest"] = old_manifest
+                if retain_partial is not None:
+                    prepare_kwargs["retain_on_cancel"] = retain_partial
+                prepared = self.documents.prepare_files(selected, **prepare_kwargs)
                 merged = dict(old_manifest)
-                merged["files"] = [
+                prepared_files = list(prepared["manifest"].get("files") or [])
+                new_processed_files = {
+                    str(processed).replace("\\", "/").lstrip("/")
+                    for entry in prepared_files
+                    if isinstance(entry, dict)
+                    for processed in entry.get("processed") or []
+                    if str(processed or "").strip()
+                }
+                existing_records = None
+                existing_index_sources = None
+                records_file = os.path.join(stage, "records.jsonl")
+                if os.path.isfile(records_file):
+                    existing_records = self.records.read_records(records_file)
+                    existing_index_sources = old_manifest.get("index_sources") or {}
+                selected_labels = {
+                    self.documents._selection_label(Path(path))
+                    for path in selected
+                }
+                existing_files = [
                     item for item in (old_manifest.get("files") or [])
                     if isinstance(item, dict)
-                ] + list(prepared["manifest"].get("files") or [])
+                    and (not resume_checkpoint or item.get("source") not in selected_labels)
+                ]
+                merged["files"] = existing_files + prepared_files
                 merged["source_path"] = kb.get("source_path") or ""
+                fingerprints = {
+                    str(item.get("path") or "").casefold(): item
+                    for item in old_manifest.get("source_fingerprint") or []
+                    if isinstance(item, dict) and item.get("path")
+                }
+                fingerprints.update({
+                    str(item.get("path") or "").casefold(): item
+                    for item in prepared["manifest"].get("source_fingerprint") or []
+                    if isinstance(item, dict) and item.get("path")
+                })
                 merged["source_fingerprint"] = sorted(
-                    [
-                        item
-                        for item in (
-                            *list(old_manifest.get("source_fingerprint") or []),
-                            *list(prepared["manifest"].get("source_fingerprint") or []),
-                        )
-                        if isinstance(item, dict)
-                    ],
-                    key=lambda item: str(item.get("path") or "").casefold(),
+                    fingerprints.values(), key=lambda item: str(item.get("path") or "").casefold()
                 )
+                old_failures = list(old_manifest.get("failures") or [])
+                if resume_checkpoint:
+                    old_failures = [
+                        item for item in old_failures
+                        if not isinstance(item, dict) or item.get("source") not in selected_labels
+                    ]
                 failures = [
-                    *list(old_manifest.get("failures") or []),
+                    *old_failures,
                     *list(prepared.get("failures") or []),
                 ]
                 merged["failures"] = failures
@@ -556,7 +749,23 @@ class IngestPipeline:
                     progress=progress,
                     logfn=logfn,
                     cancelled=cancelled,
+                    existing_records=existing_records,
+                    include_files=(new_processed_files if existing_records else None),
+                    existing_sources=(existing_index_sources if existing_records else None),
                 )
+            except KnowledgeBaseCancelled:
+                if callable(retain_partial) and retain_partial():
+                    self._write_checkpoint_marker(
+                        stage=stage,
+                        kb_id=value,
+                        name=kb.get("name") or value,
+                        source_path=kb.get("source_path") or "",
+                        mode="add_documents",
+                        source_files=source_files,
+                    )
+                else:
+                    remove_tree(stage)
+                raise
             except Exception:
                 remove_tree(stage)
                 raise

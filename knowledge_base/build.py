@@ -48,9 +48,27 @@ class RecordBuilder:
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        include_files: set[str] | None = None,
     ) -> RecordBuildResult:
+        """Build records for all staged documents or a selected subset.
+
+        Incremental document imports pass ``include_files`` and merge the
+        resulting records with the already published record stream in the
+        pipeline.  Reindex and full imports leave it unset and process every
+        staged document.
+        """
         log = logfn or (lambda _message: None)
-        scanned = documents.scan_documents(kb["path"])
+        all_scanned = documents.scan_documents(kb["path"])
+        selected_files = {
+            str(value or "").replace("\\", "/").lstrip("/")
+            for value in (include_files or set())
+            if str(value or "").strip()
+        }
+        scanned = (
+            [item for item in all_scanned if item[0].replace("\\", "/") in selected_files]
+            if include_files is not None
+            else all_scanned
+        )
         titles = self._title_map(manifest)
         records: list[dict] = []
         failures: list[dict] = []
@@ -175,7 +193,7 @@ class RecordBuilder:
             if record.get("body"):
                 records.append(record)
 
-        if not records:
+        if not records and include_files is None:
             raise RuntimeError("没有可索引的图文记录")
 
         sources = {

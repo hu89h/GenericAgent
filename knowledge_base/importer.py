@@ -382,6 +382,34 @@ def _emit(progress: Callable[[dict], None] | None, phase: str, counts: dict[str,
         })
 
 
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _source_fingerprint(files: list[tuple[Path, str]]) -> list[dict[str, Any]]:
+    result = []
+    for path, relative in files:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        result.append({
+            "path": relative,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        })
+    return result
+
+
 class DocumentProcessor:
     """Prepare source documents inside a caller-owned staging directory."""
 
@@ -403,6 +431,8 @@ class DocumentProcessor:
         name: str = "",
         progress: Callable[[dict], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        resume_manifest: dict | None = None,
+        retain_on_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         check_cancelled(cancelled)
         source_root = Path(os.path.realpath(os.path.expanduser(str(source_dir or ""))))
@@ -417,6 +447,16 @@ class DocumentProcessor:
         stage.mkdir(parents=True, exist_ok=True)
 
         files = _scan_source(source_root)
+        previous_entries = {
+            os.path.normcase(str(item.get("source") or "")): item
+            for item in (resume_manifest or {}).get("files") or []
+            if isinstance(item, dict) and item.get("source")
+        }
+        previous_fingerprint = {
+            os.path.normcase(str(item.get("path") or "")): item
+            for item in (resume_manifest or {}).get("source_fingerprint") or []
+            if isinstance(item, dict) and item.get("path")
+        }
         entries: list[dict[str, Any]] = []
         entry_by_source: dict[str, dict[str, Any]] = {}
         output_rels: set[str] = set()
@@ -451,6 +491,31 @@ class DocumentProcessor:
                 )
             output_rels.add(candidate)
             return candidate
+
+        def reusable_entry(path: Path, relative: str) -> dict[str, Any] | None:
+            previous = previous_entries.get(os.path.normcase(relative))
+            if not previous or previous.get("kind") != "document" or previous.get("status") != "ready":
+                return None
+            fingerprint = previous_fingerprint.get(os.path.normcase(relative))
+            if not fingerprint:
+                return None
+            try:
+                stat = path.stat()
+            except OSError:
+                return None
+            if (
+                int(fingerprint.get("size") or -1) != stat.st_size
+                or int(fingerprint.get("mtime_ns") or -1) != stat.st_mtime_ns
+            ):
+                return None
+            processed = [
+                str(value or "").replace("\\", "/").lstrip("/")
+                for value in previous.get("processed") or []
+                if value
+            ]
+            if not processed or any(not (processed_root / value).is_file() for value in processed):
+                return None
+            return dict(previous, source=relative, processed=processed)
 
         try:
             _emit(progress, "scanning", counts)
@@ -496,6 +561,11 @@ class DocumentProcessor:
                 entry_by_source[rel] = entry
                 if ext in MARKDOWN_EXTS:
                     entry["kind"] = "document"
+                    reusable = reusable_entry(path, rel)
+                    if reusable:
+                        entry.update(reusable, status="ready", error="", stage="", error_type="")
+                        counts["markdown"] += 1
+                        continue
                     try:
                         target_rel = output_rel_for(rel)
                         target = processed_root / target_rel
@@ -520,6 +590,10 @@ class DocumentProcessor:
                 if ext not in SUPPORTED_EXTS:
                     continue
                 entry.update(kind="document", status="queued")
+                reusable = reusable_entry(path, rel)
+                if reusable:
+                    entry.update(reusable, status="ready", error="", stage="", error_type="")
+                    continue
                 conversion_specs.append({"source": rel, "path": path, "entry": entry})
                 counts["converting"] += 1
 
@@ -699,6 +773,41 @@ class DocumentProcessor:
                 "files": document_entries,
                 "failures": list(manifest["failures"]),
             }
+        except KnowledgeBaseCancelled:
+            if callable(retain_on_cancel) and retain_on_cancel():
+                refresh_document_counts()
+                document_entries = [
+                    item for item in entries if item.get("kind") == "document"
+                ]
+                partial_failures = [
+                    {
+                        "source": item.get("source") or "",
+                        "stage": item.get("stage") or "document",
+                        "error_type": item.get("error_type") or "ProcessingError",
+                        "error": item.get("error") or "",
+                    }
+                    for item in document_entries
+                    if item.get("status") == "failed"
+                ]
+                checkpoint = {
+                    "schema_version": 1,
+                    "kb_id": kb_id,
+                    "name": str(name or source_root.name),
+                    "source_path": str(source_root),
+                    "imported_at": int(time.time()),
+                    "source_fingerprint": _source_fingerprint(files),
+                    "files": entries,
+                    "summary": dict(counts),
+                    "failures": partial_failures,
+                    "state": "checkpoint",
+                    "checkpoint": {
+                        "created_at": int(time.time()),
+                        "ready_documents": int(counts.get("ready") or 0),
+                        "total_documents": int(counts.get("total") or 0),
+                    },
+                }
+                _write_json_atomic(stage / "manifest.json", checkpoint)
+            raise
         finally:
             for path in (downloads_root, extract_root):
                 remove_tree(path)
@@ -781,6 +890,8 @@ class DocumentProcessor:
         name: str = "",
         progress: Callable[[dict], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        resume_manifest: dict | None = None,
+        retain_on_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Prepare a user-selected set of files without importing a parent folder."""
         selected_paths: list[Path] = []
@@ -823,19 +934,10 @@ class DocumentProcessor:
         stage = Path(stage_root).resolve()
         workspace = stage / ".selected_sources"
         remove_tree(workspace)
-        try:
-            mapping = self._prepare_selection_workspace(
-                [str(path) for path in selected_paths], workspace
-            )
-            result = self.prepare(
-                str(workspace),
-                stage_root=str(stage),
-                kb_id=kb_id,
-                name=name,
-                progress=progress,
-                cancelled=cancelled,
-            )
-            manifest = dict(result.get("manifest") or {})
+        mapping: dict[str, Path] = {}
+
+        def rewrite_selection_manifest(manifest: dict) -> dict:
+            manifest = dict(manifest or {})
             source_by_temp = mapping
             for entry in manifest.get("files") or []:
                 temp_source = str(entry.get("source") or "").replace("\\", "/")
@@ -865,6 +967,58 @@ class DocumentProcessor:
                 ],
                 key=lambda item: item["path"].casefold(),
             )
+            return manifest
+
+        try:
+            mapping = self._prepare_selection_workspace(
+                [str(path) for path in selected_paths], workspace
+            )
+            workspace_resume = None
+            if isinstance(resume_manifest, dict):
+                workspace_entries = []
+                for raw_entry in resume_manifest.get("files") or []:
+                    if not isinstance(raw_entry, dict):
+                        continue
+                    original = Path(str(raw_entry.get("source_path") or "")).resolve()
+                    temp_rel = next(
+                        (
+                            key for key, value in mapping.items()
+                            if value.resolve() == original
+                        ),
+                        None,
+                    )
+                    if not temp_rel:
+                        continue
+                    workspace_entries.append(dict(raw_entry, source=temp_rel))
+                workspace_fingerprint = []
+                for temp_rel, original in mapping.items():
+                    temp_path = workspace / temp_rel
+                    try:
+                        stat = temp_path.stat()
+                    except OSError:
+                        continue
+                    workspace_fingerprint.append({
+                        "path": temp_rel,
+                        "size": stat.st_size,
+                        "mtime_ns": stat.st_mtime_ns,
+                    })
+                workspace_resume = dict(
+                    resume_manifest,
+                    files=workspace_entries,
+                    source_fingerprint=workspace_fingerprint,
+                )
+            result = self.prepare(
+                str(workspace),
+                stage_root=str(stage),
+                kb_id=kb_id,
+                name=name,
+                progress=progress,
+                cancelled=cancelled,
+                resume_manifest=workspace_resume,
+                retain_on_cancel=retain_on_cancel,
+            )
+            manifest = dict(result.get("manifest") or {})
+            manifest = rewrite_selection_manifest(manifest)
             result["manifest"] = manifest
             result["source_path"] = ""
             result["files"] = [
@@ -874,6 +1028,30 @@ class DocumentProcessor:
             ]
             result["failures"] = list(manifest.get("failures") or [])
             return result
+        except KnowledgeBaseCancelled:
+            if callable(retain_on_cancel) and retain_on_cancel():
+                manifest_path = stage / "manifest.json"
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    manifest = {}
+                manifest = rewrite_selection_manifest(manifest)
+                manifest["state"] = "checkpoint"
+                manifest["checkpoint"] = {
+                    "created_at": int(time.time()),
+                    "ready_documents": sum(
+                        item.get("status") == "ready"
+                        for item in manifest.get("files") or []
+                        if isinstance(item, dict) and item.get("kind") == "document"
+                    ),
+                    "total_documents": sum(
+                        item.get("kind") == "document"
+                        for item in manifest.get("files") or []
+                        if isinstance(item, dict)
+                    ),
+                }
+                _write_json_atomic(manifest_path, manifest)
+            raise
         finally:
             remove_tree(workspace)
 

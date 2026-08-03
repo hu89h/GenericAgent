@@ -137,6 +137,7 @@ def import_kb(
     name: str = "",
     progress=None,
     cancelled=None,
+    retain_partial=None,
 ) -> dict:
     source = config.canonical_source_path(source_dir)
     kb_id = config.kb_id_for_source(source)
@@ -147,6 +148,7 @@ def import_kb(
             name=name,
             progress=progress,
             cancelled=cancelled,
+            retain_partial=retain_partial,
         )
     finally:
         _mark_processing(kb_id, False)
@@ -163,6 +165,7 @@ def add_documents(
     *,
     progress=None,
     cancelled=None,
+    retain_partial=None,
 ) -> dict:
     value = str(kb_id or "").strip()
     _mark_processing(value, True)
@@ -172,6 +175,7 @@ def add_documents(
             source_files,
             progress=progress,
             cancelled=cancelled,
+            retain_partial=retain_partial,
         )
     finally:
         _mark_processing(value, False)
@@ -346,6 +350,7 @@ def kb_status(kb: dict) -> dict:
         )
         if value
     ]
+    checkpoint = _runtime().pipeline.checkpoint_status(kb["id"])
     return {
         "id": kb["id"],
         "name": kb["name"],
@@ -366,6 +371,7 @@ def kb_status(kb: dict) -> dict:
             "failures": len(failures),
         },
         "last_success_at": max(success_times) if success_times else None,
+        "checkpoint": checkpoint,
         "failures": failures,
         "documents": documents,
     }
@@ -381,6 +387,10 @@ def status(kb_id: str | None = None) -> dict:
         "knowledge_bases": rows,
         "configured": bool(rows),
     }
+
+
+def checkpoint_status(kb_id: str) -> dict:
+    return _runtime().pipeline.checkpoint_status(kb_id)
 
 
 def search(

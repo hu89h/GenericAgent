@@ -1,5 +1,7 @@
+import json
 import shutil
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -11,6 +13,50 @@ from knowledge_base.assets import ImageAssetProcessor
 
 
 class DocumentProcessorTests(unittest.TestCase):
+    def test_cancel_with_retention_writes_checkpoint_and_resume_reuses_ready_document(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            stage = Path(temp) / "stage"
+            source.mkdir()
+            (source / "first.md").write_text("# First\n", encoding="utf-8")
+            (source / "second.md").write_text("# Second\n", encoding="utf-8")
+            cancelled = threading.Event()
+            original = importer._write_markdown
+            calls = []
+
+            def stop_after_first(*args, **kwargs):
+                calls.append(Path(args[0]).name)
+                result = original(*args, **kwargs)
+                if len(calls) == 1:
+                    cancelled.set()
+                return result
+
+            with mock.patch.object(importer, "_write_markdown", side_effect=stop_after_first):
+                with self.assertRaises(importer.KnowledgeBaseCancelled):
+                    importer.DocumentProcessor().prepare(
+                        str(source),
+                        stage_root=str(stage),
+                        kb_id="kb-test",
+                        cancelled=cancelled.is_set,
+                        retain_on_cancel=lambda: True,
+                    )
+
+            checkpoint = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(checkpoint["state"], "checkpoint")
+            self.assertEqual(checkpoint["checkpoint"]["ready_documents"], 1)
+            self.assertTrue((stage / "processed").is_dir())
+
+            calls.clear()
+            with mock.patch.object(importer, "_write_markdown", side_effect=stop_after_first):
+                resumed = importer.DocumentProcessor().prepare(
+                    str(source),
+                    stage_root=str(stage),
+                    kb_id="kb-test",
+                    resume_manifest=checkpoint,
+                )
+            self.assertEqual(resumed["summary"]["ready"], 2)
+            self.assertEqual(calls, ["second.md"])
+
     def test_mineru_captured_concatenated_image_link_is_split_before_copying(self):
         fixture = Path(__file__).parent / "fixtures" / "mineru" / "concatenated_image_links"
         with tempfile.TemporaryDirectory() as temp:
