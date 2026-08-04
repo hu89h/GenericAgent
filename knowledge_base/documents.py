@@ -63,6 +63,7 @@ def chunking_meta():
         "markdown_chunk_target_size": max(128, int(MD_CHUNK_SIZES[-1])),
         "markdown_parser": "ga_semantic_markdown_v3_balanced",
         "markdown_packer": "ga_structural_blocks_v4_correctness",
+        "image_caption_binding": "ga_strict_adjacent_v3_explicit",
     }
 
 

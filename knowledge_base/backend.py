@@ -524,7 +524,7 @@ def discard_checkpoint(kb_id: str) -> dict:
 
 def search(
     query: str,
-    top_k: int = 6,
+    top_k: int = 5,
     kb_id: str | None = None,
     snippet_chars: int = _SNIPPET,
     file_name: str | None = None,

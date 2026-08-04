@@ -29,6 +29,10 @@ _REF_CANDIDATE_RE = re.compile(
 )
 _SOURCE_LINE_RE = re.compile(r"^(?:资料)?来源\b|^source\b", re.IGNORECASE)
 _MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+_GENERATED_IMAGE_PATH_RE = re.compile(
+    r"\S*?\.assets-[^\s()]*[\\/][^\s()]+\.(?:png|jpe?g|jp2|webp|gif|bmp|tiff?)(?:\?[^\s)]*)?\)?",
+    re.IGNORECASE,
+)
 
 IMAGE_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 IMAGE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
@@ -230,34 +234,67 @@ class DocumentImageIndex:
         occurrence_id = self._by_start.get(position)
         return occurrence_id
 
-    def _caption(self, position: int, max_scan: int = 12) -> str:
-        line_index = self._line_index(position)
-        scanned = 0
-        for candidate_line in range(line_index + 1, len(self._lines)):
-            scanned += 1
-            if scanned > 6:
-                break
-            if self._line_has_image[candidate_line]:
-                break
-            value = self._line_clean[candidate_line]
-            if not value:
-                continue
-            if self._line_is_source[candidate_line]:
-                continue
-            if self._line_ref_candidates[candidate_line]:
-                return value
+    def _explicit_caption(self, line_index: int) -> str:
+        """Return a source-confirmed figure/table caption on one line.
 
-        scanned = 0
-        for candidate_line in range(line_index - 1, max(-1, line_index - max_scan - 1), -1):
-            scanned += 1
-            value = self._line_clean[candidate_line]
-            if not value or self._line_is_source[candidate_line]:
-                continue
-            if self._line_ref_candidates[candidate_line]:
-                return value
-            if scanned >= max_scan:
-                break
-        return ""
+        A nearby mention such as "见图 3" is context, not a caption.  Exact
+        image routing may only use a line that *starts* with a figure/table
+        number after optional Markdown heading syntax.
+        """
+        if not (0 <= line_index < len(self._lines)):
+            return ""
+        if self._line_has_image[line_index] and not self._line_clean[line_index]:
+            return ""
+        value = self._line_clean[line_index]
+        if not value or self._line_is_source[line_index]:
+            return ""
+        candidate = _MD_HEADING_RE.sub("", value).strip()
+        match = _REF_CANDIDATE_RE.match(self._processor.to_half_width(candidate))
+        if not match:
+            return ""
+        tail = candidate[match.end():].lstrip()
+        # A prose sentence beginning with "图 3 所示" is a reference, not a
+        # caption.  Require a caption delimiter (or a bare figure number).
+        if tail and not re.match(r"^[：:．.、—–-]", tail):
+            return ""
+        return value
+
+    def _nearest_nonempty_line(self, line_index: int, direction: int) -> int | None:
+        """Find the adjacent content line without crossing a document block.
+
+        One formatting-only blank line is tolerated.  Encountering any other
+        content ends the search, which prevents an image from borrowing the
+        next figure's caption across a source line or paragraph.
+        """
+        for distance in (1, 2):
+            candidate = line_index + direction * distance
+            if not (0 <= candidate < len(self._lines)):
+                return None
+            if self._lines[candidate].strip():
+                return candidate
+        return None
+
+    def _caption(self, position: int) -> str:
+        line_index = self._line_index(position)
+        same_line = self._explicit_caption(line_index)
+        if same_line:
+            return same_line
+
+        before_index = self._nearest_nonempty_line(line_index, -1)
+        after_index = self._nearest_nonempty_line(line_index, 1)
+        before = self._explicit_caption(before_index) if before_index is not None else ""
+        after = self._explicit_caption(after_index) if after_index is not None else ""
+        if before and after:
+            before_distance = line_index - before_index
+            after_distance = after_index - line_index
+            if before_distance < after_distance:
+                return before
+            if after_distance < before_distance:
+                return after
+            before_key = self._processor.local_ref_key(before)
+            after_key = self._processor.local_ref_key(after)
+            return before if before_key and before_key == after_key else ""
+        return before or after
 
     def _heading(self, position: int) -> str:
         line_index = self._line_index(position)
@@ -265,13 +302,47 @@ class DocumentImageIndex:
         return heading if heading and line_index - heading_line <= 80 else ""
 
     def _near_text(self, position: int, window: int = 300) -> str:
-        start = max(0, position - window)
-        end = min(len(self.body), position + window)
+        """Return context for the current image block without adjacent figures.
+
+        The previous implementation used a raw character window.  Long image
+        URLs made that window start inside another image path, while dense
+        figure layouts pulled neighbouring captions into the current image's
+        VLM prompt.  Keep the current image, its adjacent caption/source, and
+        at most one directly preceding prose line instead.
+        """
+        line_index = self._line_index(position)
+        block_indices = {line_index}
+        before_index = self._nearest_nonempty_line(line_index, -1)
+        after_index = self._nearest_nonempty_line(line_index, 1)
+        if before_index is not None and self._explicit_caption(before_index):
+            block_indices.add(before_index)
+        if after_index is not None and self._explicit_caption(after_index):
+            block_indices.add(after_index)
+
+        block_start = min(block_indices)
+        block_end = max(block_indices)
+        source_index = self._nearest_nonempty_line(block_end, 1)
+        if source_index is not None and self._line_is_source[source_index]:
+            block_indices.add(source_index)
+
+        previous_index = self._nearest_nonempty_line(block_start, -1)
+        if previous_index is not None and not (
+            self._line_has_image[previous_index]
+            or self._line_is_source[previous_index]
+            or self._explicit_caption(previous_index)
+        ):
+            block_indices.add(previous_index)
+
+        raw = "\n".join(self._lines[index] for index in sorted(block_indices))
         near = _MD_IMAGE_RE.sub(
             lambda match: f"[图片:{(match.group(1) or 'image').strip()}]",
-            self.body[start:end],
+            raw,
         )
-        return re.sub(r"\s+", " ", near).strip()
+        near = _MD_LINK_RE.sub(lambda match: (match.group(1) or "").strip(), near)
+        near = _GENERATED_IMAGE_PATH_RE.sub("[图片]", near)
+        near = re.sub(r"\s+", " ", near).strip()
+        limit = max(300, window * 2)
+        return near[-limit:].lstrip() if len(near) > limit else near
 
     def _build_related_index(self) -> dict[str, Any]:
         candidates = list(self._body_ref_candidates)
@@ -284,6 +355,11 @@ class DocumentImageIndex:
         index: dict[str, Any] = {"__mapping": mapping}
         for paragraph in self._paragraphs:
             if paragraph["has_image"]:
+                continue
+            # Figure/table catalogues mention many refs but contain no evidence
+            # about any one image.  Indexing the whole catalogue against every
+            # ref overwhelms the actual caption and nearby prose.
+            if len(paragraph["ref_candidates"]) >= 8:
                 continue
             keys = []
             for candidate in paragraph["ref_candidates"]:
@@ -305,7 +381,7 @@ class DocumentImageIndex:
         for occurrence_id, ref in enumerate(refs):
             caption = self._caption(ref["start"])
             alt = (ref.get("alt") or "").strip()
-            title = alt if alt and alt.lower() != "image" else (caption or alt or "image")
+            title = caption or (alt if alt and alt.lower() != "image" else "image")
             occurrence = ImageOccurrence(
                 occurrence_id=occurrence_id,
                 path=ref.get("path", ""),
@@ -316,8 +392,11 @@ class DocumentImageIndex:
                 section=self._heading(ref["start"]),
                 near_text=self._near_text(ref["start"]),
             )
+            # Only explicit source metadata may drive exact ref lookup.  Nearby
+            # prose remains VLM context, but it must not assign another image's
+            # number to this occurrence.
             occurrence.ref_candidates = self._processor.collect_ref_candidates(
-                occurrence.title, caption, occurrence.near_text
+                caption, alt
             )
             occurrence.ref_key = next(
                 (
@@ -769,13 +848,26 @@ class ImageAssetProcessor:
                 "analysis_error": "",
             }
             existing = existing_images.get(image_data_id)
+            existing_caption = self._clean_caption_line(
+                (existing or {}).get("caption") or (existing or {}).get("title") or ""
+            )
+            current_caption = self._clean_caption_line(
+                asset.get("caption") or asset.get("title") or ""
+            )
+            reference_context_matches = bool(existing is not None) and (
+                self.local_ref_key((existing or {}).get("ref_key") or "")
+                == self.local_ref_key(asset.get("ref_key") or "")
+                and existing_caption == current_caption
+            )
             needs_analysis = (
                 existing is None
+                or not reference_context_matches
                 or bool(existing.get("analysis_error"))
                 or not str(existing.get("description") or existing.get("table_markdown") or "").strip()
             )
             if existing is not None and (
-                preserve_analysis_only or (retry_only and not needs_analysis)
+                (preserve_analysis_only and reference_context_matches)
+                or (retry_only and not needs_analysis)
             ):
                 for key in (
                     "description", "table_markdown", "uncertain", "analysis_error",
@@ -969,15 +1061,16 @@ class ImageAssetProcessor:
             asset["analysis_error"] += (
                 f" (finish_reason={analysis.get('finish_reason')})"
             )
-        # S2: the occurrence's own caption-derived ref_key (set per
+        # The occurrence's own source-confirmed ref_key (set per
         # occurrence at ingestion, from the caption next to THIS
         # placement) is authoritative for the exact-image-ref channel.
         # The VLM sees only the shared image content (one analysis per
         # image_sha) and must not overwrite a captioned occurrence's
         # figure/table number — otherwise a figure reused under two
         # numbers gets both occurrences pinned to whatever the VLM
-        # guessed.  VLM ref_key is therefore a fallback only.
-        asset["ref_key"] = asset.get("ref_key", "") or self.local_ref_key(analysis.get("ref_key") or "")
+        # guessed.  VLM output is descriptive evidence and never an exact
+        # routing key.
+        asset["ref_key"] = asset.get("ref_key", "")
         asset["display_label"] = self._display_label(
             asset.get("ref_key", ""), asset.get("caption", ""), asset.get("title", "")
         )

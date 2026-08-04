@@ -25,9 +25,8 @@ _FIGURE_REF = re.compile(
 _SOURCE_IMAGE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp", ".tif", ".tiff",
 }
-_EVIDENCE_TYPES = {
-    "prose", "table", "image", "equation", "code", "list", "quote", "note", "figure",
-}
+_EVIDENCE_TYPES = {"text", "table", "image"}
+_TEXT_CONTENT_TYPES = {"prose", "equation", "code", "list", "quote", "note", "figure"}
 
 
 class KnowledgeBaseRetriever:
@@ -98,21 +97,42 @@ class KnowledgeBaseRetriever:
             return True
         kind = str(fields.get("kind") or "text")
         content_type = cls._record_content_type(fields)
-        return (
-            ("image" in requested and kind == "image")
-            or content_type in requested
-        )
+        if kind == "image":
+            if "image" in requested:
+                return True
+            return (
+                "table" in requested
+                and content_type == "table"
+                and bool(str(fields.get("table_markdown") or "").strip())
+            )
+        if "table" in requested and content_type == "table":
+            return True
+        return "text" in requested and content_type in _TEXT_CONTENT_TYPES
 
     def _evidence_filter(self, evidence_types) -> str | None:
         requested = {str(value).strip().lower() for value in (evidence_types or [])}
         if not requested:
             return None
         clauses = []
+        if "text" in requested:
+            content_types = ", ".join(
+                self._zvec_quote(value) for value in sorted(_TEXT_CONTENT_TYPES)
+            )
+            clauses.append(f"(kind = 'text' AND content_type IN ({content_types}))")
+        if "table" in requested:
+            clauses.append(
+                "((kind = 'text' AND content_type = 'table') OR "
+                "(kind = 'image' AND content_type = 'table' AND table_markdown != ''))"
+            )
         if "image" in requested:
             clauses.append("kind = 'image'")
-        for value in sorted(requested - {"image"}):
-            clauses.append(f"content_type = {self._zvec_quote(value)}")
         return "(" + " OR ".join(clauses) + ")" if clauses else None
+
+    def _matches_exact_image_refs(self, hit: dict, ref_keys: set[str]) -> bool:
+        if str(hit.get("kind") or "") != "image" or not ref_keys:
+            return True
+        key = self._local_ref_key(str(hit.get("ref_key") or ""))
+        return bool(key and key in ref_keys)
 
     def _index_readable(self, kb: dict) -> bool:
         path = self._zvec_path(kb["path"])
@@ -576,9 +596,12 @@ class KnowledgeBaseRetriever:
         doc_candidates = set(self._doc_name_candidates(file_name=file_name, title=title))
         # Exact figure-number hits come from the normalized ``ref_key`` column.
         rows = self._query_image_rows(kb, ref_keys=refs, topk=max(top_k * self._query_factor, top_k))
+        ref_set = set(refs)
         out, seen = [], set()
         for fields in rows:
             if not self._matches_evidence_types(fields, evidence_types):
+                continue
+            if self._local_ref_key(fields.get("ref_key") or "") not in ref_set:
                 continue
             rel = fields.get("file_name") or ""
             ttl = fields.get("title") or ""
@@ -626,7 +649,7 @@ class KnowledgeBaseRetriever:
     def search(
         self,
         query: str,
-        top_k: int = 6,
+        top_k: int = 5,
         kb_id: str | None = None,
         snippet_chars: int = 220,
         file_name: str | None = None,
@@ -692,9 +715,6 @@ class KnowledgeBaseRetriever:
         for kb in self._load_config():
             if kb_id and kb["id"] != kb_id:
                 continue
-            if not kb.get("exists"):
-                self._record_search_error(kb, "config", "knowledge base directory is missing")
-                continue
             scoped_file_names = file_name
             if scope_targets is not None:
                 kb_targets = [
@@ -715,16 +735,31 @@ class KnowledgeBaseRetriever:
                     scoped_file_names = list(dict.fromkeys(scoped_file_names))
                     if not scoped_file_names:
                         continue
+            # A scoped search must not inspect or report knowledge bases that
+            # are outside the requested target set.  Besides being irrelevant
+            # to the result, doing the existence check earlier leaked warnings
+            # from unrelated empty or missing registrations.
+            if not kb.get("exists"):
+                self._record_search_error(kb, "config", "knowledge base directory is missing")
+                continue
             targets.append((kb, scoped_file_names))
 
+        exact_ref_list = list(dict.fromkeys(
+            key
+            for term in self._reference_terms(query)
+            if (key := self._local_ref_key(term))
+        ))
+        exact_ref_keys = set(exact_ref_list)
+        exact_image_only = bool(exact_ref_keys) and set(requested_evidence) == {"image"}
         target_health: dict[str, bool] = {}
-        for kb, _file_names in targets:
-            try:
-                healthy = self._index_readable(kb)
-            except Exception as error:
-                healthy = False
-                self._record_search_error(kb, "zvec", str(error))
-            target_health[kb["id"]] = healthy
+        if not exact_image_only:
+            for kb, _file_names in targets:
+                try:
+                    healthy = self._index_readable(kb)
+                except Exception as error:
+                    healthy = False
+                    self._record_search_error(kb, "zvec", str(error))
+                target_health[kb["id"]] = healthy
         has_zvec_target = any(target_health.values())
         dense_vector = sparse_vector = None
         if has_zvec_target and mode in ("rrf", "vector"):
@@ -741,37 +776,41 @@ class KnowledgeBaseRetriever:
                 raise RuntimeError(f"sparse retrieval unavailable: {error}") from error
 
         for kb, scoped_file_names in targets:
-            # Exact figure/table-number matches (图3-1, 表4.1, ...) are injected
-            # for every mode, on purpose — including mode="vector" and
-            # mode="sparse".  When the user names a specific figure/table, that
-            # asset must pin to the top regardless of the retrieval channel, so
-            # this runs before the mode gate below.  Its high weight (4.0) makes
-            # such a hit outrank ordinary dense/sparse results after RRF fusion.
+            # Exact figure/table-number matches (图3-1, 表4.1, ...) are resolved
+            # independently from semantic channels. Pure image lookups stop
+            # here; mixed evidence queries keep the exact image signal and may
+            # still retrieve related non-image evidence below.
             channel_hits["ref_exact"].extend(
                 self._search_exact_image_refs(
-                    kb, query, channel_top_k, snippet_chars,
+                    kb, query, 30 if exact_image_only else channel_top_k, snippet_chars,
                     file_name=scoped_file_names, title=title,
                     evidence_types=requested_evidence,
                 )
             )
+            if exact_image_only:
+                continue
             if not target_health.get(kb["id"], False):
                 self._record_search_error(kb, "zvec", "Zvec index directory is missing")
                 continue
             if mode in ("rrf", "vector") and dense_vector is not None:
+                dense_hits = self._search_one_zvec(
+                    kb, query, channel_top_k, snippet_chars,
+                    file_name=scoped_file_names, title=title, query_vector=dense_vector,
+                    evidence_types=requested_evidence,
+                )
                 channel_hits["vector"].extend(
-                    self._search_one_zvec(
-                        kb, query, channel_top_k, snippet_chars,
-                        file_name=scoped_file_names, title=title, query_vector=dense_vector,
-                        evidence_types=requested_evidence,
-                    )
+                    hit for hit in dense_hits
+                    if self._matches_exact_image_refs(hit, exact_ref_keys)
                 )
             if mode in ("rrf", "sparse") and sparse_vector is not None:
+                sparse_hits = self._search_one_zvec_sparse(
+                    kb, query, channel_top_k, snippet_chars,
+                    file_name=scoped_file_names, title=title, query_vector=sparse_vector,
+                    evidence_types=requested_evidence,
+                )
                 channel_hits["sparse"].extend(
-                    self._search_one_zvec_sparse(
-                        kb, query, channel_top_k, snippet_chars,
-                        file_name=scoped_file_names, title=title, query_vector=sparse_vector,
-                        evidence_types=requested_evidence,
-                    )
+                    hit for hit in sparse_hits
+                    if self._matches_exact_image_refs(hit, exact_ref_keys)
                 )
         # Each retrieval channel must be ranked across all selected knowledge
         # bases before RRF. Dense Zvec scores are cosine distances (lower is
@@ -813,15 +852,31 @@ class KnowledgeBaseRetriever:
                 int(result.get("chunk_index") or 0),
             )
         )
-        results = results[:top_k]
+        # A pure exact-image lookup is an identity lookup rather than a ranked
+        # candidate search. Return every matching occurrence (across documents
+        # and knowledge bases) instead of filling or truncating it by top_k.
+        if not exact_image_only:
+            results = results[:top_k]
         for final_rank, result in enumerate(results, 1):
             result["final_rank"] = final_rank
-        return {
+        response = {
             "mode": mode,
             "evidence_types": requested_evidence,
             "results": results,
             "diagnostics": self.search_diagnostics(),
         }
+        if exact_image_only:
+            matched_refs = {
+                self._local_ref_key(result.get("ref_key") or "")
+                for result in results
+            }
+            matched_refs.discard("")
+            response["exact_image_references"] = {
+                "requested": exact_ref_list,
+                "matched": [key for key in exact_ref_list if key in matched_refs],
+                "missing": [key for key in exact_ref_list if key not in matched_refs],
+            }
+        return response
 
     def _resolve_zvec_target(
         self, data_id: str | None = None, kb_id: str | None = None
@@ -1119,7 +1174,10 @@ class KnowledgeBaseRetriever:
                 if source_data_id and str(fields.get("source_data_id") or "") != source_data_id:
                     continue
                 if ref_key and self._local_ref_key(fields.get("ref_key") or "") != ref_key:
-                    continue
+                    return {
+                        "error_code": "image_target_conflict",
+                        "error": "[图片目标冲突] data_id 与 ref_key 不指向同一图片。",
+                    }
                 matches.append((kb, fields))
             else:
                 # Document-level data_id and/or figure number: a scalar filter
@@ -1177,11 +1235,6 @@ class KnowledgeBaseRetriever:
         if not out.get("source_file_name"):
             source_titles = self._imported_document_titles(kb["path"])
             out["source_file_name"] = source_titles.get(rel, "")
-        if not out.get("ref_key"):
-            for value in (out.get("title"), out.get("near_text")):
-                out["ref_key"] = self._local_ref_key(value or "")
-                if out["ref_key"]:
-                    break
         if not out.get("caption") and out.get("title") and str(out.get("title")).lower() != "image":
             out["caption"] = out.get("title")
         if not out.get("display_label"):

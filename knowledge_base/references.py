@@ -30,6 +30,11 @@ REFERENCE_FIELDS = (
 )
 
 _CHUNK_CONTEXT_RE = re.compile(r"(?m)^\s*章节路径：/[^\r\n]*\r?\n+")
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^\r\n)]*(?:\)|$)")
+_GENERATED_IMAGE_PATH_RE = re.compile(
+    r"\S*?\.assets-[^\s()]*[\\/][^\s()]+\.(?:png|jpe?g|jp2|webp|gif|bmp|tiff?)(?:\?[^\s)]*)?\)?",
+    re.IGNORECASE,
+)
 
 
 def _text(value: Any) -> str:
@@ -66,7 +71,13 @@ def section_label(value: Any) -> str:
 
 def clean_public_text(value: Any) -> str:
     """Remove generated chunk context before text reaches the model/UI."""
-    return _CHUNK_CONTEXT_RE.sub("", _text(value)).strip()
+    text = _CHUNK_CONTEXT_RE.sub("", _text(value))
+    text = _MARKDOWN_IMAGE_RE.sub(
+        lambda match: f"[图片：{match.group(1).strip()}]" if match.group(1).strip() else "[图片]",
+        text,
+    )
+    text = _GENERATED_IMAGE_PATH_RE.sub("[图片]", text)
+    return text.strip()
 
 
 def _integer(value: Any, default: int) -> int:

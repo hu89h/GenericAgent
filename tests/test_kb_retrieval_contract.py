@@ -140,6 +140,31 @@ class RetrievalContractTests(unittest.TestCase):
         self.assertEqual(self.index.dense_calls, 0)
         self.assertEqual(self.index.sparse_calls, 0)
 
+    def test_selection_does_not_report_missing_unselected_knowledge_base(self):
+        missing_root = os.path.join(self.temp.name, "kb-missing")
+        self.retriever._registry.kbs.append({
+            "id": "kb-missing",
+            "name": "kb-missing",
+            "path": missing_root,
+            "exists": False,
+        })
+        self.retriever._search_one_zvec = lambda *_args, **_kwargs: [
+            _text_hit("kb-a", "documents/a.md")
+        ]
+
+        result = self.retriever.search(
+            "scoped",
+            mode="vector",
+            scope_targets=[{
+                "kb_id": "kb-a",
+                "all_documents": False,
+                "documents": [{"data_id": "kb-a::documents/a.md"}],
+            }],
+        )
+
+        self.assertTrue(result["results"])
+        self.assertEqual(result["diagnostics"], [])
+
     def test_exact_image_reference_keeps_stable_image_id_without_internal_path(self):
         self.retriever._search_one_zvec_sparse = lambda *_args, **_kwargs: []
         self.retriever._query_image_rows = lambda _kb, **_kwargs: [{
@@ -162,6 +187,192 @@ class RetrievalContractTests(unittest.TestCase):
         self.assertEqual(hit["data_id"], "kb-a::documents/a.md::image::img-1")
         self.assertEqual(hit["matched_by"], ["ref_exact"])
         self.assertNotIn("image_abspath", hit)
+
+    def test_public_evidence_types_strictly_separate_text_table_and_images(self):
+        records = [
+            {
+                "kind": "text", "content_type": "prose",
+                "data_id": "kb-a::documents/a.md", "chunk_index": 0,
+                "file_name": "documents/a.md", "title": "a.pdf", "body": "正文",
+            },
+            {
+                "kind": "text", "content_type": "figure",
+                "data_id": "kb-a::documents/a.md", "chunk_index": 1,
+                "file_name": "documents/a.md", "title": "a.pdf", "body": "文本 figure",
+            },
+            {
+                "kind": "text", "content_type": "table",
+                "data_id": "kb-a::documents/a.md", "chunk_index": 2,
+                "file_name": "documents/a.md", "title": "a.pdf", "body": "| 表格 |",
+            },
+            {
+                "kind": "image", "content_type": "figure",
+                "data_id": "kb-a::documents/a.md::image::locator", "chunk_index": 0,
+                "file_name": "documents/a.md", "title": "图1", "body": "图题和邻近正文",
+                "ref_key": "图1", "image_id": "locator",
+            },
+            {
+                "kind": "image", "content_type": "table",
+                "data_id": "kb-a::documents/a.md::image::table", "chunk_index": 0,
+                "file_name": "documents/a.md", "title": "表1", "body": "图片表格",
+                "ref_key": "表1", "image_id": "table", "table_markdown": "| 指标 | 值 |",
+            },
+        ]
+        captured_filters = []
+
+        class Collection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def query(*_args, **kwargs):
+                captured_filters.append(kwargs.get("filter"))
+                return [SimpleNamespace(fields=item, score=index / 10) for index, item in enumerate(records)]
+
+        kb = self.retriever._registry.kbs[0]
+        self.retriever._zvec_open = lambda _path: Collection()
+        self.retriever._require_zvec = lambda: SimpleNamespace(
+            Query=lambda *_args, **_kwargs: object()
+        )
+
+        def kinds(evidence_types):
+            hits = self.retriever._search_one_zvec(
+                kb, "query", 10, 120, file_name=None, title=None,
+                query_vector=[1.0], evidence_types=evidence_types,
+            )
+            return {hit["data_id"] for hit in hits}
+
+        self.assertEqual(kinds(["text"]), {
+            "kb-a::documents/a.md",
+        })
+        # The two text structures share a document data_id but remain text;
+        # most importantly, neither image record crosses this boundary.
+        self.assertNotIn("kind = 'image'", captured_filters[-1])
+        self.assertEqual(kinds(["table"]), {
+            "kb-a::documents/a.md",
+            "kb-a::documents/a.md::image::table",
+        })
+        self.assertIn("table_markdown != ''", captured_filters[-1])
+        self.assertEqual(kinds(["image"]), {
+            "kb-a::documents/a.md::image::locator",
+            "kb-a::documents/a.md::image::table",
+        })
+        self.assertEqual(kinds(None), {
+            "kb-a::documents/a.md",
+            "kb-a::documents/a.md::image::locator",
+            "kb-a::documents/a.md::image::table",
+        })
+
+    def test_exact_image_only_is_a_hard_constraint_without_embedding(self):
+        def exact(kb, query, *_args, **_kwargs):
+            return [{
+                **_text_hit(kb["id"], f"documents/{kb['id']}.md"),
+                "kind": "image",
+                "data_id": f"{kb['id']}::documents/{kb['id']}.md::image::81",
+                "ref_key": "图81",
+                "score_type": "ref_exact",
+            }]
+
+        self.retriever._search_exact_image_refs = exact
+        self.retriever._search_one_zvec = lambda *_args, **_kwargs: self.fail(
+            "exact image lookup must not run dense retrieval"
+        )
+        self.retriever._search_one_zvec_sparse = lambda *_args, **_kwargs: self.fail(
+            "exact image lookup must not run sparse retrieval"
+        )
+
+        result = self.retriever.search(
+            "讲讲图81", mode="rrf", top_k=1, evidence_types=["image"]
+        )
+
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual({item["ref_key"] for item in result["results"]}, {"图81"})
+        self.assertEqual(result["exact_image_references"], {
+            "requested": ["图81"], "matched": ["图81"], "missing": [],
+        })
+        self.assertEqual(self.index.dense_calls, 0)
+        self.assertEqual(self.index.sparse_calls, 0)
+
+    def test_missing_exact_image_returns_empty_without_semantic_fill(self):
+        self.retriever._search_exact_image_refs = lambda *_args, **_kwargs: []
+
+        result = self.retriever.search(
+            "查看图999", mode="vector", evidence_types=["image"]
+        )
+
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["exact_image_references"], {
+            "requested": ["图999"], "matched": [], "missing": ["图999"],
+        })
+        self.assertEqual(self.index.dense_calls, 0)
+        self.assertEqual(self.index.sparse_calls, 0)
+
+    def test_multiple_exact_image_numbers_are_all_enforced(self):
+        captured = {}
+
+        def image_rows(_kb, **kwargs):
+            captured.update(kwargs)
+            return [
+                {
+                    "kind": "image", "content_type": "figure",
+                    "data_id": f"kb-a::documents/a.md::image::{number}",
+                    "file_name": "documents/a.md", "title": number,
+                    "ref_key": number, "image_id": number, "body": number,
+                }
+                for number in ("图79", "图81", "图82")
+            ]
+
+        self.retriever._query_image_rows = image_rows
+        result = self.retriever.search(
+            "对比图79和图81", kb_id="kb-a", mode="sparse",
+            evidence_types=["image"],
+        )
+
+        self.assertEqual(captured["ref_keys"], ["图79", "图81"])
+        self.assertEqual(
+            {item["ref_key"] for item in result["results"]},
+            {"图79", "图81"},
+        )
+        self.assertEqual(result["exact_image_references"], {
+            "requested": ["图79", "图81"],
+            "matched": ["图79", "图81"],
+            "missing": [],
+        })
+        self.assertEqual(self.index.dense_calls, 0)
+        self.assertEqual(self.index.sparse_calls, 0)
+
+    def test_mixed_exact_reference_keeps_text_but_filters_other_images(self):
+        exact = {
+            **_text_hit("kb-a", "documents/a.md"),
+            "kind": "image",
+            "data_id": "kb-a::documents/a.md::image::81",
+            "ref_key": "图81",
+            "score_type": "ref_exact",
+        }
+        text = _text_hit("kb-a", "documents/a.md")
+        image_81 = {**exact, "score_type": "zvec", "score": 0.1}
+        image_79 = {
+            **exact,
+            "data_id": "kb-a::documents/a.md::image::79",
+            "ref_key": "图79",
+            "score_type": "zvec",
+            "score": 0.05,
+        }
+        self.retriever._search_exact_image_refs = lambda *_args, **_kwargs: [exact]
+        self.retriever._search_one_zvec = lambda *_args, **_kwargs: [image_79, text, image_81]
+
+        result = self.retriever.search(
+            "结合正文讲讲图81", mode="vector", top_k=5,
+            evidence_types=["text", "image"],
+        )
+
+        images = [item for item in result["results"] if item.get("kind") == "image"]
+        self.assertEqual({item["ref_key"] for item in images}, {"图81"})
+        self.assertTrue(any(item.get("kind") != "image" for item in result["results"]))
+        self.assertEqual(self.index.dense_calls, 1)
 
     def test_table_read_continuation_starts_at_requested_part_without_rewinding(self):
         data_id = "kb-a::documents/a.md"
@@ -412,6 +623,18 @@ class RetrievalContractTests(unittest.TestCase):
         )
         self.assertNotIn("processed/", str(result["candidates"]))
         self.assertNotIn("kb_id", str(result["candidates"]))
+
+    def test_image_id_and_reference_must_resolve_to_the_same_asset(self):
+        data_id = "kb-a::documents/a.md::image::1"
+        self.retriever._fetch_doc = lambda _kb, _data_id, _chunk_index: SimpleNamespace(
+            fields={"kind": "image", "data_id": data_id, "ref_key": "图1"}
+        )
+
+        result = self.retriever.read_image(
+            data_id=data_id, ref_key="图2", kb_id="kb-a"
+        )
+
+        self.assertEqual(result["error_code"], "image_target_conflict")
 
 
 if __name__ == "__main__":

@@ -234,5 +234,136 @@ class DocumentProcessorTests(unittest.TestCase):
             )
 
 
+class ImageCaptionBindingTests(unittest.TestCase):
+    def setUp(self):
+        self.assets = ImageAssetProcessor(usage_tracker=None)
+
+    class _DisabledVision:
+        @staticmethod
+        def analysis_meta():
+            return {"prompt_version": 1, "preprocess_version": 1, "model": "test"}
+
+        @staticmethod
+        def enabled():
+            return False
+
+        @staticmethod
+        def understanding_focus(*_args, **_kwargs):
+            return "general"
+
+    def test_explicit_caption_can_precede_or_follow_its_adjacent_image(self):
+        index = self.assets.build_document_index(
+            "图 1：前置图题\n"
+            "![](one.png)\n"
+            "资料来源：示例\n\n"
+            "![](two.png)\n"
+            "图 2：后置图题\n"
+        )
+
+        self.assertEqual(
+            [(item.path, item.ref_key, item.title) for item in index.occurrences],
+            [
+                ("one.png", "图1", "图 1：前置图题"),
+                ("two.png", "图2", "图 2：后置图题"),
+            ],
+        )
+
+    def test_image_does_not_borrow_a_non_adjacent_or_ambiguous_caption(self):
+        index = self.assets.build_document_index(
+            "图 7 所示趋势来自其他段落，这不是图题。\n"
+            "![](unlabelled.png)\n"
+            "资料来源：示例\n\n"
+            "图 8：下一张图片\n"
+            "![](next.png)\n"
+            "图 9：另一侧候选\n"
+        )
+
+        self.assertEqual(index.occurrences[0].ref_key, "")
+        self.assertEqual(index.occurrences[0].title, "image")
+        self.assertEqual(index.occurrences[1].ref_key, "")
+
+    def test_context_never_contains_generated_asset_paths(self):
+        index = self.assets.build_document_index(
+            "图 1：示例\n"
+            "![](hash-document.assets-abcd/first.jpg)\n"
+            "资料来源：示例\n\n"
+            "图 2：下一张\n"
+            "![](hash-document.assets-abcd/second.jpg)\n"
+        )
+
+        context = index.occurrences[0].near_text
+        self.assertNotIn(".assets-", context)
+        self.assertNotIn("first.jpg", context)
+        self.assertNotIn("second.jpg", context)
+        self.assertIn("[图片:image]", context)
+
+    def test_figure_catalogue_is_not_attached_as_related_image_evidence(self):
+        catalogue = " ".join(f"图{i}：目录项" for i in range(1, 12))
+        index = self.assets.build_document_index(
+            f"{catalogue}\n\n"
+            "图 1：正文中的图片\n"
+            "![](one.png)\n"
+        )
+
+        self.assertEqual(index.occurrences[0].related_text, "")
+
+    def test_vlm_cannot_create_an_exact_figure_reference(self):
+        asset = {
+            "ref_key": "",
+            "caption": "",
+            "title": "image",
+            "section": "",
+            "description": "",
+            "table_markdown": "",
+            "near_text": "",
+            "related_text": "",
+        }
+
+        self.assets.apply_image_analysis(
+            asset,
+            {
+                "description": "图片内容",
+                "table_markdown": "",
+                "ref_key": "图 99",
+                "uncertain": [],
+            },
+        )
+
+        self.assertEqual(asset["ref_key"], "")
+
+    def test_rebuild_reuses_analysis_only_when_caption_binding_is_unchanged(self):
+        self.assets._image_client = self._DisabledVision()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "figure.jpg").write_bytes(b"stable image bytes")
+            kb = {"id": "kb-test", "path": str(root)}
+
+            first_body = "图 1：原图题\n![](figure.jpg)\n"
+            first_index = self.assets.build_document_index(first_body)
+            first = self.assets.image_records_for_document(
+                kb, "doc.md", "kb-test::doc.md", first_body, "doc.pdf", lambda _msg: None,
+                image_index=first_index,
+            )["assets"][0]
+            cached = {**first, "description": "已缓存的图片描述"}
+
+            unchanged = self.assets.image_records_for_document(
+                kb, "doc.md", "kb-test::doc.md", first_body, "doc.pdf", lambda _msg: None,
+                image_index=self.assets.build_document_index(first_body),
+                existing_images={first["data_id"]: cached},
+                preserve_analysis_only=True,
+            )["assets"][0]
+            self.assertEqual(unchanged["description"], "已缓存的图片描述")
+
+            changed_body = "图 2：修正后的图题\n![](figure.jpg)\n"
+            changed = self.assets.image_records_for_document(
+                kb, "doc.md", "kb-test::doc.md", changed_body, "doc.pdf", lambda _msg: None,
+                image_index=self.assets.build_document_index(changed_body),
+                existing_images={first["data_id"]: cached},
+                preserve_analysis_only=True,
+            )["assets"][0]
+            self.assertEqual(changed["ref_key"], "图2")
+            self.assertEqual(changed["description"], "")
+
+
 if __name__ == "__main__":
     unittest.main()
