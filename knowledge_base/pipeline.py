@@ -369,18 +369,10 @@ class IngestPipeline:
         *,
         kb_id: str,
         data_id: str = "",
-        file_name: str = "",
-        ref: str = "",
     ) -> tuple[dict | None, str]:
         value = str(data_id or "").strip()
         if "::" in value:
             value = value.split("::", 1)[1].split("::image::", 1)[0]
-        if not value:
-            value = str(file_name or "").strip()
-        if not value:
-            ref_value = cls._relative_key(ref)
-            prefix = f"{kb_id}/"
-            value = ref_value[len(prefix):] if ref_value.startswith(prefix) else ref_value
         value = cls._relative_key(value)
         if value.startswith("processed/"):
             value = value[len("processed/"):]
@@ -512,17 +504,97 @@ class IngestPipeline:
                 remove_tree(os.path.join(candidate, "rollback"), ignore_errors=True)
                 mineru.cleanup_cache(config.mineru_cache_root(name))
                 cleanup_image_cache(config.image_cache_root(name))
-                index_root = os.path.join(
-                    candidate, "active", "processed", ".kb_index"
-                )
-                if not os.path.isdir(index_root):
-                    continue
-                for child in os.listdir(index_root):
-                    if child.startswith(("zvec.tmp.", "zvec.rollback.")):
-                        remove_tree(
-                            os.path.join(index_root, child),
-                            ignore_errors=True,
-                        )
+
+    @staticmethod
+    def _published_summary(
+        stats: dict,
+        document_results: list[dict],
+        failures: list[dict],
+    ) -> dict:
+        """Return the one persisted set of user-visible package counters."""
+        return {
+            "documents_total": len(document_results),
+            "documents_succeeded": sum(
+                item.get("status") in {"succeeded", "succeeded_with_warnings"}
+                for item in document_results
+            ),
+            "documents_with_warnings": sum(
+                item.get("status") == "succeeded_with_warnings"
+                for item in document_results
+            ),
+            "documents_failed": sum(
+                item.get("status") == "failed" for item in document_results
+            ),
+            "text_chunks": int(stats.get("text_chunks") or 0),
+            "image_chunks": int(stats.get("image_chunks") or 0),
+            "failure_items": len(failures),
+        }
+
+    @staticmethod
+    def _published_manifest(
+        base: dict,
+        *,
+        kb_id: str,
+        name: str,
+        source_path: str,
+        state: str,
+        failures: list[dict],
+        summary: dict,
+        document_results: list[dict],
+        index_sources: dict,
+    ) -> dict:
+        """Project a staged/checkpoint manifest onto the active package contract."""
+        return {
+            "schema_version": int(base.get("schema_version") or 1),
+            "kb_id": str(kb_id),
+            "name": str(name),
+            "source_path": str(source_path or ""),
+            "state": str(state),
+            "published_at": int(time.time()),
+            "files": list(base.get("files") or []),
+            "source_fingerprint": list(base.get("source_fingerprint") or []),
+            "failures": list(failures),
+            "summary": dict(summary),
+            "document_results": list(document_results),
+            "index_sources": dict(index_sources),
+        }
+
+    def _build_staged_index(
+        self,
+        stage_kb: dict,
+        *,
+        records: list[dict],
+        progress=None,
+        logfn=None,
+        cancelled=None,
+    ) -> dict:
+        """Build and validate an index exactly once inside an isolated stage."""
+        stats = self.index_builder.build(
+            stage_kb,
+            records=records,
+            progress=progress,
+            logfn=logfn,
+            cancelled=cancelled,
+        )
+        check_cancelled(cancelled)
+        probe = self.index.probe(stage_kb["path"])
+        valid = all(
+            probe.get(key)
+            for key in ("present", "openable", "schema_valid", "embedding_matches")
+        )
+        indexed = int(((probe.get("meta") or {}).get("stats") or {}).get("n_chunks") or 0)
+        expected = len(records)
+        if not valid or indexed != expected or int(stats.get("n_chunks") or 0) != expected:
+            raise RuntimeError("staging 索引校验失败")
+        if callable(progress):
+            progress({
+                "phase": "validated",
+                "processed": expected,
+                "total": expected,
+                "usage": dict(stats.get("usage") or {}),
+                **stats,
+            })
+        return stats
 
     def _build_and_publish(
         self,
@@ -532,7 +604,6 @@ class IngestPipeline:
         source_path: str,
         stage: str,
         manifest: dict,
-        prepared_summary: dict,
         prepared_failures: list[dict],
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
@@ -605,10 +676,9 @@ class IngestPipeline:
             else:
                 sources[key] = value
         sources["records_sha256"] = self.records.records_sha256(records_file)
-        index_stats = self.index_builder.build(
+        index_stats = self._build_staged_index(
             stage_kb,
             records=records,
-            sources=sources,
             progress=progress,
             logfn=logfn,
             cancelled=cancelled,
@@ -620,63 +690,19 @@ class IngestPipeline:
             records,
             list(prepared_failures) + list(built.failures),
         )
-        documents_succeeded = sum(
-            item["status"] in {"succeeded", "succeeded_with_warnings"}
-            for item in document_results
+        summary = self._published_summary(index_stats, document_results, failures)
+        manifest = self._published_manifest(
+            manifest,
+            kb_id=kb_id,
+            name=name,
+            source_path=source_path,
+            state="ready_with_warnings" if failures else "ready",
+            failures=failures,
+            summary=summary,
+            document_results=document_results,
+            index_sources=sources,
         )
-        documents_with_warnings = sum(
-            item["status"] == "succeeded_with_warnings"
-            for item in document_results
-        )
-        documents_failed = sum(item["status"] == "failed" for item in document_results)
-        summary = {
-            **dict(prepared_summary or {}),
-            **{
-                key: int(index_stats.get(key) or 0)
-                for key in (
-                    "n_docs", "n_chunks", "text_chunks",
-                    "image_chunks", "image_assets",
-                    "embedding_cache_hits", "embedding_cache_misses",
-                )
-            },
-            "total": len(document_results),
-            "completed": len(document_results),
-            "succeeded": documents_succeeded,
-            "failed": documents_failed,
-            "documents_total": len(document_results),
-            "documents_succeeded": documents_succeeded,
-            "documents_with_warnings": documents_with_warnings,
-            "documents_failed": documents_failed,
-            "failure_items": len(failures),
-        }
-        manifest = dict(manifest)
-        manifest["processing_fingerprint"] = {
-            "mineru_cache_version": int(getattr(mineru, "MINERU_CACHE_VERSION", 1)),
-            "chunking": dict(built.sources.get("chunking") or {}),
-            "image_analysis": dict(built.sources.get("image_analysis") or {}),
-            "embedding": dict(index_stats.get("embedding") or {}),
-            "sparse_embedding": dict(index_stats.get("sparse_embedding") or {}),
-        }
-        manifest.update({
-            "schema_version": int(manifest.get("schema_version") or 1),
-            "kb_id": kb_id,
-            "name": name,
-            "source_path": source_path,
-            "state": "ready_with_warnings" if failures else "ready",
-            "published_at": int(time.time()),
-            "failures": failures,
-            "summary": summary,
-            "document_results": document_results,
-            "index_sources": sources,
-            "index_stats": index_stats,
-        })
         _write_json_atomic(os.path.join(stage, "manifest.json"), manifest)
-        probe = self.index.probe(stage_processed)
-        if not all(
-            probe[key]
-            for key in ("present", "openable", "schema_valid", "embedding_matches")
-        ):
-            raise RuntimeError("staging 索引发布前校验失败")
 
         self._emit(progress, phase="publishing", current=name, **summary)
         check_cancelled(cancelled)
@@ -795,7 +821,6 @@ class IngestPipeline:
                     source_path=source_path,
                     stage=stage,
                     manifest=prepared["manifest"],
-                    prepared_summary=prepared["summary"],
                     prepared_failures=prepared["failures"],
                     progress=progress,
                     logfn=logfn,
@@ -1177,7 +1202,6 @@ class IngestPipeline:
                     source_path=kb.get("source_path") or "",
                     stage=stage,
                     manifest=merged,
-                    prepared_summary=prepared.get("summary") or {},
                     prepared_failures=failures,
                     progress=progress,
                     logfn=logfn,
@@ -1338,67 +1362,44 @@ class IngestPipeline:
                         and item.get("stage") == "structure_parse"
                     )
                 ] + structure_failures
-                manifest["structure_upgraded_at"] = int(time.time())
             sources["records_sha256"] = self.records.records_sha256(records_path)
             self.index_builder.begin_build()
-            stats = self.index_builder.build(
+            stats = self._build_staged_index(
                 stage_kb,
                 records=records,
-                sources=sources,
                 progress=progress,
                 logfn=logfn,
                 cancelled=cancelled,
             )
             check_cancelled(cancelled)
-            manifest = dict(manifest)
-            if chunking_changed:
-                document_results, normalized_failures = self._document_results(
-                    manifest,
-                    records,
-                    manifest.get("failures") or [],
-                )
-                manifest["document_results"] = document_results
-                manifest["failures"] = normalized_failures
-                summary = dict(manifest.get("summary") or {})
-                summary.update({
-                    key: int(stats.get(key) or 0)
-                    for key in (
-                        "n_docs", "n_chunks", "text_chunks", "image_chunks",
-                        "image_assets", "embedding_cache_hits", "embedding_cache_misses",
-                    )
-                })
-                summary["failure_items"] = len(normalized_failures)
-                manifest["summary"] = summary
-            manifest["index_sources"] = sources
-            manifest["index_stats"] = stats
-            manifest["processing_fingerprint"] = {
-                "mineru_cache_version": int(getattr(mineru, "MINERU_CACHE_VERSION", 1)),
-                "chunking": dict((manifest.get("index_sources") or {}).get("chunking") or {}),
-                "image_analysis": dict((manifest.get("index_sources") or {}).get("image_analysis") or {}),
-                "embedding": dict(stats.get("embedding") or {}),
-                "sparse_embedding": dict(stats.get("sparse_embedding") or {}),
-            }
-            manifest["reindexed_at"] = int(time.time())
-            manifest["state"] = (
-                "ready_with_warnings" if manifest.get("failures") else "ready"
+            document_results, normalized_failures = self._document_results(
+                manifest,
+                records,
+                manifest.get("failures") or [],
+            )
+            summary = self._published_summary(stats, document_results, normalized_failures)
+            manifest = self._published_manifest(
+                manifest,
+                kb_id=kb_id,
+                name=str(kb.get("name") or kb_id),
+                source_path=str(kb.get("source_path") or ""),
+                state="ready_with_warnings" if normalized_failures else "ready",
+                failures=normalized_failures,
+                summary=summary,
+                document_results=document_results,
+                index_sources=sources,
             )
             _write_json_atomic(manifest_path, manifest)
-            probe = self.index.probe(stage_processed)
-            if not all(
-                probe.get(key)
-                for key in ("present", "openable", "schema_valid", "embedding_matches")
-            ):
-                raise RuntimeError("重建索引发布前校验失败")
             self._emit(
                 progress,
                 phase="publishing",
-                current=str(manifest.get("name") or kb.get("name") or kb_id),
+                current=str(kb.get("name") or kb_id),
             )
             check_cancelled(cancelled)
             published = self.publisher.publish(
                 kb_id=kb_id,
-                name=str(manifest.get("name") or kb.get("name") or kb_id),
-                source_path=str(manifest.get("source_path") or kb.get("source_path") or ""),
+                name=str(kb.get("name") or kb_id),
+                source_path=str(kb.get("source_path") or ""),
             )
             return {
                 "ok": True,
@@ -1447,9 +1448,7 @@ class IngestPipeline:
         }
         current_image_meta = dict(vision.build_analysis_meta() or {})
         old_image_meta = dict(
-            (manifest.get("processing_fingerprint") or {}).get("image_analysis")
-            or (manifest.get("index_sources") or {}).get("image_analysis")
-            or {}
+            (manifest.get("index_sources") or {}).get("image_analysis") or {}
         )
         image_meta_changed = bool(image_records) and old_image_meta != current_image_meta
         pending_count = sum(
@@ -1507,8 +1506,8 @@ class IngestPipeline:
         try:
             check_cancelled(cancelled)
             shutil.copytree(active, stage, dirs_exist_ok=True)
-            name = str(manifest.get("name") or kb.get("name") or kb_id)
-            source_path = str(manifest.get("source_path") or kb.get("source_path") or "")
+            name = str(kb.get("name") or kb_id)
+            source_path = str(kb.get("source_path") or "")
             total_documents = sum(
                 1
                 for item in (manifest.get("files") or [])
@@ -1537,7 +1536,6 @@ class IngestPipeline:
                 source_path=source_path,
                 stage=stage,
                 manifest=manifest,
-                prepared_summary=dict(manifest.get("summary") or {}),
                 prepared_failures=preserved_failures,
                 progress=progress,
                 logfn=logfn,
@@ -1571,8 +1569,6 @@ class IngestPipeline:
         kb_id: str,
         *,
         data_id: str = "",
-        file_name: str = "",
-        ref: str = "",
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
@@ -1591,8 +1587,6 @@ class IngestPipeline:
                 manifest,
                 kb_id=value,
                 data_id=data_id,
-                file_name=file_name,
-                ref=ref,
             )
             if entry is None:
                 raise KeyError("document_not_found")
@@ -1620,28 +1614,21 @@ class IngestPipeline:
                 remove_tree(stage)
                 try:
                     os.makedirs(os.path.join(stage, "processed"), exist_ok=True)
-                    empty_manifest = dict(manifest)
-                    empty_manifest.update({
-                        "state": "empty",
-                        "files": [],
-                        "source_fingerprint": [],
-                        "failures": [],
-                        "document_results": [],
-                        "index_sources": {},
-                        "index_stats": {},
-                        "summary": {
-                            "n_docs": 0,
-                            "n_chunks": 0,
-                            "text_chunks": 0,
-                            "image_chunks": 0,
-                            "image_assets": 0,
-                            "documents_total": 0,
-                            "documents_succeeded": 0,
-                            "documents_failed": 0,
-                            "documents_with_warnings": 0,
-                        },
-                        "published_at": int(time.time()),
-                    })
+                    empty_base = dict(manifest)
+                    empty_base["files"] = []
+                    empty_base["source_fingerprint"] = []
+                    empty_summary = self._published_summary({}, [], [])
+                    empty_manifest = self._published_manifest(
+                        empty_base,
+                        kb_id=value,
+                        name=str(kb.get("name") or value),
+                        source_path=str(kb.get("source_path") or ""),
+                        state="empty",
+                        failures=[],
+                        summary=empty_summary,
+                        document_results=[],
+                        index_sources={},
+                    )
                     _write_json_atomic(
                         os.path.join(stage, "manifest.json"),
                         empty_manifest,
@@ -1748,10 +1735,9 @@ class IngestPipeline:
                 }
                 self.index_builder.begin_build()
                 self._emit(progress, phase="indexing", processed=0, total=len(kept_records))
-                stats = self.index_builder.build(
+                stats = self._build_staged_index(
                     stage_kb,
                     records=kept_records,
-                    sources=sources,
                     progress=progress,
                     logfn=logfn,
                     cancelled=cancelled,
@@ -1759,7 +1745,6 @@ class IngestPipeline:
                 check_cancelled(cancelled)
                 next_manifest = dict(manifest)
                 next_manifest["files"] = remaining_files
-                next_manifest["failures"] = failures
                 removed_source_path = str(entry.get("source_path") or "").strip()
                 expected_fingerprints = []
                 for fingerprint in manifest.get("source_fingerprint") or []:
@@ -1775,42 +1760,22 @@ class IngestPipeline:
                             continue
                     expected_fingerprints.append(fingerprint)
                 next_manifest["source_fingerprint"] = expected_fingerprints
-                next_manifest["index_sources"] = sources
-                next_manifest["index_stats"] = stats
-                next_manifest["state"] = "ready_with_warnings" if failures else "ready"
-                next_manifest["published_at"] = int(time.time())
                 document_results, decorated_failures = self._document_results(
                     next_manifest, kept_records, failures
                 )
-                next_manifest["failures"] = decorated_failures
-                next_manifest["document_results"] = document_results
-                next_manifest["summary"] = {
-                    **dict(manifest.get("summary") or {}),
-                    "n_docs": int(stats.get("n_docs") or 0),
-                    "n_chunks": int(stats.get("n_chunks") or 0),
-                    "text_chunks": int(stats.get("text_chunks") or 0),
-                    "image_chunks": int(stats.get("image_chunks") or 0),
-                    "image_assets": int(stats.get("image_assets") or 0),
-                    "documents_total": len(document_results),
-                    "documents_succeeded": sum(
-                        item["status"] in {"succeeded", "succeeded_with_warnings"}
-                        for item in document_results
-                    ),
-                    "documents_with_warnings": sum(
-                        item["status"] == "succeeded_with_warnings"
-                        for item in document_results
-                    ),
-                    "documents_failed": sum(
-                        item["status"] == "failed" for item in document_results
-                    ),
-                }
+                summary = self._published_summary(stats, document_results, decorated_failures)
+                next_manifest = self._published_manifest(
+                    next_manifest,
+                    kb_id=value,
+                    name=str(kb.get("name") or value),
+                    source_path=str(kb.get("source_path") or ""),
+                    state="ready_with_warnings" if decorated_failures else "ready",
+                    failures=decorated_failures,
+                    summary=summary,
+                    document_results=document_results,
+                    index_sources=sources,
+                )
                 _write_json_atomic(os.path.join(stage, "manifest.json"), next_manifest)
-                probe = self.index.probe(stage_processed)
-                if not all(
-                    probe[key]
-                    for key in ("present", "openable", "schema_valid", "embedding_matches")
-                ):
-                    raise RuntimeError("删除文档后的索引校验失败")
                 self._emit(progress, phase="publishing", current=removed_name)
                 check_cancelled(cancelled)
                 published = self.publisher.publish(

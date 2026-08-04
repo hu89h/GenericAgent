@@ -184,14 +184,14 @@ class RetrievalModeTests(unittest.TestCase):
             scope_targets=[{
                 "kb_id": "kb-test",
                 "all_documents": False,
-                "documents": [{"file_name": "documents/selected.md"}],
+                "documents": [{"data_id": "kb-test::documents/selected.md"}],
             }],
         )
 
         self.assertTrue(result["results"])
         self.assertEqual(calls, [["documents/selected.md"], ["documents/selected.md"]])
 
-    def test_selection_scope_normalizes_ref_to_relative_document_name(self):
+    def test_selection_scope_normalizes_data_id_to_relative_document_name(self):
         calls = []
 
         def capture(*_args, **kwargs):
@@ -205,7 +205,7 @@ class RetrievalModeTests(unittest.TestCase):
             mode="vector",
             scope_targets=[{
                 "kb_id": "kb-test",
-                "documents": [{"ref": "kb-test/documents/selected.md"}],
+                "documents": [{"data_id": "kb-test::documents/selected.md"}],
             }],
         )
 
@@ -237,26 +237,27 @@ class RetrievalModeTests(unittest.TestCase):
         self.assertEqual(captured["source_data_id"], "kb-test::documents/selected.md")
         self.assertEqual(result["data_id"], "kb-test::documents/selected.md::image::one")
 
-    def test_read_chunk_resolves_ref_when_scope_also_supplies_kb_id(self):
-        captured = {}
+    def test_read_content_uses_stable_data_id_with_kb_scope(self):
+        captured = []
 
         def fetch(_kb, data_id, chunk_index, output_fields=None):
-            captured.update(data_id=data_id, chunk_index=chunk_index)
+            captured.append({"data_id": data_id, "chunk_index": chunk_index})
             return SimpleNamespace(fields={
                 "title": "原始文档.pdf",
                 "header_path": "章节/方法",
-                "body": "这是通过 ref 读取到的正文。",
+                "data_id": data_id,
+                "body": "这是通过 data_id 读取到的正文。",
             })
 
         self.retriever._zvec_fetch_doc = fetch
-        content = self.retriever.read_chunk(
-            ref="kb-test/documents/selected.md",
+        content = self.retriever.read_content(
+            data_id="kb-test::documents/selected.md",
             kb_id="kb-test",
             chunk_index=2,
         )
 
-        self.assertIn("这是通过 ref 读取到的正文。", content)
-        self.assertEqual(captured, {
+        self.assertIn("这是通过 data_id 读取到的正文。", content["content"])
+        self.assertEqual(captured[0], {
             "data_id": "kb-test::documents/selected.md",
             "chunk_index": 2,
         })

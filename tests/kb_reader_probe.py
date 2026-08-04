@@ -24,12 +24,11 @@ def main() -> int:
     ok_reads = 0
     errors = []
     while time.time() < deadline:
-        value = backend.read_chunk(data_id=data_id, chunk_index=1, max_chars=800)
+        result = backend.read_content(data_id=data_id, chunk_index=1, max_chars=800)
+        value = result.get("content") if isinstance(result, dict) else ""
         if (
-            value.startswith("# ")
-            and "[Zvec 读取失败]" not in value
-            and "[未找到]" not in value
-            and "[索引未就绪]" not in value
+            value
+            and not result.get("error_code")
         ):
             ok_reads += 1
         else:

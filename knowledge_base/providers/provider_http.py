@@ -19,10 +19,6 @@ from ..cancellation import KnowledgeBaseCancelled, check_cancelled, wait_with_ca
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
-def env_bool(name: str, default: str = "0") -> bool:
-    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
-
-
 def base_url(*names: str, default: str = DEFAULT_BASE_URL) -> str:
     for name in names:
         value = os.environ.get(str(name), "").strip()

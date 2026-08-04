@@ -25,16 +25,9 @@ _FIGURE_REF = re.compile(
 _SOURCE_IMAGE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp", ".tif", ".tiff",
 }
-_STRUCTURE_FIELDS = {
-    "search_text",
-    "content_type",
-    "structure_id",
-    "structure_title",
-    "structure_part_index",
-    "structure_part_count",
+_EVIDENCE_TYPES = {
+    "prose", "table", "image", "equation", "code", "list", "quote", "note", "figure",
 }
-_LEGACY_OUTPUT_FIELDS = [field for field in OUTPUT_FIELDS if field not in _STRUCTURE_FIELDS]
-_EVIDENCE_TYPES = {"prose", "table", "image", "equation", "code", "list", "quote"}
 
 
 class KnowledgeBaseRetriever:
@@ -81,18 +74,8 @@ class KnowledgeBaseRetriever:
             kb,
             data_id,
             chunk_index,
-            output_fields=output_fields or self._output_fields_for_kb(kb),
+            output_fields=output_fields or self._output_fields,
         )
-
-    def _index_schema_version(self, kb: dict) -> int:
-        meta = getattr(self._index, "meta", lambda _path: {})(kb["path"])
-        try:
-            return int((meta or {}).get("schema_version") or 1)
-        except (TypeError, ValueError):
-            return 1
-
-    def _output_fields_for_kb(self, kb: dict) -> list[str]:
-        return self._output_fields if self._index_schema_version(kb) >= 2 else _LEGACY_OUTPUT_FIELDS
 
     @staticmethod
     def _record_content_type(fields: dict) -> str:
@@ -120,9 +103,9 @@ class KnowledgeBaseRetriever:
             or content_type in requested
         )
 
-    def _evidence_filter(self, kb: dict, evidence_types) -> str | None:
+    def _evidence_filter(self, evidence_types) -> str | None:
         requested = {str(value).strip().lower() for value in (evidence_types or [])}
-        if not requested or self._index_schema_version(kb) < 2:
+        if not requested:
             return None
         clauses = []
         if "image" in requested:
@@ -138,22 +121,13 @@ class KnowledgeBaseRetriever:
         probe = getattr(self._index, "probe", None)
         if callable(probe):
             state = probe(kb["path"])
-            if all(
+            return all(
                 bool(state.get(key))
                 for key in ("present", "openable", "schema_valid", "embedding_matches")
-            ):
-                return True
-            if self._index_schema_version(kb) >= 2 or not state.get("present"):
-                return False
-        else:
-            # Lightweight adapters used by non-Zvec clients may not expose a
-            # probe method. Existing path presence remains their read contract.
-            return True
-        # One-version upgrade bridge: keep the currently published v1 index
-        # readable until the user runs knowledge maintenance. New structural
-        # fields are inferred where possible and never written into active.
-        with self._zvec_open(path):
-            return True
+            )
+        # Lightweight adapters used by non-Zvec clients may not expose a probe
+        # method. Existing path presence remains their read contract.
+        return True
 
     def _require_zvec(self):
         return self._index.require()
@@ -367,10 +341,7 @@ class KnowledgeBaseRetriever:
                 seen.add(normalized)
                 values.append(normalized)
 
-        add(document.get("file_name") or document.get("fileName"))
-        add(document.get("ref"))
-        add(document.get("data_id") or document.get("dataId"))
-        add(document.get("title"))
+        add(document.get("data_id"))
         return values
 
     @staticmethod
@@ -425,7 +396,7 @@ class KnowledgeBaseRetriever:
                 rows = col.query(
                     topk=max(1, int(topk)),
                     filter=filter_expr,
-                    output_fields=self._output_fields_for_kb(kb),
+                    output_fields=self._output_fields,
                     include_vector=False,
                 )
         except Exception as error:
@@ -476,7 +447,7 @@ class KnowledgeBaseRetriever:
             value
             for value in (
                 self._zvec_doc_filter(doc_candidates),
-                self._evidence_filter(kb, evidence_types),
+                self._evidence_filter(evidence_types),
             )
             if value
         ]
@@ -489,7 +460,7 @@ class KnowledgeBaseRetriever:
                     zvec.Query(vector_field, vector=query_vector),
                     topk=query_topk,
                     filter=doc_filter,
-                    output_fields=self._output_fields_for_kb(kb),
+                    output_fields=self._output_fields,
                     include_vector=False,
                 )
         except Exception as error:
@@ -729,15 +700,15 @@ class KnowledgeBaseRetriever:
                 kb_targets = [
                     target for target in scope_targets
                     if isinstance(target, dict)
-                    and str(target.get("kb_id") or target.get("kbId") or target.get("id") or "").strip() == kb["id"]
+                    and str(target.get("kb_id") or "").strip() == kb["id"]
                 ]
                 if not kb_targets:
                     continue
-                if not any(bool(target.get("all_documents", target.get("allDocuments", False))) for target in kb_targets):
+                if not any(target.get("all_documents") is True for target in kb_targets):
                     scoped_file_names = [
                         candidate
                         for target in kb_targets
-                        for document in (target.get("documents") or target.get("docs") or [])
+                        for document in (target.get("documents") or [])
                         if isinstance(document, dict)
                         for candidate in self._scope_document_candidates(document, kb["id"])
                     ]
@@ -853,31 +824,16 @@ class KnowledgeBaseRetriever:
         }
 
     def _resolve_zvec_target(
-        self, data_id: str | None = None, kb_id: str | None = None, ref: str | None = None
+        self, data_id: str | None = None, kb_id: str | None = None
     ) -> tuple[dict | None, str]:
         knowledge_bases = self._load_config()
         target = None
         data_id = str(data_id or "").strip()
-        ref = str(ref or "").strip().replace("\\", "/")
         if data_id and "::" in data_id:
             kid = data_id.split("::", 1)[0]
             target = next((kb for kb in knowledge_bases if kb["id"] == kid), None)
         if target is None and kb_id:
             target = next((kb for kb in knowledge_bases if kb["id"] == kb_id), None)
-        if ref:
-            for kb in knowledge_bases:
-                if ref.startswith(kb["id"] + "/"):
-                    if target is None:
-                        target = kb
-                    rel = ref[len(kb["id"]) + 1:]
-                    if not data_id:
-                        data_id = f"{kb['id']}::{rel}"
-                    break
-        if target is None:
-            target = next(
-                (kb for kb in knowledge_bases if kb.get("exists") and os.path.isdir(self._zvec_path(kb["path"]))),
-                None,
-            )
         return target, data_id
 
     def _zvec_fetch_doc(self, kb: dict, data_id: str, chunk_index: int, output_fields: list[str] | None = None):
@@ -885,22 +841,6 @@ class KnowledgeBaseRetriever:
             kb, data_id, chunk_index,
             output_fields=output_fields or self._output_fields,
         )
-
-    def document_exists(
-        self, file_name: str | None = None, title: str | None = None, kb_id: str | None = None
-    ) -> bool:
-        for kb in self._load_config():
-            if kb_id and kb["id"] != kb_id:
-                continue
-            if not kb.get("exists") or not os.path.isdir(self._zvec_path(kb["path"])):
-                continue
-            for rel in self._doc_path_candidates(file_name=file_name, title=title):
-                try:
-                    if self._zvec_fetch_doc(kb, f"{kb['id']}::{rel}", 0, ["data_id"]):
-                        return True
-                except Exception:
-                    continue
-        return False
 
     @staticmethod
     def _doc_fields(doc) -> dict:
@@ -912,12 +852,9 @@ class KnowledgeBaseRetriever:
         chunk_index: int = 0,
         span: int = 1,
         kb_id: str | None = None,
-        ref: str | None = None,
         max_chars: int = 4000,
     ) -> dict:
-        target, resolved_data_id = self._resolve_zvec_target(
-            data_id=data_id, kb_id=kb_id, ref=ref
-        )
+        target, resolved_data_id = self._resolve_zvec_target(data_id=data_id, kb_id=kb_id)
         if target is None or not resolved_data_id:
             return {"error_code": "not_found"}
         if not os.path.isdir(self._zvec_path(target["path"])):
@@ -1029,54 +966,19 @@ class KnowledgeBaseRetriever:
             "continuation": continuation,
         }
 
-    def read_chunk(
-        self,
-        data_id: str | None = None,
-        chunk_index: int = 0,
-        kb_id: str | None = None,
-        ref: str | None = None,
-        max_chars: int = 4000,
-    ) -> str:
-        target, data_id = self._resolve_zvec_target(data_id=data_id, kb_id=kb_id, ref=ref)
-        if target is None or not data_id:
-            return f"[未找到] data_id={data_id}"
-        if not os.path.isdir(self._zvec_path(target["path"])):
-            return "[索引未就绪] Zvec index directory is missing"
-        try:
-            doc = self._zvec_fetch_doc(target, data_id, chunk_index)
-        except Exception as error:
-            return f"[Zvec 读取失败] {error}"
-        if not doc:
-            return f"[未找到] data_id={data_id} chunk_index={chunk_index}"
-        fields = getattr(doc, "fields", None) or doc or {}
-        body = fields.get("body") or ""
-        content = clean_public_text(body)
-        if len(content) > max_chars:
-            content = content[:max_chars] + f"\n…[已截断，本次读取共 {len(content)} 字]"
-        head = f"# 原始文档：{fields.get('title', '')}\n"
-        section = section_label(fields.get("header_path"))
-        if section:
-            head += f"章节：{section}\n"
-        head += f"{'-' * 40}\n"
-        return head + content
-
     def reference_for_chunk(
         self,
         data_id: str | None = None,
         chunk_index: int = 0,
         kb_id: str | None = None,
-        ref: str | None = None,
     ) -> dict:
         """Return a stable citation for a retrieved text chunk."""
-        target, resolved_data_id = self._resolve_zvec_target(
-            data_id=data_id, kb_id=kb_id, ref=ref
-        )
+        target, resolved_data_id = self._resolve_zvec_target(data_id=data_id, kb_id=kb_id)
         fallback = {
             "kind": "document",
             "kb_id": kb_id or "",
             "data_id": resolved_data_id or data_id or "",
             "chunk_index": chunk_index,
-            "ref": ref or "",
         }
         if target is None or not resolved_data_id:
             return public_reference(fallback, kind="document")
@@ -1101,19 +1003,16 @@ class KnowledgeBaseRetriever:
             "file_name": file_name,
             "source_file_name": source_title or fields.get("title") or file_name,
             "header_path": fields.get("header_path") or "",
-            "ref": f"{target['id']}/{file_name}" if file_name else (ref or ""),
         }, kind="document")
 
     def list_chunks(
         self,
         data_id: str | None = None,
         kb_id: str | None = None,
-        ref: str | None = None,
-        preview_chars: int = 80,
         offset: int = 0,
         limit: int = 20,
     ) -> dict:
-        target, data_id = self._resolve_zvec_target(data_id=data_id, kb_id=kb_id, ref=ref)
+        target, data_id = self._resolve_zvec_target(data_id=data_id, kb_id=kb_id)
         if target is None or not data_id:
             return {"error": f"[未找到] data_id={data_id}"}
         path = self._zvec_path(target["path"])
@@ -1136,7 +1035,7 @@ class KnowledgeBaseRetriever:
                             "data_id", "chunk_index", "file_name", "title", "body",
                             "header_path", "content_type", "structure_title",
                         )
-                        if field in self._output_fields_for_kb(target)
+                        if field in self._output_fields
                     ],
                     include_vector=False,
                 )
@@ -1154,7 +1053,7 @@ class KnowledgeBaseRetriever:
                     body = fields.get("body") or ""
                     title = title or fields.get("title") or ""
                     file_name = file_name or fields.get("file_name") or ""
-                    preview = re.sub(r"\s+", " ", body).strip()[:preview_chars]
+                    preview = re.sub(r"\s+", " ", clean_public_text(body)).strip()[:80]
                     chunks.append({
                         "chunk_index": int(fields.get("chunk_index") or index),
                         "chars": len(body),
@@ -1289,28 +1188,6 @@ class KnowledgeBaseRetriever:
             out["display_label"] = out.get("caption") or out.get("ref_key") or out.get("title") or "图片"
         return with_reference(out, kind="image")
 
-    def resolve_file(self, cited: str | None) -> str | None:
-        """Resolve a citation to a file under one configured KB root."""
-        if not cited:
-            return None
-        cited = str(cited).strip().strip("[]").replace("\\", "/")
-        cited = re.sub(r"^kb:", "", cited)
-        if "::" in cited:
-            cited = cited.replace("::", "/", 1)
-        cited = cited.split("#", 1)[0].strip()
-        candidates = [cited]
-        for kb in self._load_config():
-            prefix = kb["id"] + "/"
-            if cited.startswith(prefix):
-                candidates.append(cited[len(prefix):])
-        for kb in self._load_config():
-            root = os.path.realpath(kb["path"])
-            for candidate in candidates:
-                full = os.path.realpath(os.path.join(root, candidate))
-                if self._path_is_within(root, full) and os.path.isfile(full):
-                    return full
-        return None
-
     def list_documents(self, kb_id: str | None = None) -> list[dict]:
         docs = []
         for kb in self._load_config():
@@ -1361,52 +1238,14 @@ class KnowledgeBaseRetriever:
                 }, kind="document"))
         return docs
 
-    def read_document(
-        self,
-        kb_id: str | None = None,
-        data_id: str | None = None,
-        file_name: str | None = None,
-        ref: str | None = None,
-        max_chars: int = 200000,
-    ) -> dict:
-        kb, rel, error = self._document_locator(
-            kb_id=kb_id,
-            data_id=data_id,
-            file_name=file_name,
-            ref=ref,
-        )
-        if error:
-            return error
-        target = os.path.realpath(os.path.join(kb["path"], rel))
-        if not self._path_is_within(kb["path"], target) or not os.path.isfile(target):
-            return {"error_code": "document_not_found", "error": "[未找到文档]"}
-        body = documents.read_textfile(target)
-        truncated = len(body) > int(max_chars)
-        if truncated:
-            body = body[:int(max_chars)]
-        return with_reference({
-            "kb_id": kb["id"],
-            "data_id": f"{kb['id']}::{rel}",
-            "title": self._imported_document_titles(kb["path"]).get(rel, os.path.basename(rel)),
-            "file_name": rel,
-            "content": body,
-            "truncated": truncated,
-            "path": target,
-            "ref": f"{kb['id']}/{rel}",
-        }, kind="document")
-
     def _document_locator(
         self,
         *,
         kb_id: str | None = None,
         data_id: str | None = None,
-        file_name: str | None = None,
-        ref: str | None = None,
     ):
         data_id = str(data_id or "")
         kb = self._kb_by_id(kb_id or (data_id.split("::", 1)[0] if "::" in data_id else ""))
-        if kb is None and ref:
-            kb = self._kb_by_id(str(ref).split("/", 1)[0])
         if kb is None:
             return None, "", {
                 "error_code": "knowledge_base_not_found",
@@ -1414,12 +1253,6 @@ class KnowledgeBaseRetriever:
             }
         if data_id and "::" in data_id:
             rel = data_id.split("::", 1)[1].split("::image::", 1)[0]
-        elif ref:
-            ref_value = str(ref).replace("\\", "/")
-            prefix = kb["id"] + "/"
-            rel = ref_value[len(prefix):] if ref_value.startswith(prefix) else ref_value
-        elif file_name:
-            rel = str(file_name).replace("\\", "/")
         else:
             return None, "", {
                 "error_code": "document_target_missing",
@@ -1438,14 +1271,10 @@ class KnowledgeBaseRetriever:
         self,
         kb_id: str | None = None,
         data_id: str | None = None,
-        file_name: str | None = None,
-        ref: str | None = None,
     ) -> dict:
         kb, processed_rel, error = self._document_locator(
             kb_id=kb_id,
             data_id=data_id,
-            file_name=file_name,
-            ref=ref,
         )
         if error:
             return error
@@ -1510,15 +1339,11 @@ class KnowledgeBaseRetriever:
         self,
         kb_id: str | None = None,
         data_id: str | None = None,
-        file_name: str | None = None,
-        ref: str | None = None,
     ) -> dict:
         """Resolve the normalized Markdown generated for one imported document."""
         kb, processed_rel, error = self._document_locator(
             kb_id=kb_id,
             data_id=data_id,
-            file_name=file_name,
-            ref=ref,
         )
         if error:
             return error
@@ -1571,13 +1396,11 @@ class KnowledgeBaseRetriever:
         *,
         kb_id: str | None = None,
         data_id: str | None = None,
-        ref: str | None = None,
         image_path: str | None = None,
     ) -> str | None:
         source = self.resolve_source_document(
             kb_id=kb_id,
             data_id=data_id,
-            ref=ref,
         )
         if source.get("error") or not source.get("is_original"):
             return None

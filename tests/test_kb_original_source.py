@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from knowledge_base.retrieval import KnowledgeBaseRetriever
 
@@ -19,7 +20,9 @@ class _Registry:
 
 
 class _UnusedIndex:
-    pass
+    @staticmethod
+    def path(kb_path):
+        return os.path.join(kb_path, ".kb_index", "zvec")
 
 
 class _UnusedAssets:
@@ -39,6 +42,7 @@ class OriginalSourceTests(unittest.TestCase):
 
         self.source_asset.parent.mkdir(parents=True)
         self.processed_document.parent.mkdir(parents=True)
+        (self.processed_root / ".kb_index" / "zvec").mkdir(parents=True)
         self.source_document.write_text(
             "# 原始文档\n\n![原图](images/figure.jpg)\n",
             encoding="utf-8",
@@ -81,7 +85,12 @@ class OriginalSourceTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_agent_document_read_remains_processed(self):
-        result = self.retriever.read_document(data_id=self.data_id)
+        self.retriever._zvec_fetch_doc = lambda _kb, data_id, chunk_index, output_fields=None: SimpleNamespace(fields={
+            "data_id": data_id,
+            "chunk_index": chunk_index,
+            "body": "MinerU 处理结果",
+        })
+        result = self.retriever.read_content(data_id=self.data_id)
 
         self.assertIn("MinerU 处理结果", result["content"])
         self.assertNotIn("原始文档", result["content"])

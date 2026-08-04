@@ -102,7 +102,7 @@ class RetrievalContractTests(unittest.TestCase):
         result = self.retriever.search(
             "alpha", mode="vector", top_k=5,
             scope_targets=[
-                {"kb_id": "kb-a", "documents": [{"file_name": "documents/a.md"}]},
+                {"kb_id": "kb-a", "documents": [{"data_id": "kb-a::documents/a.md"}]},
                 {"kb_id": "kb-b", "all_documents": True},
             ],
         )
@@ -122,11 +122,10 @@ class RetrievalContractTests(unittest.TestCase):
 
         self.retriever._zvec_fetch_doc = fetch
         hit = next(item for item in result["results"] if item["kb_id"] == "kb-a")
-        content = self.retriever.read_chunk(
+        content = self.retriever.read_content(
             data_id=hit["data_id"], chunk_index=hit["chunk_index"], kb_id="kb-a"
         )
-        self.assertIn("真实正文内容", content)
-        self.assertIn("章节：方法", content)
+        self.assertIn("真实正文内容", content["content"])
 
     def test_empty_selection_does_not_call_embedding_or_return_cross_scope_hits(self):
         self.retriever._search_one_zvec = lambda *_args, **_kwargs: [

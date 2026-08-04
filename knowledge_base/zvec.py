@@ -80,20 +80,6 @@ class ZvecIndex:
             with contextlib.suppress(Exception):
                 setattr(collection, attr, None)
 
-    @staticmethod
-    def _rename_with_retry(source: str, destination: str) -> None:
-        last_error = None
-        for delay in (0, 0.1, 0.25, 0.5, 1, 2):
-            if delay:
-                time.sleep(delay)
-            try:
-                os.rename(source, destination)
-                return
-            except PermissionError as error:
-                last_error = error
-        if last_error is not None:
-            raise last_error
-
     def meta(self, kb_path: str) -> dict[str, Any]:
         try:
             with open(self.meta_path(kb_path), encoding="utf-8") as handle:
@@ -387,7 +373,6 @@ class ZvecIndex:
         self,
         kb: dict,
         records,
-        sources: dict,
         logfn=None,
         *,
         cancelled: Callable[[], bool] | None = None,
@@ -395,14 +380,17 @@ class ZvecIndex:
     ):
         path = self.path(kb["path"])
         meta_path = self.meta_path(kb["path"])
-        temp_path = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
-        backup_path = ""
         started = time.time()
         try:
-            shutil.rmtree(temp_path, ignore_errors=True)
-            os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+            # The complete knowledge-base package is already built in an
+            # isolated staging directory.  A second Zvec-local transaction
+            # only duplicated rollback logic and left extra temp layouts for
+            # startup cleanup.  Replace the staged collection directly; the
+            # published active package is never touched here.
+            shutil.rmtree(path, ignore_errors=True)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with self.open_collection(
-                temp_path,
+                path,
                 create=True,
                 read_only=False,
             ) as collection:
@@ -428,7 +416,7 @@ class ZvecIndex:
 
             stats.update({
                 "image_assets": int(stats["image_chunks"]),
-                "zvec_bytes": self.dir_size(temp_path),
+                "zvec_bytes": self.dir_size(path),
                 "build_seconds": round(time.time() - started, 1),
                 "embedding": embedding_used,
                 "sparse_embedding": sparse_embedding_used,
@@ -436,27 +424,13 @@ class ZvecIndex:
             meta = {
                 "schema_version": self.schema_version,
                 "built_at": int(time.time()),
-                "sources": sources,
                 "embedding": embedding_used,
                 "sparse_embedding": sparse_embedding_used,
                 "indexed_kinds": ["text", "image"] if stats["image_chunks"] else ["text"],
                 "stats": stats,
             }
 
-            if os.path.exists(path):
-                backup_path = f"{path}.rollback.{time.time_ns()}"
-                self._rename_with_retry(path, backup_path)
-            try:
-                self._rename_with_retry(temp_path, path)
-                self._write_json_atomic(meta_path, meta)
-            except Exception:
-                shutil.rmtree(path, ignore_errors=True)
-                if backup_path and os.path.exists(backup_path):
-                    self._rename_with_retry(backup_path, path)
-                    backup_path = ""
-                raise
-            if backup_path:
-                shutil.rmtree(backup_path, ignore_errors=True)
+            self._write_json_atomic(meta_path, meta)
             check_cancelled(cancelled)
             if logfn:
                 logfn(
@@ -465,7 +439,6 @@ class ZvecIndex:
                 )
             return stats
         finally:
-            shutil.rmtree(temp_path, ignore_errors=True)
             gc.collect()
 
     def fetch(self, kb: dict, data_id: str, chunk_index: int, output_fields=None):

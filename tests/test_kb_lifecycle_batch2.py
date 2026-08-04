@@ -157,6 +157,10 @@ class _SelectionIndex:
             "schema_valid": present,
             "embedding_matches": present,
             "error": "",
+            "meta": {"stats": {"n_chunks": sum(
+                1 for line in Path(path).parent.joinpath("records.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )}} if present else {},
         }
 
 
@@ -224,7 +228,7 @@ class DuplicatePolicyTests(unittest.TestCase):
                 "state": "ready",
                 "summary": {"n_docs": 1},
                 "failures": [],
-                "processing_fingerprint": {
+                "index_sources": {
                     "chunking": {"markdown_parser": "older-contract"},
                 },
             }), encoding="utf-8")
@@ -399,7 +403,7 @@ class DuplicatePolicyTests(unittest.TestCase):
                     "name": "Images",
                     "source_path": "",
                     "state": "ready",
-                    "processing_fingerprint": {"image_analysis": {"version": 1}},
+                    "index_sources": {"image_analysis": {"version": 1}},
                     "files": [],
                     "failures": [],
                     "summary": {"documents_total": 1, "image_chunks": 1},

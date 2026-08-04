@@ -344,7 +344,6 @@ class IndexBuilder:
         kb: dict,
         *,
         records: list[dict],
-        sources: dict,
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
@@ -355,33 +354,16 @@ class IndexBuilder:
         stats = self.index.build(
             kb,
             records,
-            sources,
             logfn=logfn,
             cancelled=cancelled,
             progress=progress,
         )
         check_cancelled(cancelled)
         usage = self.usage.current()
-        usage["stats"] = dict(stats)
         self.usage.write(kb["path"], usage)
-        probe = self.index.probe(kb["path"])
-        check_cancelled(cancelled)
-        if not (
-            probe["present"]
-            and probe["openable"]
-            and probe["schema_valid"]
-            and probe["embedding_matches"]
-        ):
-            raise RuntimeError(
-                "索引校验失败: "
-                + (probe.get("error") or json.dumps({
-                    key: probe[key]
-                    for key in ("present", "openable", "schema_valid", "embedding_matches")
-                }, ensure_ascii=False))
-            )
         if callable(progress):
             progress({
-                "phase": "validated",
+                "phase": "indexing",
                 "processed": len(records),
                 "total": len(records),
                 "usage": self.usage_summary(usage),

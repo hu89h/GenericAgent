@@ -143,15 +143,6 @@ def _qwen_cfg(vars_: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
-def llm_config() -> Dict[str, Any]:
-    """Return a chat-completions compatible KB LLM config from mykey.py.
-
-    KB image preprocessing and image QA reuse the first regular GA
-    ``native_oai_*`` model configuration that has ``apikey/apibase/model``.
-    """
-    return _preferred_llm_cfg(_load_mykey_vars())
-
-
 def vision_config() -> Dict[str, Any]:
     """Return the vision model config for image analysis / image QA.
 

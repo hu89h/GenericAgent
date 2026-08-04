@@ -130,7 +130,7 @@ class _DeleteIndexBuilder:
     def begin_build(self):
         return None
 
-    def build(self, kb, *, records, sources, progress=None, logfn=None, cancelled=None):
+    def build(self, kb, *, records, progress=None, logfn=None, cancelled=None):
         index_path = os.path.join(kb["path"], ".kb_index", "zvec")
         os.makedirs(index_path, exist_ok=True)
         if callable(progress):
@@ -146,13 +146,20 @@ class _DeleteIndexBuilder:
 
 
 class _DeleteIndex:
+    probe_calls = 0
+
     @staticmethod
     def probe(path):
+        _DeleteIndex.probe_calls += 1
+        records_path = os.path.join(os.path.dirname(path), "records.jsonl")
+        with open(records_path, encoding="utf-8") as handle:
+            count = sum(1 for line in handle if line.strip())
         return {
             "present": os.path.isdir(os.path.join(path, ".kb_index", "zvec")),
             "openable": True,
             "schema_valid": True,
             "embedding_matches": True,
+            "meta": {"stats": {"n_chunks": count}},
         }
 
 
@@ -208,6 +215,7 @@ class DocumentDeletionTests(unittest.TestCase):
                     publisher=Publisher(),
                     index=_DeleteIndex(),
                 )
+                _DeleteIndex.probe_calls = 0
 
                 result = pipeline.delete_document(
                     kb_id,
@@ -220,6 +228,16 @@ class DocumentDeletionTests(unittest.TestCase):
                 self.assertTrue(os.path.isfile(os.path.join(processed, "documents", "two.md")))
                 remaining = _DeleteRecords.read_records(os.path.join(active, "records.jsonl"))
                 self.assertEqual([item["file_name"] for item in remaining], ["documents/two.md"])
+                self.assertEqual(_DeleteIndex.probe_calls, 1)
+                with open(os.path.join(active, "manifest.json"), encoding="utf-8") as handle:
+                    published = json.load(handle)
+                self.assertEqual(set(published["summary"]), {
+                    "documents_total", "documents_succeeded", "documents_with_warnings",
+                    "documents_failed", "text_chunks", "image_chunks", "failure_items",
+                })
+                self.assertIn("published_at", published)
+                self.assertNotIn("processing_fingerprint", published)
+                self.assertNotIn("index_stats", published)
 
 
 class PublisherTests(unittest.TestCase):
@@ -545,13 +563,16 @@ class ProcessedContentRepairTests(unittest.TestCase):
 
         def probe(self, kb_path):
             present = os.path.isdir(self.path(kb_path))
+            records_path = os.path.join(os.path.dirname(kb_path), "records.jsonl")
+            with open(records_path, encoding="utf-8") as handle:
+                count = sum(1 for line in handle if line.strip())
             return {
                 "present": present,
                 "openable": present,
                 "schema_valid": present,
                 "embedding_matches": present,
                 "error": "",
-                "meta": {},
+                "meta": {"stats": {"n_chunks": count}},
             }
 
     class _IndexBuilder:
@@ -561,7 +582,7 @@ class ProcessedContentRepairTests(unittest.TestCase):
         def begin_build(self):
             return None
 
-        def build(self, kb, *, records, sources, progress=None, logfn=None, cancelled=None):
+        def build(self, kb, *, records, progress=None, logfn=None, cancelled=None):
             os.makedirs(self.index.path(kb["path"]), exist_ok=True)
             stats = {
                 "n_docs": len({record.get("file_name") for record in records}),

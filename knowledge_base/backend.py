@@ -192,8 +192,6 @@ def delete_document(
     kb_id: str,
     *,
     data_id: str = "",
-    file_name: str = "",
-    ref: str = "",
     progress=None,
     logfn=None,
     cancelled=None,
@@ -204,8 +202,6 @@ def delete_document(
         return _runtime().pipeline.delete_document(
             value,
             data_id=data_id,
-            file_name=file_name,
-            ref=ref,
             progress=progress,
             logfn=logfn,
             cancelled=cancelled,
@@ -402,9 +398,7 @@ def kb_status(kb: dict) -> dict:
     except (TypeError, ValueError):
         index_schema_version = 1
     indexed_chunking = dict(
-        (manifest.get("processing_fingerprint") or {}).get("chunking")
-        or (manifest.get("index_sources") or {}).get("chunking")
-        or {}
+        (manifest.get("index_sources") or {}).get("chunking") or {}
     )
     structure_update_available = bool(
         kb.get("exists")
@@ -414,15 +408,7 @@ def kb_status(kb: dict) -> dict:
             or indexed_chunking != document_contracts.chunking_meta()
         )
     )
-    legacy_readable = False
-    if structure_update_available:
-        try:
-            with _runtime().index.open_collection(_runtime().index.path(kb["path"])):
-                pass
-            legacy_readable = _runtime().index.embedding_config_matches(index_meta)
-        except Exception:
-            legacy_readable = False
-    healthy = legacy_readable or all(
+    healthy = all(
         probe.get(key)
         for key in ("present", "openable", "schema_valid", "embedding_matches")
     )
@@ -471,9 +457,7 @@ def kb_status(kb: dict) -> dict:
         int(value)
         for value in (
             manifest.get("published_at"),
-            manifest.get("reindexed_at"),
             index_meta.get("built_at"),
-            manifest.get("imported_at"),
         )
         if value
     ]
@@ -491,15 +475,15 @@ def kb_status(kb: dict) -> dict:
         "empty": is_empty,
         "index": {
             "present": bool(probe.get("present")),
-            "openable": bool(probe.get("openable") or legacy_readable),
+            "openable": bool(probe.get("openable")),
             "schema_valid": bool(probe.get("schema_valid")),
             "embedding_matches": bool(probe.get("embedding_matches")),
             "error": probe.get("error") or "",
         },
         "counts": {
-            "documents": int(summary.get("n_docs") or summary.get("ready") or 0),
+            "documents": int(summary.get("documents_total") or 0),
             "text_chunks": int(summary.get("text_chunks") or 0),
-            "images": int(summary.get("image_assets") or 0),
+            "images": int(summary.get("image_chunks") or 0),
             "failures": len(failures),
         },
         "last_success_at": max(success_times) if success_times else None,
@@ -566,28 +550,11 @@ def search_diagnostics() -> list[dict]:
     return _runtime().retrieval.search_diagnostics()
 
 
-def document_exists(file_name=None, title=None, kb_id=None):
-    return _runtime().retrieval.document_exists(
-        file_name=file_name, title=title, kb_id=kb_id
-    )
-
-
-def read_chunk(data_id=None, chunk_index=0, kb_id=None, ref=None, max_chars=4000):
-    return _runtime().retrieval.read_chunk(
-        data_id=data_id,
-        chunk_index=chunk_index,
-        kb_id=kb_id,
-        ref=ref,
-        max_chars=max_chars,
-    )
-
-
 def read_content(
     data_id=None,
     chunk_index=0,
     span=1,
     kb_id=None,
-    ref=None,
     max_chars=4000,
 ):
     return _runtime().retrieval.read_content(
@@ -595,28 +562,22 @@ def read_content(
         chunk_index=chunk_index,
         span=span,
         kb_id=kb_id,
-        ref=ref,
         max_chars=max_chars,
     )
 
 
-def reference_for_chunk(data_id=None, chunk_index=0, kb_id=None, ref=None):
+def reference_for_chunk(data_id=None, chunk_index=0, kb_id=None):
     return _runtime().retrieval.reference_for_chunk(
         data_id=data_id,
         chunk_index=chunk_index,
         kb_id=kb_id,
-        ref=ref,
     )
 
 
-def list_chunks(
-    data_id=None, kb_id=None, ref=None, preview_chars=80, offset=0, limit=20
-):
+def list_chunks(data_id=None, kb_id=None, offset=0, limit=20):
     return _runtime().retrieval.list_chunks(
         data_id=data_id,
         kb_id=kb_id,
-        ref=ref,
-        preview_chars=preview_chars,
         offset=offset,
         limit=limit,
     )
@@ -631,53 +592,28 @@ def read_image(data_id=None, ref_key=None, kb_id=None, source_data_id=None):
     )
 
 
-def resolve_file(cited):
-    return _runtime().retrieval.resolve_file(cited)
-
-
 def list_documents(kb_id=None):
     return _runtime().retrieval.list_documents(kb_id=kb_id)
 
 
-def read_document(
-    kb_id=None,
-    data_id=None,
-    file_name=None,
-    ref=None,
-    max_chars=200000,
-):
-    return _runtime().retrieval.read_document(
-        kb_id=kb_id,
-        data_id=data_id,
-        file_name=file_name,
-        ref=ref,
-        max_chars=max_chars,
-    )
-
-
-def resolve_source_document(kb_id=None, data_id=None, file_name=None, ref=None):
+def resolve_source_document(kb_id=None, data_id=None):
     return _runtime().retrieval.resolve_source_document(
         kb_id=kb_id,
         data_id=data_id,
-        file_name=file_name,
-        ref=ref,
     )
 
 
-def resolve_processed_document(kb_id=None, data_id=None, file_name=None, ref=None):
+def resolve_processed_document(kb_id=None, data_id=None):
     return _runtime().retrieval.resolve_processed_document(
         kb_id=kb_id,
         data_id=data_id,
-        file_name=file_name,
-        ref=ref,
     )
 
 
-def resolve_source_asset(kb_id=None, data_id=None, ref=None, image_path=None):
+def resolve_source_asset(kb_id=None, data_id=None, image_path=None):
     return _runtime().retrieval.resolve_source_asset(
         kb_id=kb_id,
         data_id=data_id,
-        ref=ref,
         image_path=image_path,
     )
 
@@ -686,14 +622,13 @@ def resolve_open_target(
     *,
     kb_id: str,
     data_id: str = "",
-    ref: str = "",
     ref_key: str = "",
 ) -> str | None:
     if "::image::" in str(data_id or "") or ref_key:
         image = read_image(data_id=data_id, ref_key=ref_key, kb_id=kb_id)
         path = str(image.get("image_abspath") or "")
         return path if path and os.path.isfile(path) else None
-    source = resolve_source_document(kb_id=kb_id, data_id=data_id, ref=ref)
+    source = resolve_source_document(kb_id=kb_id, data_id=data_id)
     path = str(source.get("path") or "")
     return path if path and os.path.isfile(path) else None
 
