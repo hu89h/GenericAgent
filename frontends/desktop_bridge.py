@@ -3134,13 +3134,25 @@ async def kb_source_asset_handler(request):
 
 async def kb_import_handler(request):
     data = await read_json(request)
+    resume_requested = bool(
+        data.get("resume")
+        or data.get("resumeCheckpoint")
+        or data.get("resume_checkpoint")
+        or data.get("resumeJobId")
+        or data.get("resume_job_id")
+    )
     resume_job_id = str(data.get("resumeJobId") or data.get("resume_job_id") or "").strip()
     resume_job = None
+    resume_mode = ""
     if resume_job_id:
         with _kb_jobs_lock:
             resume_job = _kb_jobs.get(resume_job_id)
         if not resume_job or not resume_job.get("checkpointAvailable"):
             return json_ok({"ok": False, "error": "kb_checkpoint_not_found"}, status=404)
+        resume_mode = str(
+            (resume_job.get("checkpoint") or {}).get("mode")
+            or "import"
+        ).strip().lower()
     source_dir = str(data.get("sourceDir") or data.get("path") or "").strip()
     rescan_source = bool(data.get("rescanSource") or data.get("rescan_source"))
     raw_duplicate_policy = data.get("duplicatePolicy", data.get("duplicate_policy"))
@@ -3174,20 +3186,28 @@ async def kb_import_handler(request):
         or (resume_job or {}).get("kbId")
         or ""
     ).strip()
-    if (
-        (data.get("resume") or data.get("resumeCheckpoint"))
-        and kb_id
-        and not source_dir
-        and not source_files
-    ):
+    if resume_requested and kb_id and not resume_mode:
         checkpoint_inputs = _kb_backend().checkpoint_inputs(kb_id)
-        if checkpoint_inputs.get("available"):
+        if not checkpoint_inputs.get("available"):
+            return json_ok({"ok": False, "error": "kb_checkpoint_not_found"}, status=404)
+        resume_mode = str(checkpoint_inputs.get("mode") or "import").strip().lower()
+        if not source_dir:
             source_dir = str(checkpoint_inputs.get("source_path") or "").strip()
+        if not source_files:
             source_files = [
                 str(path)
                 for path in (checkpoint_inputs.get("source_files") or [])
                 if str(path).strip()
             ]
+    if resume_requested:
+        if resume_mode not in {"import", "add_documents"}:
+            return json_ok({"ok": False, "error": "kb_checkpoint_invalid"}, status=400)
+        # A directory-import checkpoint may also list every source file so
+        # that its identity can be validated.  It must still resume through
+        # import_kb; passing those files to add_documents changes the
+        # operation type and produces a false checkpoint conflict.
+        if resume_mode == "import":
+            source_files = []
     if data.get("discardCheckpoint") or data.get("discard_checkpoint"):
         if not kb_id:
             return json_ok({"ok": False, "error": "knowledge_base_required"}, status=400)
@@ -3236,7 +3256,7 @@ async def kb_import_handler(request):
         detail = _kb_backend().status(kb_id).get("knowledge_bases") or []
         if not detail:
             return json_ok({"ok": False, "error": "knowledge_base_not_found"}, status=404)
-        is_resume_request = bool(data.get("resume") or data.get("resumeCheckpoint") or resume_job_id)
+        is_resume_request = bool(resume_requested or resume_job_id)
         if not duplicate_policy and not is_resume_request and not rescan_source:
             duplicates = _kb_backend().existing_document_files(kb_id, source_files)
             if duplicates:
@@ -3263,6 +3283,8 @@ async def kb_import_handler(request):
         "sourceDir": source_dir,
         "sourceFiles": source_files,
         "resumeJobId": resume_job_id,
+        "resumeRequested": bool(resume_requested or resume_job_id),
+        "resumeMode": resume_mode,
         "kbId": kb_id or backend.kb_id_for_source(source_dir),
         "counts": {
             "scanned": 0,
@@ -3428,7 +3450,7 @@ async def kb_import_handler(request):
                 updatedAt=int(time.time()),
             )
         try:
-            if source_files:
+            if source_files and str(job.get("resumeMode") or "") != "import":
                 result = backend.add_documents(
                     kb_id,
                     source_files,

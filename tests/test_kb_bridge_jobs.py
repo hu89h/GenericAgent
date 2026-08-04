@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -113,6 +114,67 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         )
 
         self.assertEqual(desktop_bridge._kb_error_code(error), "network_error")
+
+    def test_resume_directory_checkpoint_routes_to_import_pipeline(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "report.pdf"
+            source.write_bytes(b"pdf")
+            calls = []
+
+            class FakeBackend:
+                def checkpoint_inputs(self, kb_id):
+                    return {
+                        "available": True,
+                        "mode": "import",
+                        "source_path": root,
+                        "source_files": [str(source)],
+                    }
+
+                def status(self, kb_id=None):
+                    return {"knowledge_bases": [{"id": "kb-resume"}]}
+
+                def import_kb(self, source_dir, **kwargs):
+                    calls.append(("import", source_dir))
+                    return {
+                        "summary": {
+                            "documents_total": 1,
+                            "documents_succeeded": 1,
+                            "documents_failed": 0,
+                        },
+                        "failures": [],
+                        "documents": [],
+                        "usage": {},
+                    }
+
+                def add_documents(self, kb_id, source_files, **kwargs):
+                    calls.append(("add_documents", list(source_files)))
+                    raise AssertionError("directory checkpoint was routed to add_documents")
+
+            class Request:
+                can_read_body = True
+
+                @staticmethod
+                async def json():
+                    return {"kbId": "kb-resume", "resume": True}
+
+            original_backend = desktop_bridge._kb_backend
+            desktop_bridge._kb_backend = lambda: FakeBackend()
+            try:
+                response = asyncio.run(desktop_bridge.kb_import_handler(Request()))
+                payload = json.loads(response.text)
+                self.assertEqual(response.status, 202)
+                job_id = payload["jobId"]
+                for _ in range(100):
+                    with desktop_bridge._kb_jobs_lock:
+                        job = desktop_bridge._kb_jobs.get(job_id) or {}
+                        state = job.get("state")
+                    if state in desktop_bridge._KB_TERMINAL_JOB_STATES:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(calls, [("import", root)])
+                self.assertEqual(state, "completed")
+            finally:
+                desktop_bridge._kb_backend = original_backend
 
     def test_cancel_is_rejected_after_publishing_starts(self):
         cancel_event = threading.Event()

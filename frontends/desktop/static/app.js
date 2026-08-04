@@ -1689,7 +1689,12 @@ async function kbResumeCheckpoint(kb) {
     if (!result.jobId) throw new Error(result.error || t('err.kbImport'));
     await kbTrackJob('import', result.jobId);
   } catch (error) {
-    showError(`${t('err.kbImport')}: ${error.message || error}`);
+    const code = error?.data?.error || '';
+    const translated = code ? t(`kb.error.${code}`) : '';
+    const detail = translated && translated !== `kb.error.${code}`
+      ? translated
+      : (error.message || error);
+    showError(`${t('err.kbImport')}: ${detail}`);
   }
 }
 

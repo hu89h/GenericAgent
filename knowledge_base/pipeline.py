@@ -197,7 +197,11 @@ class IngestPipeline:
         checkpoint = manifest.get("checkpoint") or {}
         if str(manifest.get("kb_id") or "") != str(kb_id or ""):
             return False
-        if str(checkpoint.get("mode") or "") != str(mode or ""):
+        # Early checkpoints written before the operation type was persisted
+        # belong to the directory-import path.  Treat a missing mode as the
+        # safe default instead of advertising a resumable checkpoint that can
+        # never match.
+        if str(checkpoint.get("mode") or "import") != str(mode or ""):
             return False
         if cls._path_identity(manifest.get("source_path") or "") != cls._path_identity(source_path):
             return False
@@ -291,6 +295,7 @@ class IngestPipeline:
         checkpoint = manifest.get("checkpoint") or {}
         return {
             "available": True,
+            "mode": str(checkpoint.get("mode") or "import"),
             "source_path": str(manifest.get("source_path") or ""),
             "source_files": [
                 str(item)
