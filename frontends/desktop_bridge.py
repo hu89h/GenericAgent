@@ -2592,8 +2592,8 @@ def _kb_error_code(error) -> str:
     return "processing_failed"
 
 
-def _kb_error_detail(error, limit: int = 800) -> str:
-    """Return a bounded diagnostic suitable for the local UI and logs.
+def _kb_debug_error_detail(error, limit: int = 800) -> str:
+    """Return a bounded diagnostic for local logs.
 
     Provider failures are useful to the user, but may echo authorization
     headers or token-like configuration values. Keep the actionable text while
@@ -2614,6 +2614,21 @@ def _kb_error_detail(error, limit: int = 800) -> str:
         text,
     )
     return text[:max(80, int(limit))]
+
+
+def _kb_error_detail(error, limit: int = 800) -> str:
+    """Return an actionable message for the desktop UI.
+
+    Keep provider exception details in the local log only.  Requests and TLS
+    errors contain implementation terms, CDN URLs, and proxy information that
+    do not help a user decide what to do next.
+    """
+    error_code = _kb_error_code(error)
+    if error_code == "network_error":
+        return "网络连接失败，无法下载 MinerU 解析结果。请检查网络或代理设置后重试。"
+    if error_code == "processing_timeout":
+        return "MinerU 处理超时，请稍后重试。"
+    return _kb_debug_error_detail(error, limit)
 
 
 def _kb_recommended_action(*, mode: str = "", stage: str = "", error=None) -> str:
@@ -3422,7 +3437,7 @@ async def kb_import_handler(request):
             source = str(event.get("source") or "").strip()
             if source:
                 merge_file(event)
-                detail = _kb_error_detail(event.get("error"))
+                detail = _kb_debug_error_detail(event.get("error"))
                 status = str(event.get("file_status") or event.get("status") or "")
                 if status == "failed" and detail:
                     marker = (source, detail)
@@ -3540,7 +3555,7 @@ async def kb_import_handler(request):
                     }
                 return
             print(
-                f"[kb:{job_id}] import failed: {_kb_error_detail(error)}",
+                f"[kb:{job_id}] import failed: {_kb_debug_error_detail(error)}",
                 file=sys.stderr,
                 flush=True,
             )
