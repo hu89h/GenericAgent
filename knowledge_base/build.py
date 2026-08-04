@@ -150,13 +150,14 @@ class RecordBuilder:
                     )
                     if warning_key[1] and warning_key not in warned_structures:
                         warned_structures.add(warning_key)
-                        failures.append({
-                            "source": rel,
-                            "document": rel,
-                            "stage": "structure_parse",
-                            "error_type": "StructureParseWarning",
-                            "error": warning_key[1],
-                        })
+                        # The chunker only emits this diagnostic after it has
+                        # recovered readable content.  Keep it in internal
+                        # logs, but do not turn a successful safe degradation
+                        # into a user-facing failed document/item.
+                        log(
+                            f"  [warn] 文档结构已安全恢复 {rel}: "
+                            f"{warning_key[1]}"
+                        )
                 if image_index is not None:
                     image_result = self.assets.image_records_for_document(
                         kb,

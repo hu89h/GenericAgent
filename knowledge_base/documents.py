@@ -61,8 +61,8 @@ def chunking_meta():
     return {
         "chunker": "markdown_sections_packer",
         "markdown_chunk_target_size": max(128, int(MD_CHUNK_SIZES[-1])),
-        "markdown_parser": "ga_semantic_markdown_v2",
-        "markdown_packer": "ga_structural_blocks_v3_semantic",
+        "markdown_parser": "ga_semantic_markdown_v3_balanced",
+        "markdown_packer": "ga_structural_blocks_v4_correctness",
     }
 
 
@@ -184,18 +184,32 @@ _MD_IMAGE_RE = re.compile(
     r"!\[[^\]]*\]\((?:[^()\\\s\r\n]|\\.|\([^()\r\n]*\))+"
     r"(?:\s+\"[^\"\r\n]*\")?\)"
 )
-_MARKER_RE = re.compile(
-    r"GAKB(?:FIGURE|TABLE|CODE|LIST|EQUATION|QUOTE|NOTE)\d{6}"
-)
 _FENCE_RE = re.compile(r"^\s{0,3}(\`{3,}|~{3,})(.*)$")
 _LIST_ITEM_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+")
+_LIST_ITEM_DETAIL_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+[.)])\s+"
+)
 _TABLE_SEPARATOR_RE = re.compile(
     r"^\s*\|?\s*:?-{1,}:?\s*(?:\|\s*:?-{1,}:?\s*)+\|?\s*$"
 )
 _FOOTNOTE_RE = re.compile(r"^\s*\[\^[^\]]+\]:\s*")
-_HTML_BLOCK_RE = re.compile(
-    r"<(?P<tag>table|pre|blockquote|ul|ol)\b[^>]*>.*?</(?P=tag)\s*>",
-    re.IGNORECASE | re.DOTALL,
+_HTML_STRUCTURAL_TAG_RE = re.compile(
+    r"<\s*(?P<closing>/)?\s*(?P<tag>table|pre|blockquote|ul|ol)\b[^>]*>",
+    re.IGNORECASE,
+)
+_HTML_UNCLOSED_START_RE = re.compile(
+    r"<\s*(?P<tag>table|pre|blockquote|ul|ol)\b[^>]*>",
+    re.IGNORECASE,
+)
+_TABLE_TITLE_RE = re.compile(
+    r"^(?:(?:附?表)\s*(?:\d+(?:[.\-]\d+)*|[一二三四五六七八九十百]+|[A-Za-z]\d*)"
+    r"(?:\s*[:：.\-]?\s*\S.*)?|Table\s+\d+(?:[.\-]\d+)*"
+    r"(?:\s*[:：.\-]?\s*\S.*)?)$",
+    re.IGNORECASE,
+)
+_FIGURE_CAPTION_RE = re.compile(
+    r"^(?:(?:图|Figure|Fig\.?)\s*\d+(?:[.\-]\d+)*\b.*|注\s*[:：].*)$",
+    re.IGNORECASE,
 )
 _MATH_BEGIN_RE = re.compile(
     r"^\s*\\begin\{(?P<env>equation\*?|align\*?|gather\*?|multline\*?|cases|matrix|array)\}"
@@ -294,6 +308,82 @@ class _HTMLTextParser(HTMLParser):
         self.parts.append(data)
 
 
+class _HTMLListParser(HTMLParser):
+    """Convert nested HTML lists to Markdown without separating child items."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.list_stack: list[dict] = []
+        self.in_item = 0
+
+    def handle_starttag(self, tag, _attrs):
+        tag = tag.lower()
+        if tag in {"ul", "ol"}:
+            self.list_stack.append({"tag": tag, "counter": 0})
+            return
+        if tag == "li":
+            depth = max(0, len(self.list_stack) - 1)
+            if self.parts and not self.parts[-1].endswith("\n"):
+                self.parts.append("\n")
+            marker = "-"
+            if self.list_stack and self.list_stack[-1]["tag"] == "ol":
+                self.list_stack[-1]["counter"] += 1
+                marker = f"{self.list_stack[-1]['counter']}."
+            self.parts.append("  " * depth + marker + " ")
+            self.in_item += 1
+        elif tag == "br" and self.in_item:
+            self.parts.append("\n" + "  " * max(0, len(self.list_stack)))
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag == "li":
+            self.in_item = max(0, self.in_item - 1)
+            if self.parts and not self.parts[-1].endswith("\n"):
+                self.parts.append("\n")
+        elif tag in {"ul", "ol"} and self.list_stack:
+            self.list_stack.pop()
+
+    def handle_data(self, data):
+        if self.in_item:
+            value = re.sub(r"\s+", " ", data)
+            content = value.strip()
+            if not content:
+                if (
+                    value
+                    and self.parts
+                    and not self.parts[-1].endswith((" ", "\n"))
+                ):
+                    self.parts.append(" ")
+                return
+            if (
+                value.startswith(" ")
+                and self.parts
+                and not self.parts[-1].endswith((" ", "\n"))
+            ):
+                self.parts.append(" ")
+            self.parts.append(content)
+            if value.endswith(" "):
+                self.parts.append(" ")
+
+
+class _ReplacementMap(dict):
+    """Allocate collision-free, one-character private-use markers."""
+
+    def __init__(self, source):
+        super().__init__()
+        self._source_chars = set(str(source or ""))
+        self._next_codepoint = 0xE000
+
+    def next_marker(self):
+        while self._next_codepoint <= 0xF8FF:
+            marker = chr(self._next_codepoint)
+            self._next_codepoint += 1
+            if marker not in self._source_chars and marker not in self:
+                return marker
+        raise ValueError("文档包含过多结构块，无法分配内部标记")
+
+
 def _normalize_cell_text(value):
     value = re.sub(r"<br\s*/?>", " ", str(value or ""), flags=re.IGNORECASE)
     value = re.sub(r"<[^>]+>", "", value)
@@ -308,6 +398,16 @@ def _html_plain_text(value):
         return re.sub(r"\n{3,}", "\n\n", "".join(parser.parts)).strip()
     except Exception:
         return _normalize_cell_text(value)
+
+
+def _html_list_markdown(value):
+    parser = _HTMLListParser()
+    try:
+        parser.feed(str(value or ""))
+        parser.close()
+        return re.sub(r"\n{3,}", "\n\n", "".join(parser.parts)).strip()
+    except Exception:
+        return _html_plain_text(value)
 
 
 def _expand_table_rows(rows):
@@ -393,7 +493,16 @@ def _parse_html_table(raw):
 
 def _split_markdown_row(line):
     value = line.strip().strip("|")
-    return [_normalize_cell_text(item.replace(r"\|", "|")) for item in re.split(r"(?<!\\)\|", value)]
+    return [
+        _normalize_cell_text(item.replace(r"\|", "|"))
+        for item in re.split(r"(?<!\\)\|", value)
+    ]
+
+
+def _escape_markdown_cell(value):
+    value = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    value = value.replace("\\", r"\\").replace("|", r"\|")
+    return value.replace("\n", "<br>")
 
 
 def _parse_markdown_table(raw):
@@ -413,8 +522,11 @@ def _parse_markdown_table(raw):
 
 
 def _markdown_table(headers, rows, *, title="", unit=""):
-    headers = list(headers or [])
-    rows = list(rows or [])
+    headers = [_escape_markdown_cell(item) for item in (headers or [])]
+    rows = [
+        [_escape_markdown_cell(item) for item in row]
+        for row in (rows or [])
+    ]
     if not headers:
         return "\n".join(" | ".join(row) for row in rows).strip()
     lines = []
@@ -479,7 +591,7 @@ def _split_table_block(block, target_size):
 
 
 def _marker(kind, value, replacements, *, occurrence_ids=None, warning=""):
-    marker = f"GAKB{kind}{len(replacements):06d}"
+    marker = replacements.next_marker()
     replacements[marker] = _ProtectedBlock(
         kind=kind.lower(),
         raw=value,
@@ -489,13 +601,86 @@ def _marker(kind, value, replacements, *, occurrence_ids=None, warning=""):
     return marker
 
 
+def _fenced_code_ranges(text):
+    """Return source ranges occupied by Markdown fenced code blocks."""
+    ranges = []
+    opening = None
+    offset = 0
+    for line in str(text or "").splitlines(keepends=True):
+        value = line.rstrip("\r\n")
+        match = _FENCE_RE.match(value)
+        if opening is None and match:
+            opening = (offset, match.group(1)[0], len(match.group(1)))
+        elif opening is not None:
+            start, fence_char, fence_size = opening
+            if re.match(
+                r"^\s{0,3}" + re.escape(fence_char)
+                + r"{" + str(fence_size) + r",}\s*$",
+                value,
+            ):
+                ranges.append((start, offset + len(line)))
+                opening = None
+        offset += len(line)
+    if opening is not None:
+        ranges.append((opening[0], len(text)))
+    return ranges
+
+
+def _balanced_html_blocks(text):
+    """Locate complete outer structural HTML blocks using nesting depth."""
+    fenced_ranges = _fenced_code_ranges(text)
+    range_index = 0
+    stack = []
+    outer_start = None
+    outer_tag = ""
+    blocks = []
+
+    for match in _HTML_STRUCTURAL_TAG_RE.finditer(text):
+        while (
+            range_index < len(fenced_ranges)
+            and fenced_ranges[range_index][1] <= match.start()
+        ):
+            range_index += 1
+        if (
+            range_index < len(fenced_ranges)
+            and fenced_ranges[range_index][0] <= match.start() < fenced_ranges[range_index][1]
+        ):
+            continue
+
+        tag = str(match.group("tag") or "").lower()
+        closing = bool(match.group("closing"))
+        self_closing = match.group(0).rstrip().endswith("/>")
+        if not closing:
+            if not stack:
+                outer_start = match.start()
+                outer_tag = tag
+            if not self_closing:
+                stack.append(tag)
+            elif not stack and outer_start is not None:
+                blocks.append((outer_start, match.end(), outer_tag))
+                outer_start = None
+                outer_tag = ""
+            continue
+
+        if not stack or tag not in stack:
+            continue
+        while stack:
+            opened = stack.pop()
+            if opened == tag:
+                break
+        if not stack and outer_start is not None:
+            blocks.append((outer_start, match.end(), outer_tag))
+            outer_start = None
+            outer_tag = ""
+    return blocks
+
+
 def _protect_markdown_blocks(text, image_index=None):
     """Mask semantic Markdown/HTML structures without changing source offsets."""
-    replacements = {}
-
-    def mask_html(match):
-        raw = match.group(0)
-        tag = str(match.group("tag") or "").lower()
+    replacements = _ReplacementMap(text)
+    masked = list(text)
+    for start, end, tag in _balanced_html_blocks(text):
+        raw = text[start:end]
         kind = {
             "table": "TABLE",
             "pre": "CODE",
@@ -504,15 +689,16 @@ def _protect_markdown_blocks(text, image_index=None):
             "ol": "LIST",
         }[tag]
         occurrence_ids = (
-            image_index.occurrence_ids_between(match.start(), match.end())
+            image_index.occurrence_ids_between(start, end)
             if image_index is not None else []
         )
         marker = _marker(kind, raw, replacements, occurrence_ids=occurrence_ids)
-        masked = ["\n" if char == "\n" else " " for char in raw]
-        masked[:len(marker)] = marker
-        return "".join(masked)
+        for position in range(start, end):
+            if masked[position] not in "\r\n":
+                masked[position] = " "
+        masked[start] = marker
 
-    text = _HTML_BLOCK_RE.sub(mask_html, text)
+    text = "".join(masked)
     lines = text.splitlines()
     output = []
     index = 0
@@ -577,13 +763,7 @@ def _protect_markdown_blocks(text, image_index=None):
             and _TABLE_SEPARATOR_RE.match(lines[index + 1])
         ):
             end = index + 2
-            while end < len(lines) and ("|" in lines[end] or not lines[end].strip()):
-                if (
-                    not lines[end].strip()
-                    and end + 1 < len(lines)
-                    and "|" not in lines[end + 1]
-                ):
-                    break
+            while end < len(lines) and lines[end].strip() and "|" in lines[end]:
                 end += 1
             output.append(_marker("TABLE", "\n".join(lines[index:end]), replacements))
             index = end
@@ -650,14 +830,38 @@ def _protect_markdown_blocks(text, image_index=None):
             index = end
             continue
 
-        if re.search(r"<table\b", line, re.IGNORECASE):
+        unclosed_html = _HTML_UNCLOSED_START_RE.search(line)
+        if unclosed_html:
+            tag = str(unclosed_html.group("tag") or "").lower()
+            kind = {
+                "table": "TABLE",
+                "pre": "CODE",
+                "blockquote": "QUOTE",
+                "ul": "LIST",
+                "ol": "LIST",
+            }[tag]
+            prefix = line[:unclosed_html.start()]
+            if prefix.strip():
+                output.append(protect_images(prefix, line_starts[index]))
+            end = index + 1
+            while (
+                end < len(lines)
+                and lines[end].strip()
+                and not _MD_HEADING_LINE_RE.match(lines[end])
+            ):
+                end += 1
+            raw_lines = [line[unclosed_html.start():], *lines[index + 1:end]]
+            block_start = line_starts[index] + unclosed_html.start()
+            block_end = line_starts[end - 1] + len(lines[end - 1])
             output.append(_marker(
-                "TABLE",
-                line,
+                kind,
+                "\n".join(raw_lines),
                 replacements,
-                warning="HTML 表格缺少完整结束标签，已使用安全恢复",
+                occurrence_ids=image_index.occurrence_ids_between(block_start, block_end)
+                if image_index is not None else [],
+                warning="HTML 结构缺少完整结束标签，已使用安全恢复",
             ))
-            index += 1
+            index = end
             continue
 
         output.append(protect_images(line, line_starts[index]))
@@ -733,14 +937,22 @@ def _split_code_block(raw, target_size):
 
 def _split_list_block(raw, target_size):
     value = (
-        _html_plain_text(raw)
+        _html_list_markdown(raw)
         if re.search(r"<(?:ul|ol)\b", raw, re.IGNORECASE)
         else raw
     )
     items = []
     current = []
+    first_item = next(
+        (_LIST_ITEM_DETAIL_RE.match(line) for line in value.splitlines()
+         if _LIST_ITEM_DETAIL_RE.match(line)),
+        None,
+    )
+    base_indent = len(first_item.group("indent").expandtabs(4)) if first_item else 0
     for line in value.splitlines():
-        if _LIST_ITEM_RE.match(line) and current:
+        item = _LIST_ITEM_DETAIL_RE.match(line)
+        indent = len(item.group("indent").expandtabs(4)) if item else -1
+        if item and indent <= base_indent and current:
             items.append("\n".join(current).strip())
             current = [line]
         else:
@@ -807,7 +1019,11 @@ def _block_parts(block, target_size):
 def _section_tokens(body, replacements):
     tokens = []
     cursor = 0
-    for match in _MARKER_RE.finditer(body or ""):
+    marker_pattern = re.compile(
+        "|".join(re.escape(marker) for marker in replacements)
+    ) if replacements else None
+    matches = marker_pattern.finditer(body or "") if marker_pattern else ()
+    for match in matches:
         before = body[cursor:match.start()].strip()
         if before:
             tokens.append(before)
@@ -827,9 +1043,7 @@ def _section_tokens(body, replacements):
             continue
         parts = re.split(r"\n\s*\n", following, maxsplit=1)
         caption = parts[0].strip()
-        if len(caption) <= 300 and re.match(
-            r"^(?:图|表|Figure|Fig\.?|注[:：])", caption, re.IGNORECASE
-        ):
+        if len(caption) <= 300 and _FIGURE_CAPTION_RE.match(caption):
             token.raw = token.raw.rstrip() + "\n" + caption
             tokens[index + 1] = parts[1].strip() if len(parts) > 1 else ""
 
@@ -849,11 +1063,7 @@ def _section_tokens(body, replacements):
             if not candidate:
                 lines.pop()
                 continue
-            if re.match(
-                r"^(?:单位\s*[:：]|(?:附?表|Table)\s*[A-Za-z0-9一二三四五六七八九十.-]*)",
-                candidate,
-                re.IGNORECASE,
-            ):
+            if re.match(r"^单位\s*[:：]", candidate) or _TABLE_TITLE_RE.match(candidate):
                 metadata.insert(0, candidate)
                 lines.pop()
                 continue
@@ -888,44 +1098,13 @@ def _table_data(block):
     )
 
 
-def _merge_adjacent_tables(tokens):
-    merged = []
-    for token in tokens:
-        if (
-            merged
-            and isinstance(token, _ProtectedBlock)
-            and token.kind == "table"
-            and isinstance(merged[-1], _ProtectedBlock)
-            and merged[-1].kind == "table"
-        ):
-            previous = merged[-1]
-            left = _table_data(previous)
-            right = _table_data(token)
-            if (
-                left.get("headers") == right.get("headers")
-                and left.get("title") == right.get("title")
-            ):
-                previous.parsed = {
-                    **left,
-                    "rows": list(left.get("rows") or [])
-                    + list(right.get("rows") or []),
-                    "warning": left.get("warning") or right.get("warning") or "",
-                }
-                previous.occurrence_ids = sorted(
-                    set(previous.occurrence_ids + token.occurrence_ids)
-                )
-                continue
-        merged.append(token)
-    return merged
-
-
 def _pack_semantic_blocks(blocks, replacements, target_size, *, file_name=""):
     records = []
     structure_ordinal = 0
     for header_path, body in blocks:
         prefix = _chunk_prefix(header_path)
         effective_target = max(128, target_size - len(prefix))
-        tokens = _merge_adjacent_tables(_section_tokens(body, replacements))
+        tokens = _section_tokens(body, replacements)
         for token in tokens:
             if isinstance(token, str):
                 for piece in _split_plain_block(token, effective_target):

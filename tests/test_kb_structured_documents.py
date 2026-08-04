@@ -1,7 +1,10 @@
+import os
+import tempfile
 import unittest
 from unittest import mock
 
 from knowledge_base import documents
+from knowledge_base.build import RecordBuilder
 
 
 class StructuredDocumentChunkingTests(unittest.TestCase):
@@ -71,7 +74,7 @@ class StructuredDocumentChunkingTests(unittest.TestCase):
         self.assertIn("| 收入 | 100 |", html_table["body"])
         self.assertIn("| 收入 | 100 |", markdown_table["body"])
 
-    def test_adjacent_matching_tables_are_one_continuing_structure(self):
+    def test_adjacent_matching_tables_remain_independent_structures(self):
         markdown = (
             "<table><tr><td>指标</td><td>2020E</td></tr>"
             "<tr><td>收入</td><td>100</td></tr></table>\n\n"
@@ -81,10 +84,95 @@ class StructuredDocumentChunkingTests(unittest.TestCase):
 
         tables = [item for item in self._chunks(markdown) if item["content_type"] == "table"]
 
-        self.assertEqual({item["structure_id"] for item in tables}.__len__(), 1)
+        self.assertEqual(len(tables), 2)
+        self.assertEqual(len({item["structure_id"] for item in tables}), 2)
         combined = "\n".join(item["body"] for item in tables)
         self.assertIn("收入", combined)
         self.assertIn("利润", combined)
+
+    def test_adjacent_markdown_tables_remain_independent_structures(self):
+        markdown = """| 指标 | 2020E |
+| --- | --- |
+| 收入 | 100 |
+
+| 指标 | 2020E |
+| --- | --- |
+| 利润 | 20 |
+"""
+
+        tables = [item for item in self._chunks(markdown)
+                  if item["content_type"] == "table"]
+
+        self.assertEqual(len(tables), 2)
+        self.assertEqual(len({item["structure_id"] for item in tables}), 2)
+
+    def test_nested_html_and_markdown_lists_keep_children_with_their_parent(self):
+        markdown = """<ul><li>父项 <strong>说明</strong><ul><li>子项</li></ul></li><li>第二项</li></ul>
+
+- Markdown 父项
+    - Markdown 子项
+- Markdown 第二项
+"""
+
+        lists = [item for item in self._chunks(markdown, target=128)
+                 if item["content_type"] == "list"]
+
+        self.assertEqual(len(lists), 2)
+        self.assertIn("- 父项 说明", lists[0]["body"])
+        self.assertIn("  - 子项", lists[0]["body"])
+        self.assertNotIn("</li>", lists[0]["body"])
+        self.assertIn("Markdown 父项\n    - Markdown 子项", lists[1]["body"])
+
+    def test_ordinary_prose_starting_with_biao_is_not_used_as_table_title(self):
+        markdown = """表明公司收入持续增长。
+| 指标 | 2020E |
+| --- | --- |
+| 收入 | 100 |
+"""
+
+        records = self._chunks(markdown)
+        prose = next(item for item in records if item["content_type"] == "prose")
+        table = next(item for item in records if item["content_type"] == "table")
+
+        self.assertIn("表明公司收入持续增长", prose["body"])
+        self.assertNotEqual(table["structure_title"], "表明公司收入持续增长。")
+
+    def test_markdown_table_reescapes_literal_pipes_and_backslashes(self):
+        markdown = (
+            "| 名称 | 值 |\n| --- | --- |\n"
+            r"| A\|B | C\\D |"
+        )
+
+        table = next(item for item in self._chunks(markdown)
+                     if item["content_type"] == "table")
+
+        self.assertIn(r"A\|B", table["body"])
+        self.assertIn(r"C\\\\D", table["body"])
+
+    def test_balanced_html_mask_keeps_following_image_source_offsets(self):
+        markdown = "<ul><li>短项</li></ul> ![图1](assets/figure.png)"
+        image_start = markdown.index("![")
+        image_end = len(markdown)
+
+        class RecordingImageIndex:
+            def __init__(self):
+                self.calls = []
+
+            def occurrence_ids_between(self, start, end):
+                self.calls.append((start, end))
+                return [7] if (start, end) == (image_start, image_end) else []
+
+        image_index = RecordingImageIndex()
+        records = documents.chunk_document_records(
+            markdown,
+            ext="md",
+            file_name="offsets.md",
+            image_index=image_index,
+        )
+        figure = next(item for item in records if item["content_type"] == "figure")
+
+        self.assertIn((image_start, image_end), image_index.calls)
+        self.assertEqual(figure["_image_occurrence_ids"], [7])
 
     def test_code_list_equation_quote_note_and_figure_have_semantic_types(self):
         markdown = r"""# 结构
@@ -152,14 +240,49 @@ $$
         self.assertIn("资产负债率", records[0]["search_text"])
 
     def test_malformed_html_table_degrades_without_exposing_half_tags(self):
-        markdown = "# 表格\n<table><tr><td>指标</td><td>2020E</td></tr>"
+        markdown = """# 表格
+<table>
+<tr><td>指标</td><td>2020E</td></tr>
+<tr><td>收入</td><td>100</td></tr>
+"""
 
         table = next(item for item in self._chunks(markdown) if item["content_type"] == "table")
 
         self.assertNotIn("<td>", table["body"])
         self.assertNotIn("<table>", table["body"])
         self.assertIn("指标", table["body"])
+        self.assertIn("收入", table["body"])
         self.assertIn("_structure_warning", table)
+
+    def test_safe_structure_recovery_is_not_reported_as_failed_import(self):
+        class Assets:
+            @staticmethod
+            def build_document_index(_text):
+                return None
+
+            @staticmethod
+            def analyze_image_jobs(_kb, _jobs, _log, **_kwargs):
+                return {}
+
+            @staticmethod
+            def image_source_fingerprint(_path, _scanned, **_kwargs):
+                return {}
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = os.path.join(temp, "report.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("<table><tr><td>指标</td><td>2020E</td></tr>")
+            messages = []
+
+            result = RecordBuilder(assets=Assets()).build(
+                {"id": "kb-test", "path": temp},
+                {"files": []},
+                logfn=messages.append,
+            )
+
+        self.assertFalse(result.failures)
+        self.assertTrue(result.records)
+        self.assertTrue(any("结构已安全恢复" in item for item in messages))
 
 
 if __name__ == "__main__":

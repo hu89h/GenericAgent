@@ -9,7 +9,7 @@ import sys
 import threading
 from dataclasses import dataclass
 
-from . import config
+from . import config, documents as document_contracts
 from .assets import ImageAssetProcessor
 from .build import IndexBuilder, RecordBuilder
 from .importer import DocumentProcessor
@@ -404,10 +404,18 @@ def kb_status(kb: dict) -> dict:
         index_schema_version = int(index_meta.get("schema_version") or 1)
     except (TypeError, ValueError):
         index_schema_version = 1
+    indexed_chunking = dict(
+        (manifest.get("processing_fingerprint") or {}).get("chunking")
+        or (manifest.get("index_sources") or {}).get("chunking")
+        or {}
+    )
     structure_update_available = bool(
         kb.get("exists")
         and probe.get("present")
-        and index_schema_version < INDEX_SCHEMA_VERSION
+        and (
+            index_schema_version < INDEX_SCHEMA_VERSION
+            or indexed_chunking != document_contracts.chunking_meta()
+        )
     )
     legacy_readable = False
     if structure_update_available:
