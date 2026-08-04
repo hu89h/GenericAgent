@@ -53,6 +53,8 @@ class _Backend:
             "image_id": "image-1",
             "image_abspath": _Backend.image_abspath,
             "source_file_name": "source.pdf",
+            "ref_key": "图1",
+            "display_label": "图1：流程",
             "description": "diagram",
         }
 
@@ -137,6 +139,35 @@ class _ScopedImageHandler(_Handler):
         return _ScopedImageBackend
 
 
+class _SubsetBackend(_Backend):
+    search_calls = []
+    documents = {
+        "kb-a": [
+            {"data_id": "kb-a::documents/one.md"},
+            {"data_id": "kb-a::documents/two.md"},
+        ],
+        "kb-b": [{"data_id": "kb-b::documents/three.md"}],
+    }
+
+    @classmethod
+    def list_documents(cls, kb_id=None):
+        return list(cls.documents.get(kb_id, []))
+
+    @classmethod
+    def search(cls, query, **kwargs):
+        cls.search_calls.append({"query": query, **kwargs})
+        return {"mode": kwargs.get("mode"), "results": []}
+
+
+class _SubsetHandler(_Handler):
+    def __init__(self, scope):
+        self.parent = SimpleNamespace(knowledge_scope=scope)
+
+    @staticmethod
+    def _kb_backend():
+        return _SubsetBackend
+
+
 class _FailingBackend:
     @staticmethod
     def search(**_kwargs):
@@ -174,13 +205,21 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
 
         self.assertIn("候选", functions["kb_search"]["description"])
         self.assertIn("chunk_index", functions["kb_search"]["description"])
-        self.assertIn("主要依据", functions["kb_read"]["description"])
+        self.assertIn("不必逐字复制", functions["kb_search"]["description"])
+        self.assertIn("显式调整", functions["kb_search"]["description"])
+        self.assertIn("不得引入未经证实的前提", functions["kb_search"]["description"])
+        self.assertIn("停止穷举相近表达", functions["kb_search"]["description"])
+        self.assertIn("扩展读取", functions["kb_read"]["description"])
+        self.assertIn("has_more=false", functions["kb_read"]["description"])
         self.assertEqual(
             functions["kb_read"]["parameters"]["required"],
             ["data_id", "chunk_index"],
         )
         self.assertIn("导航", functions["kb_list"]["description"])
         self.assertIn("不要批量打开", functions["kb_image_read"]["description"])
+        self.assertIn("必须调用本工具", functions["kb_image_read"]["description"])
+        self.assertIn("可以直接使用 ref_key", functions["kb_image_read"]["description"])
+        self.assertIn("确定不存在", functions["kb_image_read"]["description"])
 
     def test_search_requires_agent_to_choose_mode(self):
         search = next(
@@ -194,6 +233,188 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
             "default",
             search["parameters"]["properties"]["mode"],
         )
+        top_k = search["parameters"]["properties"]["top_k"]
+        self.assertEqual(top_k["default"], 5)
+        self.assertEqual((top_k["minimum"], top_k["maximum"]), (1, 10))
+        self.assertIn("不代表结果更可靠", top_k["description"])
+        self.assertIn("全部同号候选", top_k["description"])
+        self.assertIn("不调用语义或词语检索通道", search["parameters"]["properties"]["mode"]["description"])
+        data_ids = search["parameters"]["properties"]["data_ids"]
+        self.assertEqual((data_ids["minItems"], data_ids["maxItems"]), (1, 50))
+        evidence_description = search["parameters"]["properties"]["evidence_types"]["description"]
+        self.assertIn("不等同于用户指定的证据来源", evidence_description)
+        self.assertIn("形式不明确时应不传", evidence_description)
+
+    def test_search_argument_errors_identify_the_field(self):
+        handler = _Handler()
+        cases = [
+            ({"query": "test"}, "mode"),
+            ({"query": "test", "mode": "auto"}, "mode"),
+            ({"query": "test", "mode": "rrf", "top_k": 11}, "top_k"),
+            ({"query": "test", "mode": "rrf", "evidence_types": "table"}, "evidence_types"),
+        ]
+        for args, field in cases:
+            with self.subTest(args=args):
+                payload = json.loads(handler.do_kb_search(args, None).data)
+                self.assertEqual(payload["error_code"], "invalid_argument")
+                self.assertEqual(payload["field"], field)
+        missing_mode = json.loads(handler.do_kb_search({"query": "test"}, None).data)
+        self.assertEqual(missing_mode["allowed_values"], ["rrf", "vector", "sparse"])
+
+    def test_exact_image_reference_status_is_forwarded(self):
+        original = _Backend.search
+        try:
+            _Backend.search = staticmethod(lambda *_args, **_kwargs: {
+                "mode": "sparse",
+                "results": [],
+                "exact_image_references": {
+                    "requested": ["图79", "图999"],
+                    "matched": ["图79"],
+                    "missing": ["图999"],
+                },
+            })
+            payload = json.loads(_Handler().do_kb_search({
+                "query": "图79和图999", "mode": "sparse",
+                "evidence_types": ["image"],
+            }, None).data)
+        finally:
+            _Backend.search = original
+
+        self.assertEqual(payload["exact_image_references"]["missing"], ["图999"])
+
+    def test_search_document_subset_is_validated_and_uses_scope_targets(self):
+        _SubsetBackend.search_calls = []
+        handler = _SubsetHandler({"mode": "all"})
+
+        outcome = handler.do_kb_search({
+            "query": "对比",
+            "mode": "rrf",
+            "top_k": 8,
+            "data_ids": [
+                "kb-b::documents/three.md",
+                "kb-a::documents/one.md",
+                "kb-b::documents/three.md",
+            ],
+        }, None)
+
+        self.assertNotIn("error_code", json.loads(outcome.data))
+        call = _SubsetBackend.search_calls[0]
+        self.assertEqual(call["top_k"], 8)
+        self.assertEqual(call["scope_targets"], [
+            {
+                "kb_id": "kb-b",
+                "all_documents": False,
+                "documents": [{"data_id": "kb-b::documents/three.md"}],
+            },
+            {
+                "kb_id": "kb-a",
+                "all_documents": False,
+                "documents": [{"data_id": "kb-a::documents/one.md"}],
+            },
+        ])
+
+    def test_search_document_subset_resolves_unique_cosmetic_whitespace(self):
+        _SubsetBackend.search_calls = []
+        outcome = _SubsetHandler({"mode": "all"}).do_kb_search({
+            "query": "test",
+            "mode": "vector",
+            "data_ids": ["kb-a::documents/one - report.md"],
+        }, None)
+
+        # Add one realistic long handle for this contract: models sometimes
+        # insert spaces around punctuation while copying an opaque ID.
+        self.assertEqual(json.loads(outcome.data)["error_code"], "not_found")
+
+        original = _SubsetBackend.documents["kb-a"]
+        try:
+            _SubsetBackend.documents["kb-a"] = [
+                {"data_id": "kb-a::documents/one-report.md"},
+            ]
+            outcome = _SubsetHandler({"mode": "all"}).do_kb_search({
+                "query": "test",
+                "mode": "vector",
+                "data_ids": ["kb-a::documents/one - report.md"],
+            }, None)
+        finally:
+            _SubsetBackend.documents["kb-a"] = original
+
+        self.assertNotIn("error_code", json.loads(outcome.data))
+        self.assertEqual(
+            _SubsetBackend.search_calls[-1]["scope_targets"][0]["documents"],
+            [{"data_id": "kb-a::documents/one-report.md"}],
+        )
+
+    def test_search_document_subset_fails_as_a_whole_for_invalid_targets(self):
+        cases = [
+            (["kb-a::documents/one.md::image::1"], "invalid_argument"),
+            (["not-a-document-id"], "invalid_argument"),
+            (["kb-a::documents/missing.md"], "not_found"),
+        ]
+        for data_ids, error_code in cases:
+            with self.subTest(data_ids=data_ids):
+                _SubsetBackend.search_calls = []
+                outcome = _SubsetHandler({"mode": "all"}).do_kb_search({
+                    "query": "test", "mode": "vector", "data_ids": data_ids,
+                }, None)
+                self.assertEqual(json.loads(outcome.data)["error_code"], error_code)
+                self.assertEqual(_SubsetBackend.search_calls, [])
+
+    def test_search_document_subset_cannot_expand_session_scope(self):
+        _SubsetBackend.search_calls = []
+        handler = _SubsetHandler({
+            "mode": "document",
+            "kb_id": "kb-a",
+            "data_id": "kb-a::documents/one.md",
+        })
+
+        outcome = handler.do_kb_search({
+            "query": "test",
+            "mode": "vector",
+            "data_ids": ["kb-a::documents/two.md"],
+        }, None)
+
+        self.assertEqual(json.loads(outcome.data)["error_code"], "scope_denied")
+        self.assertEqual(_SubsetBackend.search_calls, [])
+
+    def test_search_document_subset_respects_kb_and_selection_scopes(self):
+        scopes_and_targets = [
+            (
+                {"mode": "kb", "kb_id": "kb-a"},
+                ["kb-a::documents/two.md"],
+            ),
+            (
+                {
+                    "mode": "selection",
+                    "targets": [
+                        {
+                            "kb_id": "kb-a",
+                            "documents": [
+                                {"data_id": "kb-a::documents/one.md"},
+                            ],
+                        },
+                        {"kb_id": "kb-b", "all_documents": True},
+                    ],
+                },
+                [
+                    "kb-a::documents/one.md",
+                    "kb-b::documents/three.md",
+                ],
+            ),
+        ]
+        for scope, data_ids in scopes_and_targets:
+            with self.subTest(scope=scope):
+                _SubsetBackend.search_calls = []
+                outcome = _SubsetHandler(scope).do_kb_search({
+                    "query": "test", "mode": "rrf", "data_ids": data_ids,
+                }, None)
+                self.assertNotIn("error_code", json.loads(outcome.data))
+                self.assertEqual(
+                    sum(
+                        len(target["documents"])
+                        for target in _SubsetBackend.search_calls[0]["scope_targets"]
+                    ),
+                    len(data_ids),
+                )
 
     def test_kb_image_read_has_no_attach_switch_and_always_queues_image(self):
         schema = next(
@@ -218,7 +439,12 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
                 )
 
                 self.assertEqual(handler.queued_image, str(image))
+                self.assertIn("定位来源: 《source.pdf》：“图1：流程”", handler.queued_context)
+                self.assertIn("定位编号: 图1", handler.queued_context)
                 self.assertIn("本次查看重点: 确认图中红色流程与蓝色流程的先后关系", handler.queued_context)
+                self.assertIn("继续检索其他候选", handler.queued_context)
+                self.assertNotIn("kb-test", handler.queued_context)
+                self.assertNotIn(str(image), handler.queued_context)
                 self.assertIn('"image_attached": true', outcome.data)
             finally:
                 _Backend.image_abspath = ""
@@ -276,6 +502,25 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertEqual(captured["evidence_types"], ["table"])
         self.assertNotIn("evidence_types", payload)
 
+    def test_search_passes_public_text_type_without_internal_expansion(self):
+        captured = {}
+        original = _Backend.search
+        try:
+            def search(query, **kwargs):
+                captured.update(kwargs)
+                return {"mode": kwargs["mode"], "results": []}
+
+            _Backend.search = staticmethod(search)
+            _Handler().do_kb_search({
+                "query": "只检索正文",
+                "mode": "vector",
+                "evidence_types": ["text"],
+            }, None)
+        finally:
+            _Backend.search = original
+
+        self.assertEqual(captured["evidence_types"], ["text"])
+
     def test_table_search_preview_is_truncated_at_a_complete_row(self):
         body = "| 指标 | 2020E |\n| --- | --- |\n" + "\n".join(
             f"| 指标{i} | {i}% |" for i in range(200)
@@ -293,6 +538,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
 
         preview = result["body"].split("\n…[正文摘要已截断", 1)[0]
         self.assertTrue(preview.rstrip().endswith("|"))
+        self.assertTrue(result["truncated"])
         self.assertEqual(result["source_hint"], "《source.pdf》：“重要财务指标”")
 
     def test_source_hint_keeps_section_and_structure_title(self):
@@ -338,6 +584,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertNotIn("kb_id", compact)
         self.assertNotIn("source_data_id", compact)
         self.assertNotIn("ref", compact)
+        self.assertTrue(compact["truncated"])
 
     def test_search_payload_keeps_bounded_text_preview(self):
         compact = _Handler._clean_hit({
@@ -356,8 +603,33 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertIn("kb_read", compact["body"])
         self.assertEqual(set(compact), {
             "data_id", "chunk_index", "evidence_type", "source_hint",
-            "matched_by", "snippet", "body",
+            "matched_by", "snippet", "body", "truncated",
         })
+
+    def test_complete_search_hit_omits_truncated_flag(self):
+        compact = _Handler._clean_hit({
+            "kind": "document",
+            "data_id": "kb-test::documents/source.md",
+            "source_file_name": "source.pdf",
+            "chunk_index": 4,
+            "body": "完整且明确的正文",
+            "structure_part_count": 1,
+        })
+
+        self.assertNotIn("truncated", compact)
+
+    def test_multi_part_structure_marks_search_hit_as_truncated(self):
+        compact = _Handler._clean_hit({
+            "kind": "document",
+            "data_id": "kb-test::documents/source.md",
+            "source_file_name": "source.pdf",
+            "chunk_index": 4,
+            "content_type": "table",
+            "body": "| 指标 | 值 |",
+            "structure_part_count": 3,
+        })
+
+        self.assertTrue(compact["truncated"])
 
     def test_text_references_are_not_desktop_citations(self):
         handler = _Handler()
@@ -458,6 +730,40 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         )
         self.assertNotIn("internal", outcome.data)
 
+    def test_image_read_rejects_document_id_before_backend_lookup(self):
+        original = _Backend.read_image
+        calls = []
+        try:
+            _Backend.read_image = staticmethod(lambda **kwargs: calls.append(kwargs))
+            payload = json.loads(_Handler().do_kb_image_read({
+                "data_id": "kb-test::documents/source.md",
+                "ref_key": "图1",
+            }, None).data)
+        finally:
+            _Backend.read_image = original
+
+        self.assertEqual(payload["error_code"], "invalid_argument")
+        self.assertEqual(payload["field"], "data_id")
+        self.assertEqual(calls, [])
+
+    def test_image_read_reports_conflicting_id_and_reference(self):
+        original = _Backend.read_image
+        try:
+            _Backend.read_image = staticmethod(lambda **_kwargs: {
+                "error_code": "image_target_conflict",
+                "error": r"C:\internal\must-not-leak",
+            })
+            payload = json.loads(_Handler().do_kb_image_read({
+                "data_id": "kb-test::documents/source.md::image::1",
+                "ref_key": "图2",
+            }, None).data)
+        finally:
+            _Backend.read_image = original
+
+        self.assertEqual(payload["error_code"], "target_conflict")
+        self.assertEqual(payload["field"], "ref_key")
+        self.assertNotIn("internal", json.dumps(payload))
+
     def test_read_removes_processing_header_and_image_path(self):
         original = _Backend.read_content
         try:
@@ -516,7 +822,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
             "description": "图表描述",
             "table_markdown": "",
             "analysis_error": "",
-            "near_text": "图片附近正文",
+            "near_text": "hash-doc.assets-abcd/secret.jpg) 图片附近正文",
             "related_text": " ".join(f"图{i}：目录项" for i in range(1, 20)),
         })
 
@@ -526,9 +832,43 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertNotIn("table_markdown", result)
         self.assertNotIn("analysis_error", result)
         self.assertNotIn("related_text", result)
-        self.assertEqual(result["context"], "图片附近正文")
+        self.assertEqual(result["context"], "[图片] 图片附近正文")
         self.assertNotIn("source_data_id", result)
         self.assertNotIn("ref", result)
+
+    def test_image_search_without_analysis_is_locator_not_visual_description(self):
+        result = _Handler._clean_hit({
+            "kind": "image",
+            "kb_id": "kb-test",
+            "data_id": "kb-test::documents/source.md::image::1",
+            "source_file_name": "source.pdf",
+            "ref_key": "图1",
+            "caption": "图1：正确图题",
+            "display_label": "图1：正确图题",
+            "description": "",
+            "uncertain": ["不应作为已有视觉分析返回"],
+            "snippet": "图1到图99的目录式长文本，不应作为图片描述",
+            "matched_by": ["ref_exact"],
+        })
+
+        self.assertTrue(result["locator_only"])
+        self.assertNotIn("description", result)
+        self.assertNotIn("uncertain", result)
+        self.assertEqual(result["source_hint"], "《source.pdf》：“图1：正确图题”")
+
+    def test_image_search_with_analysis_is_not_locator_only(self):
+        result = _Handler._clean_hit({
+            "kind": "image",
+            "data_id": "kb-test::documents/source.md::image::1",
+            "source_file_name": "source.pdf",
+            "ref_key": "图1",
+            "description": "原图分析得到的流程说明",
+            "uncertain": ["小字可能不清晰"],
+        })
+
+        self.assertEqual(result["description"], "原图分析得到的流程说明")
+        self.assertEqual(result["uncertain"], ["小字可能不清晰"])
+        self.assertNotIn("locator_only", result)
 
     def test_image_source_hint_uses_original_document_and_figure_label(self):
         hint = _Handler._source_hint({
@@ -585,12 +925,24 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
             {"data_id": "kb-test::documents/hash-doc.md"}, None,
         )
 
-        self.assertIn("参数无效", outcome.data)
-        self.assertIn("invalid_argument", outcome.data)
+        payload = json.loads(outcome.data)
+        self.assertEqual(payload["error_code"], "invalid_argument")
+        self.assertEqual(payload["field"], "chunk_index")
 
     def test_agent_usage_policy_is_one_system_prompt_contract(self):
         self.assertIn("[KNOWLEDGE_BASE_USAGE]", KB_AGENT_SYSTEM_INSTRUCTIONS)
         self.assertIn("信息来源", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        self.assertIn("必须调用 kb_image_read", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        self.assertIn("自由改写、简化、扩展或拆分", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        self.assertIn("正常结果无需反复核验", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        self.assertIn("显式选择另一检索模式", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        self.assertIn("停止穷举相近表达", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        self.assertIn("locator_only=true", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        self.assertIn("exact_image_references", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        self.assertIn("不等同于用户所说的表格", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        self.assertIn("可以直接用 ref_key", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        for implementation_detail in ("MinerU", "OCR", "VLM", "分块", "索引"):
+            self.assertNotIn(implementation_detail, KB_AGENT_SYSTEM_INSTRUCTIONS)
 
 
 if __name__ == "__main__":
