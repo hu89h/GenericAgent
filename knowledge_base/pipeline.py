@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import config
+from . import config, documents
 from .build import IndexBuilder, RecordBuilder
 from .assets import cleanup_image_cache
 from .cancellation import KnowledgeBaseCancelled, check_cancelled
@@ -1159,11 +1159,52 @@ class IngestPipeline:
             stage_kb = {
                 **kb,
                 "path": stage_processed,
+                "image_cache_path": self._ensure_image_cache(kb_id),
                 "manifest_path": manifest_path,
                 "records_path": records_path,
                 "exists": True,
             }
             sources = dict(manifest.get("index_sources") or {})
+            current_chunking = documents.chunking_meta()
+            chunking_changed = dict(sources.get("chunking") or {}) != current_chunking
+            structure_failures = []
+            if chunking_changed:
+                self._emit(
+                    progress,
+                    phase="chunking",
+                    current="正在更新文档检索结构",
+                )
+                existing_images = {
+                    str(record.get("data_id") or ""): record
+                    for record in records
+                    if record.get("kind") == "image" and record.get("data_id")
+                }
+                rebuilt = self.records.build(
+                    stage_kb,
+                    manifest,
+                    progress=progress,
+                    logfn=logfn,
+                    cancelled=cancelled,
+                    existing_image_records=existing_images,
+                    preserve_image_analysis=True,
+                )
+                records = list(rebuilt.records)
+                structure_failures = list(rebuilt.failures)
+                previous_image_analysis = dict(sources.get("image_analysis") or {})
+                sources.update(rebuilt.sources)
+                if previous_image_analysis:
+                    sources["image_analysis"] = previous_image_analysis
+                self.records.write_records(records_path, records, kb_id=kb_id)
+                manifest = dict(manifest)
+                manifest["failures"] = [
+                    item
+                    for item in (manifest.get("failures") or [])
+                    if not (
+                        isinstance(item, dict)
+                        and item.get("stage") == "structure_parse"
+                    )
+                ] + structure_failures
+                manifest["structure_upgraded_at"] = int(time.time())
             sources["records_sha256"] = self.records.records_sha256(records_path)
             self.index_builder.begin_build()
             stats = self.index_builder.build(
@@ -1176,6 +1217,24 @@ class IngestPipeline:
             )
             check_cancelled(cancelled)
             manifest = dict(manifest)
+            if chunking_changed:
+                document_results, normalized_failures = self._document_results(
+                    manifest,
+                    records,
+                    manifest.get("failures") or [],
+                )
+                manifest["document_results"] = document_results
+                manifest["failures"] = normalized_failures
+                summary = dict(manifest.get("summary") or {})
+                summary.update({
+                    key: int(stats.get(key) or 0)
+                    for key in (
+                        "n_docs", "n_chunks", "text_chunks", "image_chunks",
+                        "image_assets", "embedding_cache_hits", "embedding_cache_misses",
+                    )
+                })
+                summary["failure_items"] = len(normalized_failures)
+                manifest["summary"] = summary
             manifest["index_sources"] = sources
             manifest["index_stats"] = stats
             manifest["processing_fingerprint"] = {
@@ -1210,6 +1269,7 @@ class IngestPipeline:
             return {
                 "ok": True,
                 "kb_id": kb_id,
+                "structure_rebuilt": chunking_changed,
                 "stats": stats,
                 "usage": dict(stats.get("usage") or {}),
                 "kb": published,

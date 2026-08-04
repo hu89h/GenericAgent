@@ -1201,7 +1201,7 @@ function kbRenderLibraries() {
     card.innerHTML = `
       <div class="kb-card-title-row"><h3 class="kb-card-title"></h3><span class="kb-status ${statusClass}">${stateIcon}<span>${escapeHtml(stateText)}</span></span></div>
       <div class="kb-card-meta"></div>
-      <div class="kb-card-actions">${kb.source_changed === true ? `<button type="button" class="kb-link-btn kb-rescan-source">${escapeHtml(t('kb.rescanSource'))}</button>` : ''}${canResume ? `<button type="button" class="kb-link-btn kb-resume-import">${escapeHtml(t('kb.resume'))}</button>` : ''}${hasCheckpoint ? `<button type="button" class="kb-link-btn kb-discard-checkpoint">${escapeHtml(discardLabel)}</button>` : ''}<button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
+      <div class="kb-card-actions">${kb.structure_update_available === true ? `<button type="button" class="kb-link-btn kb-update-structure">${escapeHtml(t('kb.structureUpdate'))}</button>` : ''}${kb.source_changed === true ? `<button type="button" class="kb-link-btn kb-rescan-source">${escapeHtml(t('kb.rescanSource'))}</button>` : ''}${canResume ? `<button type="button" class="kb-link-btn kb-resume-import">${escapeHtml(t('kb.resume'))}</button>` : ''}${hasCheckpoint ? `<button type="button" class="kb-link-btn kb-discard-checkpoint">${escapeHtml(discardLabel)}</button>` : ''}<button type="button" class="kb-link-btn danger kb-delete-library">${escapeHtml(t('kb.delete'))}</button></div>`;
     card.querySelector('.kb-card-title').textContent = kb.name || kb.id || '';
     card.querySelector('.kb-card-meta').textContent = kbFormat(t('kb.libraryMeta'), {
       documents: kb.counts?.documents || 0,
@@ -1212,6 +1212,11 @@ function kbRenderLibraries() {
       void kbOpenDocuments(kb);
     });
     card.querySelector('.kb-delete-library').addEventListener('click', () => void kbDeleteLibrary(kb));
+    card.querySelector('.kb-update-structure')?.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      void kbOpenBuildModal(kb.id || '');
+    });
     card.querySelector('.kb-rescan-source')?.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();

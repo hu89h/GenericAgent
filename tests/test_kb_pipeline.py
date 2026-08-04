@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from knowledge_base import config
+from knowledge_base import config, documents
 from knowledge_base.assets import ImageAssetProcessor
 from knowledge_base.build import RecordBuilder
 from knowledge_base.cancellation import KnowledgeBaseCancelled
@@ -643,7 +643,10 @@ class ProcessedContentRepairTests(unittest.TestCase):
                     for record in records:
                         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 with open(os.path.join(active, "manifest.json"), "w", encoding="utf-8") as handle:
-                    json.dump({"index_sources": {}, "files": []}, handle)
+                    json.dump({
+                        "index_sources": {"chunking": documents.chunking_meta()},
+                        "files": [],
+                    }, handle)
 
                 class _PublishedRecords:
                     @staticmethod
@@ -670,6 +673,86 @@ class ProcessedContentRepairTests(unittest.TestCase):
                 self.assertEqual(result["stats"]["n_chunks"], 1)
                 self.assertEqual(result["stats"]["text_chunks"], 1)
 
+    def test_reindex_upgrades_stale_chunking_from_processed_markdown(self):
+        """A parser upgrade must repair records without rerunning conversion or VLM."""
+        with tempfile.TemporaryDirectory() as temp:
+            source = os.path.join(temp, "source")
+            data_root = os.path.join(temp, "data")
+            config_path = os.path.join(temp, "kb.yaml")
+            os.makedirs(source)
+            with mock.patch.object(config, "DATA_ROOT", data_root), mock.patch.object(
+                config, "CONFIG_PATH", config_path
+            ):
+                kb_id = config.kb_id_for_source(source)
+                config.upsert_kb(kb_id, name="Structure upgrade", source_path=source)
+                active = config.active_root(kb_id)
+                processed = config.processed_path(kb_id)
+                documents_dir = os.path.join(processed, "documents")
+                os.makedirs(documents_dir, exist_ok=True)
+                with open(os.path.join(documents_dir, "report.md"), "w", encoding="utf-8") as handle:
+                    handle.write(
+                        "# 财务指标\n"
+                        "<table><tr><td>重要财务指标</td><td>2020E</td></tr>"
+                        "<tr><td>资产负债率</td><td>22.3%</td></tr></table>"
+                    )
+                manifest = {
+                    "kb_id": kb_id,
+                    "name": "Structure upgrade",
+                    "source_path": source,
+                    "files": [{
+                        "kind": "document",
+                        "source": "report.pdf",
+                        "name": "report.pdf",
+                        "processed": ["documents/report.md"],
+                    }],
+                    "failures": [],
+                    "summary": {"documents_total": 1},
+                    "index_sources": {
+                        "chunking": {"markdown_packer": "ga_structural_blocks_v2_image_occurrences"},
+                        "image_analysis": {"model": "preserved-model"},
+                    },
+                }
+                with open(os.path.join(active, "manifest.json"), "w", encoding="utf-8") as handle:
+                    json.dump(manifest, handle)
+                with open(os.path.join(active, "records.jsonl"), "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps({
+                        "data_id": f"{kb_id}::documents/report.md",
+                        "chunk_index": 0,
+                        "kind": "text",
+                        "file_name": "documents/report.md",
+                        "title": "report.pdf",
+                        "body": "<table><tr><td>重要财务指标",
+                    }, ensure_ascii=False) + "\n")
+
+                index = self._Index()
+                pipeline = IngestPipeline(
+                    document_processor=None,
+                    record_builder=RecordBuilder(assets=self._Assets()),
+                    index_builder=self._IndexBuilder(index),
+                    publisher=Publisher(),
+                    index=index,
+                )
+
+                result = pipeline.reindex(kb_id)
+
+                self.assertTrue(result["structure_rebuilt"])
+                rebuilt = RecordBuilder.read_records(
+                    os.path.join(config.active_root(kb_id), "records.jsonl")
+                )
+                table = next(record for record in rebuilt if record.get("content_type") == "table")
+                self.assertIn("2020E", table["body"])
+                self.assertIn("资产负债率", table["body"])
+                self.assertIn("22.3%", table["body"])
+                with open(
+                    os.path.join(config.active_root(kb_id), "manifest.json"),
+                    encoding="utf-8",
+                ) as handle:
+                    published_manifest = json.load(handle)
+                self.assertEqual(
+                    published_manifest["index_sources"]["image_analysis"],
+                    {"model": "preserved-model"},
+                )
+
     def test_reindex_failure_keeps_published_active_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:
             source = os.path.join(temp, "source")
@@ -688,7 +771,11 @@ class ProcessedContentRepairTests(unittest.TestCase):
                 with open(records_path, "w", encoding="utf-8") as handle:
                     handle.write(json.dumps({"body": "published"}) + "\n")
                 manifest_path = os.path.join(active, "manifest.json")
-                original_manifest = {"state": "ready", "marker": "old"}
+                original_manifest = {
+                    "state": "ready",
+                    "marker": "old",
+                    "index_sources": {"chunking": documents.chunking_meta()},
+                }
                 with open(manifest_path, "w", encoding="utf-8") as handle:
                     json.dump(original_manifest, handle)
 
