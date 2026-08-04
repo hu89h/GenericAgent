@@ -37,7 +37,7 @@ class KnowledgeScopeTests(unittest.TestCase):
         prompt = agentmain.knowledge_scope_prompt({
             "mode": "document",
             "kb_id": "internal-kb-id",
-            "data_id": "internal::data-id",
+            "data_id": "internal-kb-id::data-id",
             "kb_name": "论文",
             "title": "研究报告.pdf",
         })
@@ -45,7 +45,7 @@ class KnowledgeScopeTests(unittest.TestCase):
         self.assertIn("论文", prompt)
         self.assertIn("研究报告.pdf", prompt)
         self.assertNotIn("internal-kb-id", prompt)
-        self.assertNotIn("internal::data-id", prompt)
+        self.assertNotIn("internal-kb-id::data-id", prompt)
 
     def test_enabled_scope_keeps_kb_tools(self):
         schema = list(agentmain.KB_TOOL_SCHEMAS)
@@ -78,7 +78,7 @@ class KnowledgeScopeTests(unittest.TestCase):
 
         self.assertEqual(prompt.count("[KNOWLEDGE_BASE_USAGE]"), 1)
         self.assertIn("不能查看知识库原图", prompt)
-        self.assertEqual(prompt.count("[知识库来源规则]"), 1)
+        self.assertEqual(prompt.count("信息来源"), 1)
 
     def test_disabled_prompt_does_not_contain_kb_usage_policy(self):
         prompt = agentmain.knowledge_scope_prompt(
@@ -86,7 +86,7 @@ class KnowledgeScopeTests(unittest.TestCase):
         )
 
         self.assertNotIn("[KNOWLEDGE_BASE_USAGE]", prompt)
-        self.assertNotIn("[知识库来源规则]", prompt)
+        self.assertNotIn("信息来源", prompt)
         self.assertNotIn("不能查看知识库原图", prompt)
 
     def test_disabled_scope_rejects_direct_tool_call(self):
@@ -149,7 +149,7 @@ class KnowledgeScopeTests(unittest.TestCase):
                     "kb_id": "internal-kb-id",
                     "kb_name": "论文",
                     "documents": [{
-                        "data_id": "internal::documents/report.md",
+                        "data_id": "internal-kb-id::documents/report.md",
                         "title": "研究报告.pdf",
                     }],
                 },
@@ -159,7 +159,7 @@ class KnowledgeScopeTests(unittest.TestCase):
         self.assertIn("论文", prompt)
         self.assertIn("研究报告.pdf", prompt)
         self.assertNotIn("internal-kb-id", prompt)
-        self.assertNotIn("internal::documents/report.md", prompt)
+        self.assertNotIn("internal-kb-id::documents/report.md", prompt)
 
 
 if __name__ == "__main__":

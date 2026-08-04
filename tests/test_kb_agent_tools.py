@@ -8,7 +8,6 @@ from PIL import Image
 
 from knowledge_base.agent_tools import (
     KB_AGENT_SYSTEM_INSTRUCTIONS,
-    KB_RESPONSE_SOURCE_INSTRUCTIONS,
     KB_TOOL_SCHEMAS,
     KnowledgeBaseToolsMixin,
 )
@@ -178,7 +177,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertIn("主要依据", functions["kb_read"]["description"])
         self.assertEqual(
             functions["kb_read"]["parameters"]["required"],
-            ["chunk_index"],
+            ["data_id", "chunk_index"],
         )
         self.assertIn("导航", functions["kb_list"]["description"])
         self.assertIn("不要批量打开", functions["kb_image_read"]["description"])
@@ -220,7 +219,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
 
                 self.assertEqual(handler.queued_image, str(image))
                 self.assertIn("本次查看重点: 确认图中红色流程与蓝色流程的先后关系", handler.queued_context)
-                self.assertIn('"attach_status": "attached"', outcome.data)
+                self.assertIn('"image_attached": true', outcome.data)
             finally:
                 _Backend.image_abspath = ""
 
@@ -234,11 +233,11 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
                 handler = _ScopedImageHandler({
                     "mode": "document",
                     "kb_id": "kb-test",
-                    "ref": "kb-test/doc.md",
+                    "data_id": "kb-test::doc.md",
                 })
                 outcome = handler.do_kb_image_read({"ref_key": "图1"}, None)
 
-                self.assertIn('"attach_status": "attached"', outcome.data)
+                self.assertIn('"image_attached": true', outcome.data)
                 self.assertEqual(
                     _ScopedImageBackend.calls[0]["source_data_id"],
                     "kb-test::doc.md",
@@ -275,7 +274,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
 
         payload = json.loads(outcome.data)
         self.assertEqual(captured["evidence_types"], ["table"])
-        self.assertEqual(payload["evidence_types"], ["table"])
+        self.assertNotIn("evidence_types", payload)
 
     def test_table_search_preview_is_truncated_at_a_complete_row(self):
         body = "| 指标 | 2020E |\n| --- | --- |\n" + "\n".join(
@@ -308,7 +307,6 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
             "body": "| 指标 | 值 |",
         })
 
-        self.assertEqual(result["source_section"], "财务数据")
         self.assertEqual(
             result["source_hint"],
             "《source.pdf》：“财务数据”——“重要财务指标”",
@@ -348,6 +346,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
             "data_id": "kb-test::doc.md",
             "file_name": "documents/internal.md",
             "source_file_name": "source.pdf",
+            "matched_by": ["vector"],
             "body": "正文 " * 1000,
             "snippet": "命中摘要 " * 200,
         })
@@ -355,6 +354,10 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertLessEqual(len(compact["body"]), 1650)
         self.assertLessEqual(len(compact["snippet"]), 330)
         self.assertIn("kb_read", compact["body"])
+        self.assertEqual(set(compact), {
+            "data_id", "chunk_index", "evidence_type", "source_hint",
+            "matched_by", "snippet", "body",
+        })
 
     def test_text_references_are_not_desktop_citations(self):
         handler = _Handler()
@@ -389,7 +392,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         })
 
         self.assertNotIn("abspath", result)
-        self.assertEqual(result["source_file_name"], "original.pdf")
+        self.assertEqual(result["data_id"], "kb-test::documents/hash-doc.md")
         self.assertNotIn("folder", result)
         self.assertNotIn("size", result)
         self.assertEqual(result["source_hint"], "《original.pdf》")
@@ -400,7 +403,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             set(document),
-            {"kind", "data_id", "source_file_name", "source_hint"},
+            {"data_id", "source_hint"},
         )
         self.assertNotIn('"file_name"', json.dumps(payload))
 
@@ -409,25 +412,14 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
             "data_id": "kb-test::documents/source.md",
             "offset": 20,
             "limit": 10,
-            "preview_chars": 60,
         }, None).data)
 
         self.assertNotIn("total", payload)
-        self.assertEqual(payload["offset"], 20)
-        self.assertEqual(payload["limit"], 10)
-        self.assertEqual(payload["returned"], 10)
         self.assertTrue(payload["has_more"])
         self.assertEqual(payload["next_offset"], 30)
         self.assertEqual(len(payload["chunks"]), 10)
         self.assertNotIn("documents/image-20.jpg", json.dumps(payload))
         self.assertIn("[图片]", payload["chunks"][0]["preview"])
-
-    def test_chunk_list_resolves_a_compatibility_ref_to_the_stable_data_id(self):
-        payload = json.loads(_Handler().do_kb_list({
-            "ref": "kb-test/documents/source.md",
-        }, None).data)
-
-        self.assertEqual(payload["data_id"], "kb-test::documents/source.md")
 
     def test_image_ambiguity_returns_safe_candidates_for_retry(self):
         original = _Backend.read_image
@@ -462,7 +454,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertEqual(len(payload["candidates"]), 2)
         self.assertEqual(
             set(payload["candidates"][0]),
-            {"data_id", "ref_key", "display_label", "source_hint"},
+            {"data_id", "ref_key", "image_label", "source_hint"},
         )
         self.assertNotIn("internal", outcome.data)
 
@@ -489,6 +481,9 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertNotIn("原始文档：", outcome.data)
         self.assertNotIn("documents/internal.jpg", outcome.data)
         self.assertIn("[图片]", outcome.data)
+        self.assertEqual(set(json.loads(outcome.data)), {
+            "data_id", "evidence_type", "source_hint", "content", "continuation",
+        })
 
     def test_truncated_mineru_image_link_is_hidden(self):
         cleaned = _Handler._clip_text(
@@ -498,6 +493,14 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
 
         self.assertNotIn("documents/processed-image.jpg", cleaned)
         self.assertNotIn("章节路径：", cleaned)
+
+    def test_flattened_chunk_context_does_not_remove_preview_content(self):
+        cleaned = _Handler._clip_text(
+            "章节路径：/公司/财务数据/ 资产负债率为 22.3%",
+            200,
+        )
+
+        self.assertEqual(cleaned, "资产负债率为 22.3%")
 
     def test_image_detail_omits_empty_and_catalog_context(self):
         result = _Handler._public_image({
@@ -517,12 +520,13 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
             "related_text": " ".join(f"图{i}：目录项" for i in range(1, 20)),
         })
 
-        self.assertEqual(result["display_label"], "图1：标题")
+        self.assertEqual(result["source_hint"], "《source.pdf》：“图1：标题”")
         self.assertNotIn("title", result)
         self.assertNotIn("caption", result)
         self.assertNotIn("table_markdown", result)
         self.assertNotIn("analysis_error", result)
         self.assertNotIn("related_text", result)
+        self.assertEqual(result["context"], "图片附近正文")
         self.assertNotIn("source_data_id", result)
         self.assertNotIn("ref", result)
 
@@ -547,7 +551,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         for output in outputs:
             self.assertNotIn("secret", output)
             self.assertNotIn("zvec", output)
-            self.assertIn("[Error]", output)
+            self.assertIn("error_code", json.loads(output))
 
     def test_image_focus_is_optional_and_redacted(self):
         schema = next(
@@ -574,7 +578,6 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         )
 
         self.assertIn("《source.pdf》：“方法”", outcome.data)
-        self.assertNotIn(KB_RESPONSE_SOURCE_INSTRUCTIONS, outcome.next_prompt)
         self.assertNotIn("禁止出现在面向用户的回答中", outcome.next_prompt)
 
     def test_read_requires_explicit_chunk_index(self):
@@ -587,7 +590,7 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
 
     def test_agent_usage_policy_is_one_system_prompt_contract(self):
         self.assertIn("[KNOWLEDGE_BASE_USAGE]", KB_AGENT_SYSTEM_INSTRUCTIONS)
-        self.assertIn("[知识库来源规则]", KB_AGENT_SYSTEM_INSTRUCTIONS)
+        self.assertIn("信息来源", KB_AGENT_SYSTEM_INSTRUCTIONS)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from llmcore import reload_mykeys, ToolClient, MixinSession, NativeToolClient, NativeClaudeSession, NativeOAISession, resolve_client
 from agent_loop import agent_runner_loop
 from knowledge_base.agent_tools import KB_AGENT_SYSTEM_INSTRUCTIONS, KB_TOOL_SCHEMAS
+from knowledge_base.scope import normalize_scope as normalize_knowledge_scope
 try:
     from plugins.hooks import discover_and_load; discover_and_load()
 except Exception: pass
@@ -33,7 +34,7 @@ _KB_TOOL_NAMES = frozenset(
 
 
 def tool_schema_for_scope(schema, knowledge_scope, *, supports_image_blocks=False):
-    mode = str((knowledge_scope or {}).get("mode") or "all").strip().lower()
+    mode = normalize_knowledge_scope(knowledge_scope)["mode"]
     filtered = schema if mode != "none" else [
         tool for tool in schema
         if tool.get("function", {}).get("name") not in _KB_TOOL_NAMES
@@ -47,15 +48,15 @@ def tool_schema_for_scope(schema, knowledge_scope, *, supports_image_blocks=Fals
 
 
 def knowledge_scope_prompt(knowledge_scope, *, supports_image_blocks=False):
-    scope = knowledge_scope if isinstance(knowledge_scope, dict) else {}
-    mode = str(scope.get("mode") or "all").strip().lower()
+    scope = normalize_knowledge_scope(knowledge_scope)
+    mode = scope["mode"]
     if mode == "none":
         detail = {"mode": "disabled"}
     elif mode == "document":
         detail = {
             "mode": "single_document",
             "knowledge_base": str(scope.get("kb_name") or "selected knowledge base"),
-            "document": str(scope.get("title") or scope.get("file_name") or "selected document"),
+            "document": str(scope.get("title") or "selected document"),
         }
     elif mode == "kb":
         detail = {
@@ -72,7 +73,7 @@ def knowledge_scope_prompt(knowledge_scope, *, supports_image_blocks=False):
                 item["documents"] = "all"
             else:
                 item["documents"] = [
-                    str(document.get("title") or document.get("file_name") or "selected document")
+                    str(document.get("title") or "selected document")
                     for document in target.get("documents") or []
                     if isinstance(document, dict)
                 ]

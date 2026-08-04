@@ -11,36 +11,18 @@ import re
 from agent_loop import StepOutcome
 
 from .references import clean_public_text, public_reference
+from .scope import normalize_scope
 
 
-KB_RESPONSE_SOURCE_INSTRUCTIONS = """
-[知识库来源规则]
-- 如果最终回答实际使用了知识库信息，在答案末尾自行添加“**信息来源**”段。
-- 来源只能使用工具结果中的 source_hint，只列出实际支撑回答的来源，不要罗列所有搜索命中。
-- 同一原始文档必须合并为一条项目并对章节或图号去重，禁止重复书写文档名。格式固定为：
-  **信息来源**
-  - 《原始文档名》：“章节一”“章节二”
-- data_id、ref、chunk_index、内部路径、处理后 Markdown 文件名、哈希前缀和检索诊断仅供工具调用，禁止出现在面向用户的回答中。
-- 未使用知识库信息时不要添加“信息来源”段。
-""".strip()
-
-
-KB_AGENT_USAGE_INSTRUCTIONS = """
+KB_AGENT_SYSTEM_INSTRUCTIONS = """
 [KNOWLEDGE_BASE_USAGE]
-- 先调用 kb_search，再根据搜索结果调用 kb_read 或 kb_image_read；不要在同一轮并行调用有依赖关系的工具。
-- kb_search 返回的是候选摘要，不等同于完整证据。涉及精确事实、数字、比较、因果、条件或跨文档结论时，必须继续读取直接证据。
-- 用户明确要求“根据某张表、图、图表或原文”时，该来源优先，不得自行改用附近摘要。文本或 HTML 表格调用 kb_read；图像表格、饼图、流程图等视觉证据调用 kb_image_read，并用 focus 写明需要核对的问题。
-- kb_read 必须使用搜索结果中的 data_id（或兼容的 ref）和对应 chunk_index。结构未读完时必须按 continuation.next_chunk_index 继续读取。
-- 用户未指定来源时，优先采用最接近问题的直接证据。不同来源冲突时按用户指定来源回答并说明冲突；证据不足时不得用相关但不准确的内容补答。
-- kb_list 只用于文档发现、文档选择和分段导航，不是普通问答的默认检索工具，也不能把目录预览当作事实证据。
-- 只有用户指定视觉来源、要求查看图片细节，或搜索描述不足以回答时，才调用 kb_image_read；不要批量打开所有命中图片。
-- 必须使用当前对话提供的知识库范围，不要尝试读取其他知识库或任意本地路径。
-- 当前模型没有 kb_image_read 时，只能使用已有图片文字描述，并明确没有查看原图，不能声称完成视觉核对。
-- 不要把 data_id、ref、chunk_index、内部路径、处理后文件名或检索诊断写入最终回答；使用知识库信息时按来源规则在答案末尾列出原始文档来源。
+- 先搜索，再按用户指定的证据类型读取正文或原图；有依赖的工具不得在同一轮并行调用。
+- 搜索命中是候选摘要。精确事实、数字、比较、因果、条件、表格和跨文档结论必须读取直接证据。
+- 用户指定表、图、图表或原文时优先使用该来源；视觉证据用 kb_image_read，并在 focus 中写明需要从原图核对的问题。
+- 每次 kb_read 后检查 continuation.has_more；未读完时按 next_chunk_index 继续。
+- 证据冲突时按用户指定来源回答并说明冲突；证据不足时明确说明，不得用相近内容补答。
+- 最终回答不得出现 data_id、chunk_index、内部路径、处理后文件名或检索诊断。实际使用知识库时，在末尾按 source_hint 生成“信息来源”，同一原始文档合并并去重章节或图号。
 """.strip()
-
-
-KB_AGENT_SYSTEM_INSTRUCTIONS = f"{KB_AGENT_USAGE_INSTRUCTIONS}\n\n{KB_RESPONSE_SOURCE_INSTRUCTIONS}"
 
 
 KB_TOOL_SCHEMAS = [
@@ -63,10 +45,10 @@ KB_TOOL_SCHEMAS = [
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["prose", "table", "image", "equation", "code", "list", "quote"],
+                            "enum": ["text", "table", "image"],
                         },
                         "uniqueItems": True,
-                        "description": "可选的证据结构限制。用户明确指定表格、图片、公式、代码等来源时使用；无结果时不得静默移除此限制。table 同时覆盖文本表格和图片表格，image 覆盖所有原图记录。",
+                        "description": "可选证据限制：text 为正文等文本结构，table 为文本或图片表格，image 为原图。无结果时不得静默移除此限制。",
                     },
                 },
                 "required": ["query", "mode"],
@@ -82,7 +64,6 @@ KB_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "data_id": {"type": "string"},
-                    "ref": {"type": "string"},
                     "chunk_index": {"type": "integer", "minimum": 0},
                     "span": {"type": "integer", "minimum": 1, "maximum": 5, "default": 1},
                     "max_chars": {
@@ -93,7 +74,7 @@ KB_TOOL_SCHEMAS = [
                         "description": "单次正文上限。若 continuation 返回 required_max_chars，请对同一 chunk_index 提高该值后重读。",
                     },
                 },
-                "required": ["chunk_index"],
+                "required": ["data_id", "chunk_index"],
             },
         },
     },
@@ -101,13 +82,11 @@ KB_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "kb_list",
-            "description": "仅用于当前范围内的文档发现、文档选择和分段导航；提供 data_id 或 ref 时分页列出该文档的分段目录。不要在普通问答前默认调用，也不要把目录预览当作事实证据。",
+            "description": "仅用于当前范围内的文档发现、文档选择和分段导航；提供 data_id 时分页列出该文档的分段目录。不要在普通问答前默认调用，也不要把目录预览当作事实证据。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "data_id": {"type": "string"},
-                    "ref": {"type": "string"},
-                    "preview_chars": {"type": "integer", "minimum": 20, "maximum": 200, "default": 80},
                     "offset": {"type": "integer", "minimum": 0, "default": 0},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
                 },
@@ -145,45 +124,27 @@ class KnowledgeBaseToolsMixin:
         return backend
 
     @staticmethod
-    def _scope_ref(value):
-        return str(value or "").replace("\\", "/").strip().lstrip("/")
-
-    @classmethod
-    def _document_key(cls, data_id=None, ref=None, file_name=None):
+    def _document_key(data_id=None):
         raw = str(data_id or "").strip()
         if "::" in raw:
-            return cls._scope_ref(raw.split("::", 1)[1].split("::image::", 1)[0])
-        value = cls._scope_ref(ref or file_name)
-        if "/" in value:
-            return value.split("/", 1)[1]
-        return value
+            return raw.split("::", 1)[1].split("::image::", 1)[0].replace("\\", "/").lstrip("/")
+        return ""
 
     @classmethod
-    def _target_parts(cls, data_id=None, ref=None, file_name=None, kb_id=None):
+    def _target_parts(cls, data_id=None, kb_id=None):
         raw_id = str(data_id or "").strip()
         if "::" in raw_id:
-            return raw_id.split("::", 1)[0], cls._document_key(data_id=raw_id)
-        value = cls._scope_ref(ref)
-        if "/" in value:
-            return value.split("/", 1)[0], value.split("/", 1)[1]
-        return str(kb_id or "").strip(), cls._document_key(file_name=file_name)
+            return raw_id.split("::", 1)[0], cls._document_key(raw_id)
+        return str(kb_id or "").strip(), ""
 
     def _knowledge_scope(self):
-        raw = getattr(self.parent, "knowledge_scope", None)
-        scope = dict(raw) if isinstance(raw, dict) else {}
-        mode = str(scope.get("mode") or scope.get("kind") or "all").strip().lower()
-        if mode in {"multi", "selection", "selected"}:
-            mode = "selection"
-        if mode not in {"none", "all", "kb", "document", "selection"}:
-            mode = "all"
-        scope["mode"] = mode
-        return scope
+        return normalize_scope(getattr(self.parent, "knowledge_scope", None))
 
     def _scope_targets(self):
         scope = self._knowledge_scope()
         if scope["mode"] != "selection":
             return []
-        targets = scope.get("targets") or scope.get("knowledge_bases") or []
+        targets = scope.get("targets") or []
         return [target for target in targets if isinstance(target, dict)]
 
     def _scope_kb_ids(self):
@@ -191,7 +152,7 @@ class KnowledgeBaseToolsMixin:
         if scope["mode"] == "selection":
             out = []
             for target in self._scope_targets():
-                kb_id = str(target.get("kb_id") or target.get("kbId") or target.get("id") or "").strip()
+                kb_id = str(target.get("kb_id") or "").strip()
                 if kb_id and kb_id not in out:
                     out.append(kb_id)
             return out
@@ -202,15 +163,15 @@ class KnowledgeBaseToolsMixin:
         ids = self._scope_kb_ids()
         return ids[0] if len(ids) == 1 else None
 
-    def _scope_read_kb_id(self, data_id=None, ref=None, file_name=None):
+    def _scope_read_kb_id(self, data_id=None):
         target_kb, _target_doc = self._target_parts(
-            data_id=data_id, ref=ref, file_name=file_name,
+            data_id=data_id,
         )
         if target_kb:
             return target_kb
         return self._scope_kb_id()
 
-    def _scope_allows_target(self, data_id=None, ref=None, file_name=None, kb_id=None):
+    def _scope_allows_target(self, data_id=None, kb_id=None):
         scope = self._knowledge_scope()
         if scope["mode"] == "none":
             return False
@@ -218,22 +179,20 @@ class KnowledgeBaseToolsMixin:
             return True
 
         target_kb, target_doc = self._target_parts(
-            data_id=data_id, ref=ref, file_name=file_name, kb_id=kb_id
+            data_id=data_id, kb_id=kb_id
         )
         if scope["mode"] == "selection":
             for target in self._scope_targets():
-                expected_kb = str(target.get("kb_id") or target.get("kbId") or target.get("id") or "").strip()
+                expected_kb = str(target.get("kb_id") or "").strip()
                 if not expected_kb or expected_kb != target_kb:
                     continue
-                if bool(target.get("all_documents", target.get("allDocuments", False))):
+                if target.get("all_documents") is True:
                     return True
-                for document in target.get("documents") or target.get("docs") or []:
+                for document in target.get("documents") or []:
                     if not isinstance(document, dict):
                         continue
                     expected_doc = self._document_key(
-                        data_id=document.get("data_id") or document.get("dataId"),
-                        ref=document.get("ref"),
-                        file_name=document.get("file_name") or document.get("fileName"),
+                        data_id=document.get("data_id"),
                     )
                     if expected_doc and target_doc and expected_doc == target_doc:
                         return True
@@ -246,15 +205,13 @@ class KnowledgeBaseToolsMixin:
 
         expected_doc = self._document_key(
             data_id=scope.get("data_id"),
-            ref=scope.get("ref"),
-            file_name=scope.get("file_name"),
         )
         return bool(expected_doc and target_doc and expected_doc == target_doc)
 
     def _scope_search_kwargs(self):
         scope = self._knowledge_scope()
         if scope["mode"] == "none":
-            return {"kb_id": "__knowledge_disabled__"}
+            return {}
         if scope["mode"] == "all":
             return {}
         if scope["mode"] == "selection":
@@ -263,8 +220,6 @@ class KnowledgeBaseToolsMixin:
         if scope["mode"] == "document":
             document = self._document_key(
                 data_id=scope.get("data_id"),
-                ref=scope.get("ref"),
-                file_name=scope.get("file_name"),
             )
             if document:
                 out["file_name"] = document
@@ -283,7 +238,7 @@ class KnowledgeBaseToolsMixin:
             return f"[图片：{alt}]" if alt else "[图片]"
 
         text = image_pattern.sub(replace_image, text)
-        return re.sub(r"(?m)^\s*章节路径：/[^\r\n]*?(?=\s*!\[|$)", "", text).strip()
+        return re.sub(r"(?m)^\s*章节路径：(?:/[^/\r\n]+)+/\s*", "", text).strip()
 
     @staticmethod
     def _clip_text(value, limit: int, *, suffix=""):
@@ -337,23 +292,33 @@ class KnowledgeBaseToolsMixin:
         result["source_hint"] = cls._source_hint(result)
         return result
 
+    @staticmethod
+    def _evidence_type(item):
+        if str(item.get("kind") or "") == "image":
+            return "image"
+        return "table" if str(item.get("content_type") or "") == "table" else "text"
+
     @classmethod
     def _clean_hit(cls, hit):
         kind = str(hit.get("kind") or "document")
-        result = cls._public_reference(hit, kind=kind)
-        content_type = str(hit.get("content_type") or ("image" if kind == "image" else "prose"))
-        result["content_type"] = content_type
-        structure_title = cls._clip_text(hit.get("structure_title"), 240)
-        if structure_title:
-            result["structure_title"] = structure_title
-        part_count = max(1, int(hit.get("structure_part_count") or 1))
-        if part_count > 1:
-            result["structure_part_index"] = int(hit.get("structure_part_index") or 0)
-            result["structure_part_count"] = part_count
-        for key in ("score", "score_type", "matched_by", "channel_ranks", "final_rank"):
-            value = hit.get(key)
-            if value not in (None, "", [], {}):
-                result[key] = value
+        reference = cls._public_reference(hit, kind=kind)
+        result = {
+            "data_id": reference.get("data_id", ""),
+            "evidence_type": cls._evidence_type(hit),
+            "source_hint": cls._source_hint({
+                **hit,
+                "kind": kind,
+                "source_file_name": reference.get("source_file_name"),
+                "source_section": reference.get("source_section"),
+            }),
+            "matched_by": list(hit.get("matched_by") or []),
+        }
+        if kind != "image":
+            result["chunk_index"] = int(reference.get("chunk_index") or 0)
+        else:
+            ref_key = str(reference.get("ref_key") or "").strip()
+            if ref_key:
+                result["ref_key"] = ref_key
         if kind == "image":
             description = cls._clip_text(hit.get("description"), 1400)
             if description:
@@ -378,7 +343,7 @@ class KnowledgeBaseToolsMixin:
                     result["description"] = fallback
         else:
             snippet = cls._clip_text(hit.get("snippet"), 320)
-            clip = cls._clip_structured_rows if content_type == "table" else cls._clip_text
+            clip = cls._clip_structured_rows if result["evidence_type"] == "table" else cls._clip_text
             body = clip(
                 hit.get("body"), 1600,
                 suffix="\n…[正文摘要已截断，完整内容请调用 kb_read]",
@@ -387,24 +352,17 @@ class KnowledgeBaseToolsMixin:
                 result["snippet"] = snippet
             if body:
                 result["body"] = body
-        result["source_hint"] = cls._source_hint(result)
-        return result
+        return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
     @classmethod
-    def _clean_diagnostics(cls, items):
+    def _clean_warnings(cls, items):
         cleaned = []
         for item in items or []:
             if not isinstance(item, dict):
                 continue
             error = cls._redact_internal(item.get("error"))
-            source = cls._redact_internal(item.get("source"))
-            row = {}
-            if source:
-                row["source"] = cls._clip_text(source, 120)
             if error:
-                row["error"] = cls._clip_text(error, 400)
-            if row:
-                cleaned.append(row)
+                cleaned.append(cls._clip_text(error, 320))
         return cleaned
 
     @staticmethod
@@ -432,7 +390,10 @@ class KnowledgeBaseToolsMixin:
             "image_read_failed": "读取图片资产失败。",
             "attach_failed": "原图无法加入模型输入。",
         }
-        return f"[Error] {tool} {messages.get(code, '操作失败。')}（{code}）"
+        return json.dumps({
+            "error_code": code,
+            "message": messages.get(code, "操作失败。"),
+        }, ensure_ascii=False)
 
     @staticmethod
     def _source_hint(reference):
@@ -468,7 +429,11 @@ class KnowledgeBaseToolsMixin:
 
     @classmethod
     def _clean_document(cls, document):
-        return cls._public_reference(document, kind="document", include_chunk=False)
+        reference = cls._public_reference(document, kind="document", include_chunk=False)
+        return {
+            "data_id": reference.get("data_id", ""),
+            "source_hint": reference.get("source_hint", ""),
+        }
 
     def _record_knowledge_citations(self, *items):
         """Keep only image references for Desktop open-image actions.
@@ -548,7 +513,7 @@ class KnowledgeBaseToolsMixin:
             return self._anchor_outcome(
                 args, self._safe_error("kb_search", "invalid_argument")
             )
-        allowed_evidence = {"prose", "table", "image", "equation", "code", "list", "quote"}
+        allowed_evidence = {"text", "table", "image"}
         evidence_types = [
             str(value).strip().lower() for value in evidence_types if str(value).strip()
         ]
@@ -556,12 +521,20 @@ class KnowledgeBaseToolsMixin:
             return self._anchor_outcome(
                 args, self._safe_error("kb_search", "invalid_argument")
             )
+        internal_evidence = []
+        for value in evidence_types:
+            if value == "text":
+                internal_evidence.extend(
+                    ["prose", "equation", "code", "list", "quote", "note", "figure"]
+                )
+            else:
+                internal_evidence.append(value)
         try:
             search_result = self._kb_backend().search(
                 query,
                 top_k=top_k,
                 mode=mode,
-                evidence_types=evidence_types,
+                evidence_types=internal_evidence,
                 **self._scope_search_kwargs(),
             ) or {}
         except Exception:
@@ -570,15 +543,12 @@ class KnowledgeBaseToolsMixin:
             )
         hits = search_result.get("results") or []
         result = {
-            "query": query,
             "mode": search_result.get("mode") or mode,
             "hits": [self._clean_hit(hit) for hit in hits],
         }
-        if evidence_types:
-            result["evidence_types"] = evidence_types
-        diagnostics = self._clean_diagnostics(search_result.get("diagnostics"))
-        if diagnostics:
-            result["diagnostics"] = diagnostics
+        warnings = self._clean_warnings(search_result.get("diagnostics"))
+        if warnings:
+            result["warnings"] = warnings
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
     def do_kb_read(self, args, response):
@@ -587,8 +557,7 @@ class KnowledgeBaseToolsMixin:
                 args, self._safe_error("kb_read", "knowledge_disabled")
             )
         data_id = str(args.get("data_id") or "").strip() or None
-        ref = str(args.get("ref") or "").strip() or None
-        if not data_id and not ref:
+        if not data_id:
             return self._anchor_outcome(
                 args, self._safe_error("kb_read", "invalid_argument")
             )
@@ -596,7 +565,7 @@ class KnowledgeBaseToolsMixin:
             return self._anchor_outcome(
                 args, self._safe_error("kb_read", "invalid_argument")
             )
-        if not self._scope_allows_target(data_id=data_id, ref=ref):
+        if not self._scope_allows_target(data_id=data_id):
             return self._anchor_outcome(
                 args, self._safe_error("kb_read", "scope_denied")
             )
@@ -610,10 +579,9 @@ class KnowledgeBaseToolsMixin:
         try:
             content = backend.read_content(
                 data_id=data_id,
-                ref=ref,
                 chunk_index=start,
                 span=span,
-                kb_id=self._scope_read_kb_id(data_id=data_id, ref=ref),
+                kb_id=self._scope_read_kb_id(data_id=data_id),
                 max_chars=max_chars,
             )
         except Exception:
@@ -630,26 +598,24 @@ class KnowledgeBaseToolsMixin:
         try:
             reference = backend.reference_for_chunk(
                 data_id=data_id,
-                ref=ref,
-                kb_id=self._scope_read_kb_id(data_id=data_id, ref=ref),
+                kb_id=self._scope_read_kb_id(data_id=data_id),
                 chunk_index=start,
             ) or {}
         except Exception:
             reference = {}
         result = {
             "data_id": str(content.get("data_id") or data_id or ""),
-            "content_type": str(content.get("content_type") or "prose"),
-            "start_chunk_index": int(content.get("start_chunk_index") or 0),
-            "end_chunk_index": int(content.get("end_chunk_index") or 0),
+            "evidence_type": self._evidence_type(content),
             "content": self._clean_content(content.get("content")),
-            "continuation": dict(content.get("continuation") or {}),
+            "continuation": {
+                key: value for key, value in dict(content.get("continuation") or {}).items()
+                if key in {"has_more", "next_chunk_index", "required_max_chars"}
+                and value is not None
+            },
         }
-        structure_title = self._clip_text(content.get("structure_title"), 240)
-        if structure_title:
-            result["structure_title"] = structure_title
         source_hint = self._source_hint({
             **(reference if isinstance(reference, dict) else {}),
-            "structure_title": structure_title,
+            "structure_title": content.get("structure_title"),
         })
         if source_hint:
             result["source_hint"] = source_hint
@@ -663,24 +629,20 @@ class KnowledgeBaseToolsMixin:
                 args, self._safe_error("kb_list", "knowledge_disabled")
             )
         data_id = str(args.get("data_id") or "").strip() or None
-        ref = str(args.get("ref") or "").strip() or None
-        if data_id or ref:
-            if not self._scope_allows_target(data_id=data_id, ref=ref):
+        if data_id:
+            if not self._scope_allows_target(data_id=data_id):
                 return self._anchor_outcome(
                     args, self._safe_error("kb_list", "scope_denied")
                 )
             try:
-                preview = max(20, min(int(args.get("preview_chars", 60)), 120))
                 offset = max(0, int(args.get("offset", 0)))
                 page_limit = max(1, min(int(args.get("limit", 20)), 50))
             except (TypeError, ValueError):
-                preview, offset, page_limit = 60, 0, 20
+                offset, page_limit = 0, 20
             try:
                 raw_result = self._kb_backend().list_chunks(
                     data_id=data_id,
-                    ref=ref,
-                    kb_id=self._scope_read_kb_id(data_id=data_id, ref=ref),
-                    preview_chars=preview,
+                    kb_id=self._scope_read_kb_id(data_id=data_id),
                     offset=offset,
                     limit=page_limit,
                 )
@@ -695,43 +657,27 @@ class KnowledgeBaseToolsMixin:
             try:
                 source = self._kb_backend().reference_for_chunk(
                     data_id=data_id,
-                    ref=ref,
-                    kb_id=self._scope_read_kb_id(data_id=data_id, ref=ref),
+                    kb_id=self._scope_read_kb_id(data_id=data_id),
                     chunk_index=0,
                 ) or {}
             except Exception:
                 source = {}
             chunks = []
             for chunk in raw_result.get("chunks") or []:
-                preview_text = self._clip_text(chunk.get("preview"), preview)
+                preview_text = self._clip_text(chunk.get("preview"), 80)
                 item = {
                     "chunk_index": int(chunk.get("chunk_index", 0)),
-                    "chars": int(chunk.get("chars") or 0),
+                    "evidence_type": self._evidence_type(chunk),
                 }
                 if preview_text:
                     item["preview"] = preview_text
-                content_type = str(chunk.get("content_type") or "prose").strip()
-                if content_type:
-                    item["content_type"] = content_type
-                source_section = self._clip_text(chunk.get("source_section"), 200)
-                if source_section:
-                    item["source_section"] = source_section
-                structure_title = self._clip_text(chunk.get("structure_title"), 200)
-                if structure_title:
-                    item["structure_title"] = structure_title
                 chunks.append(item)
             result = {
                 "data_id": str(raw_result.get("data_id") or data_id or ""),
-                "offset": offset,
-                "limit": page_limit,
-                "returned": len(chunks),
                 "has_more": bool(raw_result.get("has_more")),
                 "chunks": chunks,
             }
-            source_name = str(source.get("source_file_name") or "").strip()
             source_hint = self._source_hint(source)
-            if source_name:
-                result["source_file_name"] = source_name
             if source_hint:
                 result["source_hint"] = source_hint
             if result["has_more"]:
@@ -746,11 +692,9 @@ class KnowledgeBaseToolsMixin:
                     seen = set()
                     for kb_id in self._scope_kb_ids():
                         for document in self._kb_backend().list_documents(kb_id=kb_id):
-                            key = str(document.get("data_id") or document.get("ref") or document.get("file_name") or "")
+                            key = str(document.get("data_id") or "")
                             if key in seen or not self._scope_allows_target(
                                 data_id=document.get("data_id"),
-                                ref=document.get("ref"),
-                                file_name=document.get("file_name"),
                                 kb_id=kb_id,
                             ):
                                 continue
@@ -765,15 +709,11 @@ class KnowledgeBaseToolsMixin:
             if scope["mode"] == "document":
                 expected = self._document_key(
                     data_id=scope.get("data_id"),
-                    ref=scope.get("ref"),
-                    file_name=scope.get("file_name"),
                 )
                 documents = [
                     document for document in documents
                     if self._document_key(
                         data_id=document.get("data_id"),
-                        ref=document.get("ref"),
-                        file_name=document.get("file_name"),
                     ) == expected
                 ]
             result = {
@@ -804,12 +744,6 @@ class KnowledgeBaseToolsMixin:
             source_data_id = None
             if scope["mode"] == "document":
                 source_data_id = str(scope.get("data_id") or "").strip() or None
-                if not source_data_id:
-                    target_kb, target_doc = self._target_parts(
-                        ref=scope.get("ref"), kb_id=scope.get("kb_id")
-                    )
-                    if target_kb and target_doc:
-                        source_data_id = f"{target_kb}::{target_doc}"
             if scope["mode"] == "selection" and not lookup.get("data_id"):
                 matches = []
                 for kb_id in self._scope_kb_ids():
@@ -822,8 +756,6 @@ class KnowledgeBaseToolsMixin:
                     for item in candidates:
                         if not self._scope_allows_target(
                             data_id=item.get("data_id"),
-                            ref=item.get("ref"),
-                            file_name=item.get("file_name"),
                             kb_id=item.get("kb_id") or kb_id,
                         ):
                             continue
@@ -869,8 +801,6 @@ class KnowledgeBaseToolsMixin:
             return None, self._safe_error("kb_image_read", "image_unavailable")
         if not self._scope_allows_target(
             data_id=info.get("data_id"),
-            ref=info.get("ref"),
-            file_name=info.get("file_name"),
             kb_id=info.get("kb_id"),
         ):
             return None, self._safe_error("kb_image_read", "scope_denied")
@@ -901,7 +831,7 @@ class KnowledgeBaseToolsMixin:
                 320,
             )
             item["ref_key"] = ref_key
-            item["display_label"] = label
+            item["image_label"] = label
             item["source_hint"] = source_hint
             public_candidates.append(item)
             if len(public_candidates) >= 10:
@@ -914,7 +844,15 @@ class KnowledgeBaseToolsMixin:
 
     @classmethod
     def _public_image(cls, info):
-        result = cls._public_reference(info, kind="image")
+        reference = cls._public_reference(info, kind="image")
+        result = {
+            "data_id": reference.get("data_id", ""),
+            "evidence_type": "image",
+            "source_hint": reference.get("source_hint", ""),
+        }
+        ref_key = str(reference.get("ref_key") or "").strip()
+        if ref_key:
+            result["ref_key"] = ref_key
         description = cls._clip_text(info.get("description"), 2400)
         if description:
             result["description"] = description
@@ -933,8 +871,8 @@ class KnowledgeBaseToolsMixin:
         elif uncertain:
             result["uncertain"] = [cls._clip_text(uncertain, 200)]
 
-        near_text = cls._clip_text(info.get("near_text"), 1800)
-        related_text = cls._clip_text(info.get("related_text"), 1200)
+        near_text = cls._clip_text(info.get("near_text"), 1400)
+        related_text = cls._clip_text(info.get("related_text"), 1000)
         if related_text and (
             related_text == near_text
             or related_text in near_text
@@ -945,15 +883,10 @@ class KnowledgeBaseToolsMixin:
         # useful context for the selected image.
         if related_text and len(re.findall(r"(?:图|表)\s*\d", related_text)) >= 8:
             related_text = ""
-        if near_text:
-            result["near_text"] = near_text
-        if related_text:
-            result["related_text"] = related_text
-        analysis_error = cls._clip_text(info.get("analysis_error"), 400)
-        if analysis_error:
-            result["analysis_error"] = analysis_error
-        result["source_hint"] = cls._source_hint(result)
-        return result
+        context = "\n\n".join(value for value in (near_text, related_text) if value)
+        if context:
+            result["context"] = context
+        return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
     def do_kb_image_read(self, args, response):
         info, error = self._read_image_asset(args)
@@ -970,8 +903,7 @@ class KnowledgeBaseToolsMixin:
             )
         self._record_knowledge_citations(info)
         result = self._public_image(info)
-        result["attach_status"] = "attached"
-        result["attach_message"] = "原图已加入下一轮模型输入。"
+        result["image_attached"] = True
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
 
     def _queue_image_view(self, info, *, focus=""):
@@ -981,15 +913,10 @@ class KnowledgeBaseToolsMixin:
         queue_image = getattr(self, "queue_image_for_next_turn", None)
         if not callable(queue_image):
             return "[知识库图片] 当前 Agent 不支持原生图片输入。"
-        context = (
-            "[知识库图片原图]\n"
-            f"图题: {info.get('display_label') or info.get('title') or ''}\n"
-            f"来源: {info.get('source_file_name') or ''}\n"
-            f"引用: {info.get('citation_label') or info.get('title') or '图片'}\n"
-        )
+        context = "[知识库图片原图]\n"
         if focus:
             context += f"本次查看重点: {focus}\n"
-        context += "请直接查看原图，并结合工具结果回答用户问题。"
+        context += "请直接查看原图并结合上一条工具结果回答。"
         _metadata, error = queue_image(
             path,
             name=info.get("display_label") or info.get("title") or os.path.basename(path),
