@@ -612,12 +612,15 @@ def reference_for_chunk(data_id=None, chunk_index=0, kb_id=None, ref=None):
     )
 
 
-def list_chunks(data_id=None, kb_id=None, ref=None, preview_chars=80, limit=400):
+def list_chunks(
+    data_id=None, kb_id=None, ref=None, preview_chars=80, offset=0, limit=20
+):
     return _runtime().retrieval.list_chunks(
         data_id=data_id,
         kb_id=kb_id,
         ref=ref,
         preview_chars=preview_chars,
+        offset=offset,
         limit=limit,
     )
 

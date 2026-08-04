@@ -506,13 +506,21 @@ class KnowledgeBaseRetriever:
             ttl = fields.get("title") or ""
             if doc_candidates and not self._doc_matches_candidates(rel, ttl, doc_candidates):
                 continue
-            key = (fields.get("data_id"), int(fields.get("chunk_index") or 0))
-            if key in seen:
-                continue
-            seen.add(key)
             score = float(getattr(row, "score", 0.0) or 0.0)
             data_id = fields.get("data_id") or ""
             chunk_index = int(fields.get("chunk_index") or 0)
+            content_type = self._record_content_type(fields)
+            structure_part_index = int(fields.get("structure_part_index") or 0)
+            # Structured search rows may match any part of a table/list/etc.
+            # Expose the first part as the stable read anchor so callers can
+            # consume the structure once, in its original order.
+            public_chunk_index = chunk_index
+            if str(fields.get("structure_id") or "") and content_type != "prose":
+                public_chunk_index = max(0, chunk_index - structure_part_index)
+            key = (data_id, public_chunk_index)
+            if key in seen:
+                continue
+            seen.add(key)
             body = clean_public_text(fields.get("body") or "")
             # Reference fields are normalized once for the whole result set in
             # search(); building this raw hit and enriching it is enough here.
@@ -521,16 +529,19 @@ class KnowledgeBaseRetriever:
                 "score": round(score, 6),
                 "score_type": score_type,
                 "data_id": data_id,
-                "chunk_index": chunk_index,
+                "chunk_index": public_chunk_index,
                 "title": ttl[:160],
                 "file_name": rel,
                 "source_file_name": "",
                 "ref": f"{kb['id']}/{rel}",
                 "abspath": os.path.join(kb["path"], rel),
                 "kind": fields.get("kind") or "text",
-                "content_type": self._record_content_type(fields),
+                "content_type": content_type,
                 "structure_title": fields.get("structure_title") or "",
-                "structure_part_index": int(fields.get("structure_part_index") or 0),
+                # The public cursor points at the structure's first part. Keep
+                # its public part index aligned with that cursor; the matched
+                # part is a retrieval implementation detail.
+                "structure_part_index": 0 if public_chunk_index != chunk_index else structure_part_index,
                 "structure_part_count": max(1, int(fields.get("structure_part_count") or 1)),
                 "image_path": fields.get("image_path") or "",
                 "source_data_id": fields.get("source_data_id") or "",
@@ -677,9 +688,13 @@ class KnowledgeBaseRetriever:
         if mode == "rrf":
             channel_top_k = min(30, max(top_k, top_k * self._query_factor))
         by_key = {}
+        channel_hits = {"ref_exact": [], "vector": [], "sparse": []}
 
-        def add_hits(hits: list[dict], source_weight: float, channel: str) -> None:
+        def add_hits(
+            hits: list[dict], source_weight: float, channel: str, *, tied_rank: int | None = None
+        ) -> None:
             for index, result in enumerate(hits or [], 1):
+                channel_rank = tied_rank if tied_rank is not None else index
                 key = (result.get("data_id"), result.get("chunk_index"))
                 if not key[0]:
                     continue
@@ -690,9 +705,9 @@ class KnowledgeBaseRetriever:
                     item["_sources"] = []
                     item["_channel_ranks"] = {}
                     by_key[key] = item
-                item["_rrf"] += source_weight / (60.0 + index)
+                item["_rrf"] += source_weight / (60.0 + channel_rank)
                 item["_sources"].append(result.get("score_type") or "unknown")
-                item["_channel_ranks"].setdefault(channel, index)
+                item["_channel_ranks"].setdefault(channel, channel_rank)
                 # The fused RRF score always accumulates above; this only picks
                 # which channel's metadata (snippet/body/title) the merged hit
                 # displays.  Prefer a sparse hit, then any zvec hit, over an
@@ -761,38 +776,51 @@ class KnowledgeBaseRetriever:
             # asset must pin to the top regardless of the retrieval channel, so
             # this runs before the mode gate below.  Its high weight (4.0) makes
             # such a hit outrank ordinary dense/sparse results after RRF fusion.
-            add_hits(
+            channel_hits["ref_exact"].extend(
                 self._search_exact_image_refs(
                     kb, query, channel_top_k, snippet_chars,
                     file_name=scoped_file_names, title=title,
                     evidence_types=requested_evidence,
-                ),
-                4.0,
-                "ref_exact",
+                )
             )
             if not target_health.get(kb["id"], False):
                 self._record_search_error(kb, "zvec", "Zvec index directory is missing")
                 continue
             if mode in ("rrf", "vector") and dense_vector is not None:
-                add_hits(
+                channel_hits["vector"].extend(
                     self._search_one_zvec(
                         kb, query, channel_top_k, snippet_chars,
                         file_name=scoped_file_names, title=title, query_vector=dense_vector,
                         evidence_types=requested_evidence,
-                    ),
-                    self._vector_weight,
-                    "vector",
+                    )
                 )
             if mode in ("rrf", "sparse") and sparse_vector is not None:
-                add_hits(
+                channel_hits["sparse"].extend(
                     self._search_one_zvec_sparse(
                         kb, query, channel_top_k, snippet_chars,
                         file_name=scoped_file_names, title=title, query_vector=sparse_vector,
                         evidence_types=requested_evidence,
-                    ),
-                    self._sparse_weight,
-                    "sparse",
+                    )
                 )
+        # Each retrieval channel must be ranked across all selected knowledge
+        # bases before RRF. Dense Zvec scores are cosine distances (lower is
+        # better), while sparse scores are similarities (higher is better).
+        # Stable identity tie-breakers make the result independent from the
+        # registry order. All exact references are equally exact and therefore
+        # receive the same rank/contribution.
+        identity = lambda item: (
+            str(item.get("data_id") or ""), int(item.get("chunk_index") or 0)
+        )
+        channel_hits["ref_exact"].sort(key=identity)
+        channel_hits["vector"].sort(
+            key=lambda item: (float(item.get("score") or 0.0), identity(item))
+        )
+        channel_hits["sparse"].sort(
+            key=lambda item: (-float(item.get("score") or 0.0), identity(item))
+        )
+        add_hits(channel_hits["ref_exact"], 4.0, "ref_exact", tied_rank=1)
+        add_hits(channel_hits["vector"], self._vector_weight, "vector")
+        add_hits(channel_hits["sparse"], self._sparse_weight, "sparse")
         results = list(by_key.values())
         for result in results:
             sources = []
@@ -807,7 +835,13 @@ class KnowledgeBaseRetriever:
             result.update(with_reference(result, kind=result.get("kind")))
             result.pop("abspath", None)
             result.pop("image_abspath", None)
-        results.sort(key=lambda result: result["score"], reverse=True)
+        results.sort(
+            key=lambda result: (
+                -float(result.get("score") or 0.0),
+                str(result.get("data_id") or ""),
+                int(result.get("chunk_index") or 0),
+            )
+        )
         results = results[:top_k]
         for final_rank, result in enumerate(results, 1):
             result["final_rank"] = final_rank
@@ -903,8 +937,10 @@ class KnowledgeBaseRetriever:
         part_index = int(first.get("structure_part_index") or 0)
         part_count = max(1, int(first.get("structure_part_count") or 1))
         if structure_id and content_type != "prose":
-            range_start = max(0, start - part_index)
-            range_stop = range_start + part_count
+            # Search exposes the first structure part, while continuation calls
+            # may intentionally start later. Never rewind a requested cursor.
+            range_start = start
+            range_stop = start + max(1, part_count - part_index)
         else:
             range_start = start
             range_stop = start + span
@@ -913,7 +949,6 @@ class KnowledgeBaseRetriever:
         consumed = 0
         end_index = range_start - 1
         next_index = None
-        truncated_within_chunk = False
         required_max_chars = None
         for index in range(range_start, range_stop):
             try:
@@ -925,6 +960,14 @@ class KnowledgeBaseRetriever:
             if not doc:
                 break
             fields = self._doc_fields(doc)
+            if str(fields.get("data_id") or "") != resolved_data_id:
+                break
+            current_structure_id = str(fields.get("structure_id") or "")
+            if structure_id:
+                if current_structure_id != structure_id:
+                    break
+            elif current_structure_id:
+                break
             body = clean_public_text(fields.get("body") or "")
             separator = 2 if bodies else 0
             if bodies and consumed + separator + len(body) > max_chars:
@@ -936,7 +979,6 @@ class KnowledgeBaseRetriever:
                     cut = max_chars
                 bodies.append(body[:cut].rstrip() + "\n…[内容已截断]")
                 consumed = len(bodies[-1])
-                truncated_within_chunk = True
                 required_max_chars = len(body)
                 end_index = index
                 break
@@ -951,24 +993,30 @@ class KnowledgeBaseRetriever:
             next_fields = self._doc_fields(next_doc) if next_doc else {}
         except Exception:
             next_fields = {}
-        same_structure = bool(
+        same_document = bool(
             next_fields
-            and structure_id
-            and str(next_fields.get("structure_id") or "") == structure_id
+            and str(next_fields.get("data_id") or "") == resolved_data_id
         )
-        same_section = bool(
-            next_fields
-            and str(next_fields.get("header_path") or "")
-            == str(first.get("header_path") or "")
-        )
-        relevant_following_content = (
-            same_structure if structure_id and content_type != "prose" else same_section
-        )
-        has_more = bool(
-            truncated_within_chunk or next_index is not None or relevant_following_content
-        )
-        if next_index is None and relevant_following_content:
+        if structure_id:
+            relevant_following_content = bool(
+                same_document
+                and str(next_fields.get("structure_id") or "") == structure_id
+            )
+        else:
+            relevant_following_content = bool(
+                same_document and not str(next_fields.get("structure_id") or "")
+            )
+        has_more = bool(required_max_chars or next_index is not None or relevant_following_content)
+        if next_index is None and relevant_following_content and required_max_chars is None:
             next_index = probe_index
+        if next_index is not None and next_index <= end_index:
+            next_index = end_index + 1
+        continuation = {
+            "has_more": has_more,
+            "next_chunk_index": next_index if has_more else None,
+        }
+        if required_max_chars is not None:
+            continuation["required_max_chars"] = required_max_chars
         return {
             "data_id": resolved_data_id,
             "source_file_name": first.get("source_file_name") or first.get("title") or "",
@@ -978,14 +1026,7 @@ class KnowledgeBaseRetriever:
             "start_chunk_index": range_start,
             "end_chunk_index": max(range_start, end_index),
             "content": "\n\n".join(bodies),
-            "continuation": {
-                "has_more": has_more,
-                "next_chunk_index": next_index if has_more else None,
-                "same_structure": same_structure,
-                "same_section": same_section,
-                "truncated_within_chunk": truncated_within_chunk,
-                "required_max_chars": required_max_chars,
-            },
+            "continuation": continuation,
         }
 
     def read_chunk(
@@ -1069,7 +1110,8 @@ class KnowledgeBaseRetriever:
         kb_id: str | None = None,
         ref: str | None = None,
         preview_chars: int = 80,
-        limit: int = 400,
+        offset: int = 0,
+        limit: int = 20,
     ) -> dict:
         target, data_id = self._resolve_zvec_target(data_id=data_id, kb_id=kb_id, ref=ref)
         if target is None or not data_id:
@@ -1077,58 +1119,67 @@ class KnowledgeBaseRetriever:
         path = self._zvec_path(target["path"])
         if not os.path.isdir(path):
             return {"error": "[索引未就绪]"}
-        # Chunks are written contiguously as 0..n-1 (build.py enumerates them;
-        # image assets carry their own ::image:: data_id and never interleave),
-        # so probe in windows and stop at the first window that comes back short
-        # instead of always fetching `limit` (400) doc ids for a small document.
+        # Fetch only the requested page plus one row. The extra row is the
+        # authoritative has_more probe; no fake total or fixed 400-row ceiling.
+        offset = max(0, int(offset))
         limit = max(1, int(limit))
-        window = min(64, limit)
         chunks, title, file_name = [], "", ""
         try:
             with self._zvec_open(path) as col:
-                start = 0
-                while start < limit:
-                    end = min(start + window, limit)
-                    ids = [self._zvec_doc_id(data_id, index) for index in range(start, end)]
-                    got = col.fetch(
-                        ids,
-                        output_fields=[
-                            field
-                            for field in (
-                                "data_id", "chunk_index", "file_name", "title", "body",
-                                "header_path", "content_type", "structure_title",
-                            )
-                            if field in self._output_fields_for_kb(target)
-                        ],
-                        include_vector=False,
-                    )
-                    found = 0
-                    for index in range(start, end):
-                        doc = got.get(self._zvec_doc_id(data_id, index)) if isinstance(got, dict) else None
-                        if not doc:
-                            continue
-                        found += 1
-                        fields = getattr(doc, "fields", None) or {}
-                        body = fields.get("body") or ""
-                        title = title or fields.get("title") or ""
-                        file_name = file_name or fields.get("file_name") or ""
-                        preview = re.sub(r"\s+", " ", body).strip()[:preview_chars]
-                        chunks.append({
-                            "chunk_index": int(fields.get("chunk_index") or index),
-                            "chars": len(body),
-                            "preview": preview,
-                            "content_type": self._record_content_type(fields),
-                            "source_section": section_label(fields.get("header_path")),
-                            "structure_title": fields.get("structure_title") or "",
-                        })
-                    if found < len(ids):
+                indexes = list(range(offset, offset + limit + 1))
+                ids = [self._zvec_doc_id(data_id, index) for index in indexes]
+                got = col.fetch(
+                    ids,
+                    output_fields=[
+                        field
+                        for field in (
+                            "data_id", "chunk_index", "file_name", "title", "body",
+                            "header_path", "content_type", "structure_title",
+                        )
+                        if field in self._output_fields_for_kb(target)
+                    ],
+                    include_vector=False,
+                )
+                found_rows = []
+                for index in indexes:
+                    doc = got.get(self._zvec_doc_id(data_id, index)) if isinstance(got, dict) else None
+                    if not doc:
                         break
-                    start = end
+                    fields = getattr(doc, "fields", None) or {}
+                    if str(fields.get("data_id") or "") != data_id:
+                        break
+                    found_rows.append((index, fields))
+                has_more = len(found_rows) > limit
+                for index, fields in found_rows[:limit]:
+                    body = fields.get("body") or ""
+                    title = title or fields.get("title") or ""
+                    file_name = file_name or fields.get("file_name") or ""
+                    preview = re.sub(r"\s+", " ", body).strip()[:preview_chars]
+                    chunks.append({
+                        "chunk_index": int(fields.get("chunk_index") or index),
+                        "chars": len(body),
+                        "preview": preview,
+                        "content_type": self._record_content_type(fields),
+                        "source_section": section_label(fields.get("header_path")),
+                        "structure_title": fields.get("structure_title") or "",
+                    })
         except Exception as error:
             return {"error": f"[Zvec 读取失败] {error}"}
-        if not chunks:
+        if not chunks and offset == 0:
             return {"error": f"[未找到] data_id={data_id} 无 chunk"}
-        return {"title": title, "file_name": file_name, "n_chunks": len(chunks), "chunks": chunks}
+        result = {
+            "data_id": data_id,
+            "title": title,
+            "file_name": file_name,
+            "offset": offset,
+            "limit": limit,
+            "returned": len(chunks),
+            "has_more": has_more,
+            "chunks": chunks,
+        }
+        if has_more:
+            result["next_offset"] = offset + len(chunks)
+        return result
 
     def read_image(
         self,
@@ -1187,15 +1238,26 @@ class KnowledgeBaseRetriever:
             }
         if len(matches) > 1:
             candidates = []
-            for kb, fields in matches[:8]:
-                candidates.append(public_reference({
-                    "kb_id": kb["id"],
-                    "data_id": fields.get("data_id", ""),
-                    "image_id": fields.get("image_id", ""),
-                    "ref_key": fields.get("ref_key", ""),
-                    "display_label": fields.get("display_label") or fields.get("title") or "图片",
-                    "source_file_name": fields.get("source_file_name") or fields.get("file_name") or "",
-                }, kind="image"))
+            for kb, fields in matches[:10]:
+                rel = str(fields.get("file_name") or "")
+                source_name = str(fields.get("source_file_name") or "").strip()
+                if not source_name:
+                    source_name = self._imported_document_titles(kb["path"]).get(rel, "")
+                ref_key_value = str(fields.get("ref_key") or "").strip()
+                label = str(
+                    fields.get("display_label")
+                    or fields.get("caption")
+                    or ref_key_value
+                    or "图片"
+                ).strip()
+                candidates.append({
+                    "data_id": fields.get("data_id") or "",
+                    "ref_key": ref_key_value,
+                    "display_label": label,
+                    "source_hint": (
+                        f"《{source_name}》：“{label}”" if source_name else label
+                    ),
+                })
             return {
                 "error_code": "image_ambiguous",
                 "error": "[图片目标不明确] 请使用 kb_search 返回的完整 data_id。",

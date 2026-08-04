@@ -33,8 +33,6 @@ class _Backend:
             "continuation": {
                 "has_more": False,
                 "next_chunk_index": None,
-                "same_structure": False,
-                "same_section": False,
             },
         }
 
@@ -74,14 +72,22 @@ class _Backend:
         }]
 
     @staticmethod
-    def list_chunks(**_kwargs):
+    def list_chunks(**kwargs):
+        offset = int(kwargs.get("offset") or 0)
+        limit = int(kwargs.get("limit") or 20)
+        end = min(45, offset + limit)
         return {
+            "data_id": "kb-test::documents/source.md",
             "title": "source.pdf",
             "file_name": "documents/source.md",
-            "n_chunks": 45,
+            "offset": offset,
+            "limit": limit,
+            "returned": max(0, end - offset),
+            "has_more": end < 45,
+            "next_offset": end if end < 45 else None,
             "chunks": [
                 {"chunk_index": index, "chars": 100 + index, "preview": f"第 {index} 段 ![](documents/image-{index}.jpg)"}
-                for index in range(45)
+                for index in range(offset, end)
             ],
         }
 
@@ -290,6 +296,24 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         self.assertTrue(preview.rstrip().endswith("|"))
         self.assertEqual(result["source_hint"], "《source.pdf》：“重要财务指标”")
 
+    def test_source_hint_keeps_section_and_structure_title(self):
+        result = _Handler._clean_hit({
+            "kind": "text",
+            "data_id": "kb-test::documents/source.md",
+            "chunk_index": 2,
+            "source_file_name": "source.pdf",
+            "header_path": "/公司/财务数据/",
+            "content_type": "table",
+            "structure_title": "重要财务指标",
+            "body": "| 指标 | 值 |",
+        })
+
+        self.assertEqual(result["source_section"], "财务数据")
+        self.assertEqual(
+            result["source_hint"],
+            "《source.pdf》：“财务数据”——“重要财务指标”",
+        )
+
     def test_search_payload_compacts_image_context_and_hides_scope(self):
         hit = {
             "kind": "image",
@@ -388,14 +412,59 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
             "preview_chars": 60,
         }, None).data)
 
-        self.assertEqual(payload["total"], 45)
+        self.assertNotIn("total", payload)
         self.assertEqual(payload["offset"], 20)
         self.assertEqual(payload["limit"], 10)
+        self.assertEqual(payload["returned"], 10)
         self.assertTrue(payload["has_more"])
         self.assertEqual(payload["next_offset"], 30)
         self.assertEqual(len(payload["chunks"]), 10)
         self.assertNotIn("documents/image-20.jpg", json.dumps(payload))
         self.assertIn("[图片]", payload["chunks"][0]["preview"])
+
+    def test_chunk_list_resolves_a_compatibility_ref_to_the_stable_data_id(self):
+        payload = json.loads(_Handler().do_kb_list({
+            "ref": "kb-test/documents/source.md",
+        }, None).data)
+
+        self.assertEqual(payload["data_id"], "kb-test::documents/source.md")
+
+    def test_image_ambiguity_returns_safe_candidates_for_retry(self):
+        original = _Backend.read_image
+        try:
+            _Backend.read_image = staticmethod(lambda **_kwargs: {
+                "error_code": "image_ambiguous",
+                "error": r"C:\internal\active\processed\secret.md",
+                "candidates": [
+                    {
+                        "data_id": "kb-test::documents/a.md::image::1",
+                        "ref_key": "图1",
+                        "display_label": "图1 架构",
+                        "source_hint": "《a.pdf》：“图1 架构”",
+                        "kb_id": "kb-test",
+                        "file_name": "documents/a.md",
+                    },
+                    {
+                        "data_id": "kb-test::documents/b.md::image::1",
+                        "ref_key": "图1",
+                        "display_label": "图1 流程",
+                        "source_hint": "《b.pdf》：“图1 流程”",
+                        "image_abspath": r"C:\internal\b.png",
+                    },
+                ],
+            })
+            outcome = _Handler().do_kb_image_read({"ref_key": "图1"}, None)
+        finally:
+            _Backend.read_image = original
+
+        payload = json.loads(outcome.data)
+        self.assertEqual(payload["error_code"], "image_ambiguous")
+        self.assertEqual(len(payload["candidates"]), 2)
+        self.assertEqual(
+            set(payload["candidates"][0]),
+            {"data_id", "ref_key", "display_label", "source_hint"},
+        )
+        self.assertNotIn("internal", outcome.data)
 
     def test_read_removes_processing_header_and_image_path(self):
         original = _Backend.read_content

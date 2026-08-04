@@ -164,7 +164,7 @@ class RetrievalContractTests(unittest.TestCase):
         self.assertEqual(hit["matched_by"], ["ref_exact"])
         self.assertNotIn("image_abspath", hit)
 
-    def test_table_read_assembles_the_complete_structure_and_reports_following_content(self):
+    def test_table_read_continuation_starts_at_requested_part_without_rewinding(self):
         data_id = "kb-a::documents/a.md"
         rows = {
             4: {
@@ -216,15 +216,16 @@ class RetrievalContractTests(unittest.TestCase):
             max_chars=4000,
         )
 
-        self.assertEqual(result["start_chunk_index"], 4)
+        self.assertEqual(result["start_chunk_index"], 5)
         self.assertEqual(result["end_chunk_index"], 5)
-        self.assertIn("收入", result["content"])
+        self.assertNotIn("收入", result["content"])
         self.assertIn("资产负债率", result["content"])
         self.assertIn("22.3%", result["content"])
         self.assertFalse(result["continuation"]["has_more"])
         self.assertIsNone(result["continuation"]["next_chunk_index"])
-        self.assertFalse(result["continuation"]["same_structure"])
-        self.assertTrue(result["continuation"]["same_section"])
+        self.assertEqual(
+            set(result["continuation"]), {"has_more", "next_chunk_index"}
+        )
 
     def test_read_does_not_point_continuation_back_to_a_partially_returned_chunk(self):
         data_id = "kb-a::documents/report.md"
@@ -251,9 +252,167 @@ class RetrievalContractTests(unittest.TestCase):
         )
 
         self.assertTrue(result["continuation"]["has_more"])
-        self.assertTrue(result["continuation"]["truncated_within_chunk"])
         self.assertIsNone(result["continuation"]["next_chunk_index"])
         self.assertGreater(result["continuation"]["required_max_chars"], 500)
+        self.assertEqual(
+            set(result["continuation"]),
+            {"has_more", "next_chunk_index", "required_max_chars"},
+        )
+
+    def test_dense_channel_is_ranked_globally_across_knowledge_bases(self):
+        self.retriever._search_exact_image_refs = lambda *_args, **_kwargs: []
+
+        def dense(kb, *_args, **_kwargs):
+            hit = _text_hit(kb["id"], f"documents/{kb['id']}.md")
+            # Dense Zvec scores are cosine distances: lower is better.
+            hit["score"] = 0.8 if kb["id"] == "kb-a" else 0.2
+            return [hit]
+
+        self.retriever._search_one_zvec = dense
+        first = self.retriever.search("alpha", mode="vector", top_k=2)["results"]
+        self.retriever._registry.kbs.reverse()
+        second = self.retriever.search("alpha", mode="vector", top_k=2)["results"]
+
+        self.assertEqual([item["kb_id"] for item in first], ["kb-b", "kb-a"])
+        self.assertEqual(
+            [item["data_id"] for item in first],
+            [item["data_id"] for item in second],
+        )
+        self.assertEqual(
+            [item["channel_ranks"]["vector"] for item in first], [1, 2]
+        )
+
+    def test_equal_exact_references_receive_the_same_global_rank(self):
+        self.retriever._search_one_zvec = lambda *_args, **_kwargs: []
+
+        def exact(kb, *_args, **_kwargs):
+            hit = _text_hit(kb["id"], f"documents/{kb['id']}.md")
+            hit.update({
+                "kind": "image",
+                "score_type": "ref_exact",
+                "data_id": f"{kb['id']}::documents/{kb['id']}.md::image::1",
+            })
+            return [hit]
+
+        self.retriever._search_exact_image_refs = exact
+        results = self.retriever.search("图1", mode="vector", top_k=2)["results"]
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            [item["channel_ranks"]["ref_exact"] for item in results], [1, 1]
+        )
+        self.assertEqual(results[0]["score"], results[1]["score"])
+
+    def test_structured_search_hit_exposes_the_first_part_as_read_anchor(self):
+        fields = {
+            "data_id": "kb-a::documents/a.md",
+            "chunk_index": 10,
+            "kind": "text",
+            "file_name": "documents/a.md",
+            "title": "a.pdf",
+            "body": "| 指标 | 数值 |",
+            "content_type": "table",
+            "structure_id": "table-1",
+            "structure_part_index": 2,
+            "structure_part_count": 4,
+        }
+        other_part = {
+            **fields,
+            "chunk_index": 9,
+            "structure_part_index": 1,
+            "body": "| 其他指标 | 数值 |",
+        }
+
+        class Collection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def query(*_args, **_kwargs):
+                return [
+                    SimpleNamespace(fields=fields, score=0.1),
+                    SimpleNamespace(fields=other_part, score=0.2),
+                ]
+
+        kb = self.retriever._registry.kbs[0]
+        self.retriever._zvec_open = lambda _path: Collection()
+        self.retriever._require_zvec = lambda: SimpleNamespace(
+            Query=lambda *_args, **_kwargs: object()
+        )
+        hits = self.retriever._search_one_zvec(
+            kb, "指标", 5, 120,
+            file_name=None, title=None, query_vector=[1.0],
+        )
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["chunk_index"], 8)
+        self.assertEqual(hits[0]["structure_part_index"], 0)
+
+    def test_chunk_page_fetches_only_requested_window_plus_one(self):
+        requested = []
+        data_id = "kb-a::documents/a.md"
+
+        class Collection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def fetch(ids, **_kwargs):
+                requested.extend(ids)
+                return {
+                    doc_id: SimpleNamespace(fields={
+                        "data_id": data_id,
+                        "chunk_index": index,
+                        "title": "a.pdf",
+                        "file_name": "documents/a.md",
+                        "body": f"第 {index} 段",
+                    })
+                    for index, doc_id in zip(range(500, 504), ids)
+                }
+
+        self.retriever._zvec_open = lambda _path: Collection()
+        page = self.retriever.list_chunks(
+            data_id=data_id, kb_id="kb-a", offset=500, limit=3
+        )
+
+        self.assertEqual(len(requested), 4)
+        self.assertTrue(all(":50" in doc_id for doc_id in requested))
+        self.assertEqual(page["offset"], 500)
+        self.assertEqual(page["returned"], 3)
+        self.assertTrue(page["has_more"])
+        self.assertEqual(page["next_offset"], 503)
+        self.assertNotIn("n_chunks", page)
+
+    def test_ambiguous_image_reference_returns_only_public_candidate_fields(self):
+        def image_rows(kb, **_kwargs):
+            return [{
+                "kind": "image",
+                "data_id": f"{kb['id']}::documents/{kb['id']}.md::image::1",
+                "file_name": f"documents/{kb['id']}.md",
+                "source_file_name": f"{kb['id']}.pdf",
+                "image_id": "image-1",
+                "ref_key": "图1",
+                "display_label": f"图1 {kb['id']}",
+                "image_path": f"processed/{kb['id']}/image.png",
+            }]
+
+        self.retriever._query_image_rows = image_rows
+        result = self.retriever.read_image(ref_key="图1")
+
+        self.assertEqual(result["error_code"], "image_ambiguous")
+        self.assertEqual(len(result["candidates"]), 2)
+        self.assertEqual(
+            set(result["candidates"][0]),
+            {"data_id", "ref_key", "display_label", "source_hint"},
+        )
+        self.assertNotIn("processed/", str(result["candidates"]))
+        self.assertNotIn("kb_id", str(result["candidates"]))
 
 
 if __name__ == "__main__":

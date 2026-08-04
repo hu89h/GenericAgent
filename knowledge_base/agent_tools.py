@@ -90,7 +90,7 @@ KB_TOOL_SCHEMAS = [
                         "minimum": 500,
                         "maximum": 8000,
                         "default": 4000,
-                        "description": "单次正文上限。若 continuation.truncated_within_chunk=true，请对同一 chunk_index 提高该值后重读。",
+                        "description": "单次正文上限。若 continuation 返回 required_max_chars，请对同一 chunk_index 提高该值后重读。",
                     },
                 },
                 "required": ["chunk_index"],
@@ -346,8 +346,6 @@ class KnowledgeBaseToolsMixin:
         structure_title = cls._clip_text(hit.get("structure_title"), 240)
         if structure_title:
             result["structure_title"] = structure_title
-            if content_type != "prose":
-                result["source_section"] = structure_title
         part_count = max(1, int(hit.get("structure_part_count") or 1))
         if part_count > 1:
             result["structure_part_index"] = int(hit.get("structure_part_index") or 0)
@@ -455,7 +453,18 @@ class KnowledgeBaseToolsMixin:
             ).strip()
         else:
             section = str(reference.get("source_section") or "").strip()
-        return f"《{name}》：“{section}”" if section else f"《{name}》"
+        structure_title = str(reference.get("structure_title") or "").strip()
+        hint = f"《{name}》：“{section}”" if section else f"《{name}》"
+        if (
+            reference.get("kind") != "image"
+            and structure_title
+            and structure_title != section
+        ):
+            hint += (
+                f"——“{structure_title}”"
+                if section else f"：“{structure_title}”"
+            )
+        return hint
 
     @classmethod
     def _clean_document(cls, document):
@@ -638,9 +647,10 @@ class KnowledgeBaseToolsMixin:
         structure_title = self._clip_text(content.get("structure_title"), 240)
         if structure_title:
             result["structure_title"] = structure_title
-            if isinstance(reference, dict):
-                reference = {**reference, "source_section": structure_title}
-        source_hint = self._source_hint(reference)
+        source_hint = self._source_hint({
+            **(reference if isinstance(reference, dict) else {}),
+            "structure_title": structure_title,
+        })
         if source_hint:
             result["source_hint"] = source_hint
         return self._anchor_outcome(
@@ -671,7 +681,8 @@ class KnowledgeBaseToolsMixin:
                     ref=ref,
                     kb_id=self._scope_read_kb_id(data_id=data_id, ref=ref),
                     preview_chars=preview,
-                    limit=400,
+                    offset=offset,
+                    limit=page_limit,
                 )
             except Exception:
                 return self._anchor_outcome(
@@ -690,10 +701,8 @@ class KnowledgeBaseToolsMixin:
                 ) or {}
             except Exception:
                 source = {}
-            all_chunks = raw_result.get("chunks") or []
-            total = int(raw_result.get("n_chunks") or len(all_chunks))
             chunks = []
-            for chunk in all_chunks[offset:offset + page_limit]:
+            for chunk in raw_result.get("chunks") or []:
                 preview_text = self._clip_text(chunk.get("preview"), preview)
                 item = {
                     "chunk_index": int(chunk.get("chunk_index", 0)),
@@ -712,11 +721,11 @@ class KnowledgeBaseToolsMixin:
                     item["structure_title"] = structure_title
                 chunks.append(item)
             result = {
-                "data_id": data_id,
-                "total": total,
+                "data_id": str(raw_result.get("data_id") or data_id or ""),
                 "offset": offset,
                 "limit": page_limit,
-                "has_more": offset + len(chunks) < total,
+                "returned": len(chunks),
+                "has_more": bool(raw_result.get("has_more")),
                 "chunks": chunks,
             }
             source_name = str(source.get("source_file_name") or "").strip()
@@ -726,7 +735,9 @@ class KnowledgeBaseToolsMixin:
             if source_hint:
                 result["source_hint"] = source_hint
             if result["has_more"]:
-                result["next_offset"] = offset + len(chunks)
+                result["next_offset"] = int(
+                    raw_result.get("next_offset") or offset + len(chunks)
+                )
         else:
             scope = self._knowledge_scope()
             try:
@@ -816,16 +827,18 @@ class KnowledgeBaseToolsMixin:
                             kb_id=item.get("kb_id") or kb_id,
                         ):
                             continue
-                        if item is not candidate and item.get("data_id"):
-                            item = self._kb_backend().read_image(
-                                kb_id=kb_id, data_id=item.get("data_id")
-                            )
-                        if isinstance(item, dict) and not item.get("error"):
-                            matches.append(item)
+                        if isinstance(item, dict) and item.get("data_id"):
+                            matches.append((kb_id, item))
                 if len(matches) == 1:
-                    info = matches[0]
+                    matched_kb_id, info = matches[0]
+                    if not info.get("image_abspath"):
+                        info = self._kb_backend().read_image(
+                            kb_id=matched_kb_id, data_id=info.get("data_id")
+                        )
                 elif len(matches) > 1:
-                    return None, self._safe_error("kb_image_read", "invalid_argument")
+                    return None, self._image_ambiguity_result(
+                        [item for _kb_id, item in matches]
+                    )
                 else:
                     info = {"error": "[未找到图片资产]"}
             else:
@@ -835,6 +848,23 @@ class KnowledgeBaseToolsMixin:
                 info = self._kb_backend().read_image(**kwargs)
         except Exception:
             return None, self._safe_error("kb_image_read", "image_read_failed")
+        if isinstance(info, dict) and info.get("error_code") == "image_ambiguous":
+            candidates = [
+                item for item in (info.get("candidates") or [])
+                if isinstance(item, dict)
+                and self._scope_allows_target(data_id=item.get("data_id"))
+            ]
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                try:
+                    info = self._kb_backend().read_image(
+                        kb_id=self._scope_read_kb_id(data_id=candidate.get("data_id")),
+                        data_id=candidate.get("data_id"),
+                    )
+                except Exception:
+                    return None, self._safe_error("kb_image_read", "image_read_failed")
+            else:
+                return None, self._image_ambiguity_result(candidates)
         if not isinstance(info, dict) or info.get("error"):
             return None, self._safe_error("kb_image_read", "image_unavailable")
         if not self._scope_allows_target(
@@ -845,6 +875,42 @@ class KnowledgeBaseToolsMixin:
         ):
             return None, self._safe_error("kb_image_read", "scope_denied")
         return info, None
+
+    @classmethod
+    def _image_ambiguity_result(cls, candidates):
+        public_candidates = []
+        seen = set()
+        for candidate in candidates or []:
+            if not isinstance(candidate, dict):
+                continue
+            data_id = str(candidate.get("data_id") or "").strip()
+            if not data_id or data_id in seen:
+                continue
+            seen.add(data_id)
+            item = {"data_id": data_id}
+            ref_key = cls._clip_text(candidate.get("ref_key"), 80)
+            label = cls._clip_text(
+                candidate.get("display_label") or ref_key or "图片", 200
+            )
+            source_hint = cls._clip_text(
+                candidate.get("source_hint") or cls._source_hint({
+                    **candidate,
+                    "kind": "image",
+                    "display_label": label,
+                }),
+                320,
+            )
+            item["ref_key"] = ref_key
+            item["display_label"] = label
+            item["source_hint"] = source_hint
+            public_candidates.append(item)
+            if len(public_candidates) >= 10:
+                break
+        return json.dumps({
+            "error_code": "image_ambiguous",
+            "message": "图片编号对应多个候选，请选择候选的 data_id 后重试。",
+            "candidates": public_candidates,
+        }, ensure_ascii=False, indent=2)
 
     @classmethod
     def _public_image(cls, info):
