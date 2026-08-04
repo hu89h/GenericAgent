@@ -59,6 +59,21 @@ def has_tool_payload(chunks):
         return True
     return False
 
+
+def final_response_failure_message(reason="incomplete"):
+    english = os.environ.get("GA_LANG", "").strip().lower() == "en"
+    if reason == "max_turns":
+        return (
+            "I couldn't produce a complete answer within the allowed turns. Please try again."
+            if english else
+            "抱歉，本次未能在允许的轮次内形成完整答复，请重试。"
+        )
+    return (
+        "I couldn't produce a complete user-facing answer. Please try again."
+        if english else
+        "抱歉，本次未能生成完整的用户可见答复，请重试。"
+    )
+
 def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                       max_turns=40, verbose=True, initial_user_content=None, yield_info=False):
     messages = [
@@ -155,7 +170,10 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
                     "无法查看工具返回的原图。请明确告知用户当前模型未启用原生图片输入。"
                 )
         messages = [{"role": "user", "content": content, "tool_results": tool_results}]   # just new message, history is kept in *Session
-    if exit_reason: handler.turn_end_callback(response, tool_calls, tool_results, turn, '', exit_reason)
+    if exit_reason:
+        handler.turn_end_callback(response, tool_calls, tool_results, turn, '', exit_reason)
+    else:
+        yield "\n" + final_response_failure_message("max_turns") + "\n"
     _hook('agent_after', locals())
     return exit_reason or {'result': 'MAX_TURNS_EXCEEDED'}
 

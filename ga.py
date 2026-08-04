@@ -7,7 +7,7 @@ if sys.stdout is None: sys.stdout = open(os.devnull, "w")
 if sys.stderr is None: sys.stderr = open(os.devnull, "w")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from agent_loop import BaseHandler, StepOutcome, json_default
+from agent_loop import BaseHandler, StepOutcome, final_response_failure_message, json_default
 from knowledge_base.agent_tools import KnowledgeBaseToolsMixin
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -525,8 +525,25 @@ class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
 
     def _retry_or_exit(self, prompt):
         self._empty_ct = getattr(self, '_empty_ct', 0) + 1
-        if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)
+        if self._empty_ct >= 3:
+            return StepOutcome(final_response_failure_message(), should_exit=True)
         return StepOutcome({}, next_prompt=prompt)
+
+    def _retry_incomplete_response(self, prompt):
+        outcome = self._retry_or_exit(prompt)
+        if outcome.should_exit:
+            yield str(outcome.data) + "\n"
+        return outcome
+
+    @staticmethod
+    def _visible_response_text(content):
+        visible = re.sub(
+            r"<(?:thinking|summary)\b[^>]*>[\s\S]*?</(?:thinking|summary)>",
+            "",
+            str(content or ""),
+            flags=re.IGNORECASE,
+        )
+        return visible.strip()
 
     def do_no_tool(self, args, response):
         '''这是一个特殊工具，由引擎自主调用，不要包含在TOOLS_SCHEMA里。
@@ -536,11 +553,23 @@ class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
         thinking = getattr(response, 'thinking', '') or ""
         if not response or (not content.strip() and not thinking.strip()):
             yield "[Warn] LLM returned an empty response. Retrying...\n"
-            return self._retry_or_exit("[System] Blank response, regenerate and tooluse")
-        if '[!!! 流异常中断' in content[-100:] or '!!!Error:' in content[-100:] or content.endswith('</summary>'):
-            return self._retry_or_exit("[System] Incomplete response. Regenerate and tooluse.")
+            return (yield from self._retry_incomplete_response(
+                "[System] The previous response was blank. Produce a complete user-facing answer from the available results. Only call a tool if a new investigation is genuinely needed."
+            ))
+        if '[!!! 流异常中断' in content[-100:] or '!!!Error:' in content[-100:]:
+            return (yield from self._retry_incomplete_response(
+                "[System] The previous response stream was interrupted. Produce a complete user-facing answer from the available results. Only call a tool if a new investigation is genuinely needed."
+            ))
         if 'max_tokens !!!]' in content[-100:]:
-            return self._retry_or_exit("[System] max_tokens limit reached. Use multi small steps to do it.")
+            return (yield from self._retry_incomplete_response(
+                "[System] The previous response reached its token limit. Give a concise, complete user-facing answer from the available results."
+            ))
+        if not self._visible_response_text(content):
+            return (yield from self._retry_incomplete_response(
+                "[System] The previous response contained only internal thinking or summary. Now provide the user-facing answer. Only call a tool if a new investigation is genuinely needed."
+            ))
+
+        self._empty_ct = 0
         
         if self._in_plan_mode() and any(kw in content for kw in ['任务完成', '全部完成', '已完成所有', '🏁']):
             if 'VERDICT' not in content and '[VERIFY]' not in content and '验证subagent' not in content:
