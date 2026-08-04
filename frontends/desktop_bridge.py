@@ -65,6 +65,11 @@ from urllib.parse import urlparse
 from aiohttp import web, WSMsgType
 
 APP_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = APP_DIR.parent.resolve()
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from knowledge_base.scope import normalize_scope as normalize_knowledge_scope
 
 
 def _serialize_mykey_mutation(method):
@@ -185,91 +190,6 @@ DEFAULT_GA_ROOT = find_default_ga_root()
 # variable. Keep it aligned with the project-owned source tree.
 os.environ.setdefault("GA_KB_CONFIG", str(DEFAULT_GA_ROOT / "data" / "kb.yaml"))
 os.environ.setdefault("GA_KB_DATA_ROOT", str(DEFAULT_GA_ROOT / "data" / "kbs"))
-
-
-def normalize_knowledge_scope(value: Any) -> dict:
-    """Normalize the scope carried by a Desktop chat session."""
-    raw = value if isinstance(value, dict) else {}
-    mode = str(raw.get("mode") or raw.get("kind") or raw.get("type") or "all").strip().lower()
-    if mode in {"multi", "selection", "selected"}:
-        mode = "selection"
-    if mode not in {"none", "all", "kb", "document", "selection"}:
-        mode = "all"
-    origin = str(raw.get("origin") or raw.get("source") or "").strip().lower()
-    if origin not in {"chat", "knowledge"}:
-        # Existing sessions with a KB/document scope were created by the KB
-        # workspace. Existing all-scope sessions remain ordinary chat sessions.
-        origin = "knowledge" if mode in {"kb", "document"} else "chat"
-    scope = {"mode": mode, "origin": origin}
-    if mode == "selection":
-        targets = raw.get("targets") or raw.get("knowledge_bases") or raw.get("knowledgeBases") or []
-        if not isinstance(targets, list):
-            targets = []
-        normalized_targets = []
-        seen_kbs = set()
-        for item in targets:
-            if not isinstance(item, dict):
-                continue
-            kb_id = str(item.get("kb_id") or item.get("kbId") or item.get("id") or "").strip()
-            if not kb_id or kb_id in seen_kbs:
-                continue
-            seen_kbs.add(kb_id)
-            target = {"kb_id": kb_id}
-            kb_name = str(item.get("kb_name") or item.get("kbName") or item.get("name") or "").strip()
-            if kb_name:
-                target["kb_name"] = kb_name
-            all_documents = bool(item.get("all_documents", item.get("allDocuments", False)))
-            documents = item.get("documents") or item.get("docs") or []
-            if not isinstance(documents, list):
-                documents = []
-            normalized_documents = []
-            seen_documents = set()
-            for document in documents:
-                if not isinstance(document, dict):
-                    continue
-                data_id = str(document.get("data_id") or document.get("dataId") or "").strip()
-                file_name = str(document.get("file_name") or document.get("fileName") or "").strip()
-                ref = str(document.get("ref") or "").strip()
-                key = data_id or ref or file_name
-                if not key or key in seen_documents:
-                    continue
-                seen_documents.add(key)
-                clean_document = {"data_id": data_id, "file_name": file_name, "ref": ref}
-                title = str(document.get("title") or "").strip()
-                if title:
-                    clean_document["title"] = title
-                normalized_documents.append(clean_document)
-            if not all_documents and not normalized_documents:
-                continue
-            target["all_documents"] = all_documents
-            if normalized_documents:
-                target["documents"] = normalized_documents
-            normalized_targets.append(target)
-        if not normalized_targets:
-            return {"mode": "none", "origin": origin}
-        scope = {"mode": "selection", "origin": origin, "targets": normalized_targets}
-        return scope
-    if mode in {"kb", "document"}:
-        kb_id = str(raw.get("kb_id") or raw.get("kbId") or "").strip()
-        if not kb_id:
-            return {"mode": "all", "origin": origin}
-        scope["kb_id"] = kb_id
-        kb_name = str(raw.get("kb_name") or raw.get("kbName") or "").strip()
-        if kb_name:
-            scope["kb_name"] = kb_name
-    if mode == "document":
-        for target, aliases in {
-            "data_id": ("data_id", "dataId"),
-            "file_name": ("file_name", "fileName"),
-            "ref": ("ref",),
-            "title": ("title",),
-        }.items():
-            item = next((raw.get(alias) for alias in aliases if raw.get(alias)), "")
-            if item:
-                scope[target] = str(item).strip()
-        if not any(scope.get(key) for key in ("data_id", "file_name", "ref")):
-            return {"mode": "all", "origin": origin}
-    return scope
 
 
 _kb_jobs: Dict[str, dict] = {}
@@ -2880,6 +2800,7 @@ def _kb_public_image_activity(activity: dict) -> dict:
         "current": _kb_display_name(activity.get("current")),
         "items": items[:3],
     }
+    return result if any(result.values()) else {}
 
 
 def _kb_progress_from_event(event: dict) -> dict:
@@ -2970,84 +2891,53 @@ def _kb_job_snapshot(job: dict) -> dict:
     failures = job.get("failures") or result.get("failures") or []
     documents = job.get("documents") or result.get("documents") or []
     snapshot = {
-        "ok": bool(job.get("ok", True)),
         "jobId": str(job.get("jobId") or ""),
         "state": str(job.get("state") or ""),
         "phase": str(job.get("phase") or ""),
         "mode": str(job.get("mode") or ""),
-        "scope": str(job.get("scope") or ""),
-        "current": _kb_display_name(job.get("current") or job.get("currentKb")),
-        "done": int(job.get("done") or 0),
-        "total": int(job.get("total") or 0),
-        "counts": dict(job.get("counts") or {}),
-        "documentProgress": dict(job.get("documentProgress") or {}),
-        "summary": dict(job.get("summary") or {}),
-        "notice": str(job.get("notice") or result.get("notice") or ""),
-        "skippedFiles": [str(item) for item in (job.get("skippedFiles") or result.get("skipped_files") or [])],
-        "replacedFiles": [str(item) for item in (job.get("replacedFiles") or result.get("replaced_files") or [])],
-        "processedFiles": [str(item) for item in (job.get("processedFiles") or result.get("processed_files") or [])],
-        "usage": _kb_public_usage(
-            job.get("usage")
-            or result.get("usage")
-            or (result.get("stats") or {}).get("usage")
-        ),
         "progress": dict(job.get("progress") or {}),
-        "documents": [
-            public
-            for public in (_kb_public_document_result(item) for item in documents)
-            if public.get("name")
-        ],
-        "imageDocuments": [
-            public
-            for public in (
-                _kb_public_image_document(item)
-                for item in (job.get("imageDocuments") or [])
-            )
-            if public.get("name")
-        ],
-        "imageActivity": _kb_public_image_activity(job.get("imageActivity") or {}),
-        "files": [
-            public
-            for public in (_kb_public_job_item(item) for item in (job.get("files") or []))
-            if public.get("name")
-        ],
-        "targets": [
-            {"name": str(item.get("name") or "")}
-            for item in (job.get("targets") or [])
-            if isinstance(item, dict) and item.get("name")
-        ],
-        "failures": [
-            public
-            for public in (_kb_public_failure(item) for item in failures)
-            if any(public.values())
-        ],
-        "startedAt": job.get("startedAt"),
-        "updatedAt": job.get("updatedAt"),
-        "dataId": str(job.get("dataId") or ""),
-        "documentName": str(job.get("documentName") or ""),
-        "cancelRequested": bool(job.get("cancelRequested")),
-        "retainProcessed": bool(job.get("retainProcessed")),
-        "checkpointAvailable": checkpoint_available,
-        "resumeAvailable": checkpoint_available,
-        "checkpoint": checkpoint,
-        "partialResultsRetained": bool(
-            job.get("partialResultsRetained")
-            or result.get("partialResultsRetained")
-            or result.get("partial_results_retained")
-        ),
         "cancellable": (
             isinstance(job.get("cancelEvent"), threading.Event)
             and job.get("state") not in _KB_TERMINAL_JOB_STATES
             and job.get("phase") != "publishing"
         ),
     }
+    optional = {
+        "current": _kb_display_name(job.get("current") or job.get("currentKb")),
+        "counts": dict(job.get("counts") or {}),
+        "summary": dict(job.get("summary") or {}),
+        "notice": str(job.get("notice") or result.get("notice") or ""),
+        "skippedFiles": [str(item) for item in (job.get("skippedFiles") or result.get("skipped_files") or [])],
+        "replacedFiles": [str(item) for item in (job.get("replacedFiles") or result.get("replaced_files") or [])],
+        "processedFiles": [str(item) for item in (job.get("processedFiles") or result.get("processed_files") or [])],
+        "usage": _kb_public_usage(job.get("usage") or result.get("usage") or (result.get("stats") or {}).get("usage")),
+        "documents": [public for public in (_kb_public_document_result(item) for item in documents) if public.get("name")],
+        "imageDocuments": [public for public in (_kb_public_image_document(item) for item in (job.get("imageDocuments") or [])) if public.get("name")],
+        "imageActivity": _kb_public_image_activity(job.get("imageActivity") or {}),
+        "files": [public for public in (_kb_public_job_item(item) for item in (job.get("files") or [])) if public.get("name")],
+        "failures": [public for public in (_kb_public_failure(item) for item in failures) if any(public.values())],
+        "dataId": str(job.get("dataId") or ""),
+        "documentName": str(job.get("documentName") or ""),
+    }
+    snapshot.update({key: value for key, value in optional.items() if value not in (None, "", [], {})})
+    if job.get("cancelRequested"):
+        snapshot["cancelRequested"] = True
+    if checkpoint_available:
+        snapshot["checkpointAvailable"] = True
+    if (
+        job.get("partialResultsRetained")
+        or result.get("partialResultsRetained")
+        or result.get("partial_results_retained")
+    ):
+        snapshot["partialResultsRetained"] = True
     error_code = _kb_error_code(job.get("error"))
-    snapshot["recommendedActions"] = _kb_recommended_actions(
+    actions = _kb_recommended_actions(
         mode=snapshot["mode"], failures=failures, error=job.get("error")
     )
+    if actions:
+        snapshot["recommendedActions"] = actions
     if error_code:
         snapshot["errorCode"] = error_code
-        snapshot["error"] = _kb_error_detail(job.get("error"))
         snapshot["errorDetail"] = _kb_error_detail(job.get("error"))
     return json.loads(json.dumps(snapshot, ensure_ascii=False, default=str))
 
@@ -3062,7 +2952,7 @@ def _kb_public_status(row: dict) -> dict:
         if not isinstance(raw_document, dict):
             continue
         document = dict(raw_document)
-        for key in ("abspath", "path", "source_path", "processed_path", "manifest_path"):
+        for key in ("abspath", "path", "source_path", "processed_path", "manifest_path", "ref"):
             document.pop(key, None)
         public_documents.append(document)
     value["documents"] = public_documents
@@ -3169,14 +3059,11 @@ async def kb_open_handler(request):
         data = await read_json(request)
         backend = _kb_backend()
         data_id = data.get("dataId", data.get("data_id")) or ""
-        ref = data.get("ref") or ""
         is_processed = data.get("processed") is True or str(data.get("processed") or "").lower() in {"1", "true", "yes"}
         if is_processed:
             resolved = backend.resolve_processed_document(
                 kb_id=kb_id,
                 data_id=data_id,
-                file_name=data.get("fileName", data.get("file_name")) or "",
-                ref=ref,
             )
             if resolved.get("error"):
                 return json_ok(
@@ -3188,7 +3075,6 @@ async def kb_open_handler(request):
             path = backend.resolve_open_target(
                 kb_id=kb_id,
                 data_id=data_id,
-                ref=ref,
                 ref_key=data.get("refKey", data.get("ref_key")) or "",
             )
         if not path:
@@ -3207,8 +3093,6 @@ async def kb_source_handler(request):
     source = _kb_backend().resolve_source_document(
         kb_id=kb_id,
         data_id=request.query.get("dataId", request.query.get("data_id")),
-        file_name=request.query.get("fileName", request.query.get("file_name")),
-        ref=request.query.get("ref"),
     )
     target = Path(source.get("path") or "")
     if source.get("error") or not source.get("is_original") or not target.is_file():
@@ -3234,7 +3118,6 @@ async def kb_source_asset_handler(request):
     target = _kb_backend().resolve_source_asset(
         kb_id=kb_id,
         data_id=request.query.get("dataId", request.query.get("data_id")),
-        ref=request.query.get("ref"),
         image_path=request.query.get("path", request.query.get("imagePath")),
     )
     if not target or not os.path.isfile(target):
@@ -3797,8 +3680,6 @@ async def kb_document_delete_handler(request):
         return json_ok({"ok": False, "error": "missing_kb_id"}, status=400)
     data = await read_json(request)
     requested_data_id = str(data.get("dataId", data.get("data_id")) or "").strip()
-    requested_file = str(data.get("fileName", data.get("file_name")) or "").replace("\\", "/").strip()
-    requested_ref = str(data.get("ref") or "").replace("\\", "/").strip()
     backend = _kb_backend()
     detail = backend.status(kb_id).get("knowledge_bases") or []
     if not detail:
@@ -3811,16 +3692,6 @@ async def kb_document_delete_handler(request):
         ),
         None,
     )
-    if target is None and requested_file:
-        target = next(
-            (document for document in documents if document.get("file_name") == requested_file),
-            None,
-        )
-    if target is None and requested_ref:
-        target = next(
-            (document for document in documents if document.get("ref") == requested_ref),
-            None,
-        )
     if target is None:
         return json_ok({"ok": False, "error": "document_not_found"}, status=404)
 

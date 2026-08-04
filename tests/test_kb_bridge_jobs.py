@@ -101,7 +101,7 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         payload = json.loads(response.text)
 
         self.assertEqual(response.status, 202)
-        self.assertTrue(payload["retainProcessed"])
+        self.assertNotIn("retainProcessed", payload)
         self.assertTrue(payload["cancelRequested"])
         self.assertTrue(cancel_event.is_set())
 
@@ -222,7 +222,7 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         })
 
         self.assertEqual(snapshot["progress"]["completed"], 2)
-        self.assertEqual(snapshot["documentProgress"]["total"], 2)
+        self.assertNotIn("documentProgress", snapshot)
         self.assertEqual(snapshot["documents"][0]["name"], "alpha.pdf")
         self.assertEqual(snapshot["documents"][0]["status"], "succeeded_with_warnings")
         self.assertEqual(snapshot["documents"][0]["warningCount"], 1)
@@ -252,8 +252,8 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
             "partialResultsRetained": True,
         })
 
-        self.assertFalse(snapshot["checkpointAvailable"])
-        self.assertFalse(snapshot["resumeAvailable"])
+        self.assertNotIn("checkpointAvailable", snapshot)
+        self.assertNotIn("resumeAvailable", snapshot)
         self.assertTrue(snapshot["partialResultsRetained"])
         self.assertNotIn("maintenanceCheckpointAvailable", snapshot)
 

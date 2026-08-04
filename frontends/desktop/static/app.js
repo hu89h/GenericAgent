@@ -366,10 +366,7 @@ let bridgeUiOffline = false;
       if (!id) throw new Error('kb/source missing kbId');
       const query = new URLSearchParams();
       const dataId = params.dataId || params.data_id || '';
-      const fileName = params.fileName || params.file_name || '';
       if (dataId) query.set('dataId', dataId);
-      if (fileName) query.set('fileName', fileName);
-      if (params.ref) query.set('ref', params.ref);
       if (assetPath) query.set('path', assetPath);
       const endpoint = assetPath ? 'source/asset' : 'source';
       return `${bridgeBase}/kb/${encodeURIComponent(id)}/${endpoint}?${query.toString()}`;
@@ -973,7 +970,7 @@ kbState.collapsedPanels = kbLoadPanelCollapseState();
 function kbScopeForDoc(doc) {
   return normalizeKnowledgeScope({ mode: 'document', origin: 'knowledge', kb_id: doc.kb_id,
     kb_name: kbState.activeKb?.name || kbState.activeKb?.id || doc.kb_id,
-    data_id: doc.data_id, file_name: doc.file_name, ref: doc.ref, title: doc.title });
+    data_id: doc.data_id, title: doc.title });
 }
 
 function kbScopeForKb(kb) {
@@ -986,11 +983,11 @@ function kbScopeKey(scope) {
     const targets = (value.targets || []).map(target => ({
       kb_id: target.kb_id || '',
       all_documents: !!target.all_documents,
-      documents: (target.documents || []).map(doc => doc.data_id || doc.ref || doc.file_name || '').sort(),
+      documents: (target.documents || []).map(doc => doc.data_id || '').sort(),
     })).sort((a, b) => a.kb_id.localeCompare(b.kb_id));
     return [value.origin, value.mode, JSON.stringify(targets)].join('|');
   }
-  return [value.origin, value.mode, value.kb_id || '', value.data_id || '', value.ref || '', value.file_name || ''].join('|');
+  return [value.origin, value.mode, value.kb_id || '', value.data_id || ''].join('|');
 }
 
 function kbSessionMatchesScope(sess, scope) {
@@ -1088,8 +1085,6 @@ function kbDocumentSourceUrl(doc, imagePath = '') {
   return window.ga.kbSourceUrl({
     kbId: doc.kb_id || '',
     dataId: doc.data_id || '',
-    fileName: doc.file_name || '',
-    ref: doc.ref || '',
   }, imagePath);
 }
 
@@ -1464,8 +1459,6 @@ async function kbOpenProcessedDocument() {
     const result = await window.ga.kbOpen({
       kbId: doc.kb_id,
       dataId: doc.data_id,
-      fileName: doc.file_name,
-      ref: doc.ref,
       processed: true,
     });
     if (result?.error) throw new Error(result.error);
@@ -1634,7 +1627,6 @@ async function kbOpenCitation(citation) {
       kbId: citation.kb_id,
       dataId: citation.data_id,
       refKey: citation.ref_key,
-      ref: citation.ref,
     });
     if (result?.error) throw new Error(result.error);
   } catch (error) {
@@ -1960,7 +1952,6 @@ function kbSetTask(job, kind) {
   kbState.job = job;
   kind = kbJobKind(job, kind);
   const counts = job.counts || {};
-  const documentProgress = job.documentProgress || {};
   const summary = job.summary || {};
   const terminal = kbJobTerminal(job);
   const progress = job.progress || {};
@@ -2122,9 +2113,9 @@ function kbSetTask(job, kind) {
         name: job.documentName || '',
       });
       kbPageEls.taskCounts.hidden = false;
-    } else if (terminal && (kind === 'reindex' || kind === 'retry_image_analysis') && summary.n_docs != null) {
+    } else if (terminal && (kind === 'reindex' || kind === 'retry_image_analysis') && summary.documents_total != null) {
       kbPageEls.taskCounts.textContent = kbFormat(t('kb.maintenanceCounts'), {
-        documents: summary.n_docs || 0,
+        documents: summary.documents_total || 0,
         text: summary.text_chunks || 0,
         images: summary.image_chunks || 0,
       });
@@ -2136,13 +2127,8 @@ function kbSetTask(job, kind) {
       kbPageEls.taskCounts.textContent = '';
       kbPageEls.taskCounts.hidden = true;
     } else {
-      kbPageEls.taskCounts.textContent = kbFormat(t('kb.buildCounts'), {
-        completed: job.done || 0,
-        total: job.total || 0,
-        success: successfulTerminal ? 1 : 0,
-        failure: job.state === 'failed' ? 1 : 0,
-      });
-      kbPageEls.taskCounts.hidden = false;
+      kbPageEls.taskCounts.textContent = '';
+      kbPageEls.taskCounts.hidden = true;
     }
     if (kind === 'import' && terminal && summary.documents_total != null) kbPageEls.taskCounts.hidden = false;
   }
@@ -2533,8 +2519,6 @@ async function kbDeleteDocument(doc) {
   try {
     const result = await window.ga.kbDeleteDocument(kbState.activeKb.id, {
       dataId: doc.data_id,
-      fileName: doc.file_name,
-      ref: doc.ref,
     });
     if (!result.jobId) throw new Error(result.error || t('err.kbDeleteDocument'));
     await kbTrackJob('delete', result.jobId);
@@ -2610,7 +2594,7 @@ function initKbPage() {
   bindClick('kb-open-doc', async () => {
     const doc = kbState.activeDoc;
     if (!doc) return;
-    try { await window.ga.kbOpen({ kbId: doc.kb_id, dataId: doc.data_id, ref: doc.ref }); }
+    try { await window.ga.kbOpen({ kbId: doc.kb_id, dataId: doc.data_id }); }
     catch (error) { showError(`${t('file.openFailed')}: ${error.message || error}`); }
   });
   bindClick('kb-open-processed', () => void kbOpenProcessedDocument());
@@ -2682,7 +2666,7 @@ async function openKnowledgeScopePicker() {
     activeSess()?.knowledgeScope || defaultChatKnowledgeScope(),
   );
 
-  const documentKey = doc => String(doc?.data_id || doc?.ref || doc?.file_name || doc?.title || '').trim();
+  const documentKey = doc => String(doc?.data_id || '').trim();
   const targetDocuments = target => target?.documents instanceof Map ? target.documents : new Map();
   const addTarget = (kb, { allDocuments = true, documents = [] } = {}) => {
     const target = { kb, all_documents: !!allDocuments, documents: new Map() };
@@ -2701,7 +2685,10 @@ async function openKnowledgeScopePicker() {
         kb_id: target.kb.id,
         kb_name: target.kb.name || target.kb.id,
         all_documents: !!target.all_documents,
-        documents: [...targetDocuments(target).values()],
+        documents: [...targetDocuments(target).values()].map(document => ({
+          data_id: document.data_id,
+          ...(document.title ? { title: document.title } : {}),
+        })),
       })),
     };
   };
@@ -2729,13 +2716,13 @@ async function openKnowledgeScopePicker() {
       const target = selectedTargets.get(selectedKb.id);
       const allActive = !!target?.all_documents;
       const visibleDocs = docState.documents.filter(doc => matching(
-        `${doc.title || ''} ${doc.file_name || ''} ${doc.ref || ''}`, docSearch,
+        `${doc.title || ''} ${doc.file_name || ''}`, docSearch,
       ));
       const rows = visibleDocs.map(doc => {
-        const title = doc.title || doc.file_name || doc.ref || doc.data_id || '';
+        const title = doc.title || doc.file_name || doc.data_id || '';
         const key = documentKey(doc);
         const active = !!target && !target.all_documents && targetDocuments(target).has(key);
-        return `<button type="button" class="ga-menu-item knowledge-scope-doc ${active ? 'active' : ''}" data-knowledge-scope-doc="${encodeURIComponent(JSON.stringify({ ...doc, kb_id: doc.kb_id || selectedKb.id, title }))}" title="${escapeHtml(doc.file_name || doc.ref || title)}"><span class="knowledge-scope-check" role="checkbox" aria-checked="${active ? 'true' : 'false'}">${active ? '✓' : ''}</span><span>${escapeHtml(title)}</span></button>`;
+        return `<button type="button" class="ga-menu-item knowledge-scope-doc ${active ? 'active' : ''}" data-knowledge-scope-doc="${encodeURIComponent(JSON.stringify({ ...doc, kb_id: doc.kb_id || selectedKb.id, title }))}" title="${escapeHtml(doc.file_name || title)}"><span class="knowledge-scope-check" role="checkbox" aria-checked="${active ? 'true' : 'false'}">${active ? '✓' : ''}</span><span>${escapeHtml(title)}</span></button>`;
       }).join('');
       const status = docState.loading
         ? `<div class="knowledge-scope-loading">${escapeHtml(t('kb.loading'))}</div>`
@@ -2803,7 +2790,7 @@ async function openKnowledgeScopePicker() {
       if (loadSeq !== docLoadSeq || selectedKb?.id !== kb.id) return;
       docState = {
         loading: false,
-        documents: Array.isArray(data?.documents) ? data.documents : (Array.isArray(data?.docs) ? data.docs : []),
+        documents: Array.isArray(data?.documents) ? data.documents : [],
         error: '',
       };
     } catch (error) {
@@ -3951,41 +3938,38 @@ const activeSess = () => state.sessions.get(state.activeId) || null;
 const isActive = (sess) => sess && sess.id === state.activeId;
 
 function normalizeKnowledgeScope(value) {
-  const raw = value && typeof value === 'object' ? value : {};
-  let mode = String(raw.mode || raw.kind || 'all').trim().toLowerCase();
-  if (['multi', 'selection', 'selected'].includes(mode)) mode = 'selection';
-  let origin = String(raw.origin || raw.source || '').trim().toLowerCase();
-  if (origin !== 'chat' && origin !== 'knowledge') {
-    origin = (mode === 'kb' || mode === 'knowledge_base' || mode === 'document' || mode === 'doc')
-      ? 'knowledge' : 'chat';
+  if (value == null || (typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length)) {
+    return { mode: 'all', origin: 'chat' };
   }
-  if (mode === 'none' || mode === 'disabled') return { mode: 'none', origin: 'chat' };
+  const raw = value && typeof value === 'object' ? value : null;
+  if (!raw) return { mode: 'none', origin: 'chat' };
+  const mode = String(raw.mode || '').trim().toLowerCase();
+  let origin = String(raw.origin || '').trim().toLowerCase();
+  if (origin !== 'chat' && origin !== 'knowledge') {
+    origin = (mode === 'kb' || mode === 'document') ? 'knowledge' : 'chat';
+  }
+  if (mode === 'none' || mode === 'all') return { mode, origin };
   if (mode === 'selection') {
-    const targets = Array.isArray(raw.targets || raw.knowledge_bases || raw.knowledgeBases)
-      ? (raw.targets || raw.knowledge_bases || raw.knowledgeBases) : [];
+    const targets = Array.isArray(raw.targets) ? raw.targets : [];
     const normalizedTargets = [];
     const seenKbs = new Set();
     for (const item of targets) {
       if (!item || typeof item !== 'object') continue;
-      const kbId = String(item.kb_id || item.kbId || item.id || '').trim();
+      const kbId = String(item.kb_id || '').trim();
       if (!kbId || seenKbs.has(kbId)) continue;
-      seenKbs.add(kbId);
       const target = { kb_id: kbId };
-      const kbName = String(item.kb_name || item.kbName || item.name || '').trim();
+      const kbName = String(item.kb_name || '').trim();
       if (kbName) target.kb_name = kbName;
-      const allDocuments = !!(item.all_documents ?? item.allDocuments);
-      const docs = Array.isArray(item.documents || item.docs) ? (item.documents || item.docs) : [];
+      const allDocuments = item.all_documents === true;
+      const docs = Array.isArray(item.documents) ? item.documents : [];
       const normalizedDocs = [];
       const seenDocs = new Set();
       for (const doc of docs) {
         if (!doc || typeof doc !== 'object') continue;
-        const dataId = String(doc.data_id || doc.dataId || '').trim();
-        const fileName = String(doc.file_name || doc.fileName || '').trim();
-        const ref = String(doc.ref || '').trim();
-        const key = dataId || ref || fileName;
-        if (!key || seenDocs.has(key)) continue;
-        seenDocs.add(key);
-        const normalizedDoc = { data_id: dataId, file_name: fileName, ref };
+        const dataId = String(doc.data_id || '').trim();
+        if (!dataId.startsWith(`${kbId}::`) || seenDocs.has(dataId)) continue;
+        seenDocs.add(dataId);
+        const normalizedDoc = { data_id: dataId };
         const title = String(doc.title || '').trim();
         if (title) normalizedDoc.title = title;
         normalizedDocs.push(normalizedDoc);
@@ -3994,33 +3978,29 @@ function normalizeKnowledgeScope(value) {
       target.all_documents = allDocuments;
       if (normalizedDocs.length) target.documents = normalizedDocs;
       normalizedTargets.push(target);
+      seenKbs.add(kbId);
     }
-    return normalizedTargets.length ? { mode: 'selection', origin, targets: normalizedTargets } : { mode: 'none', origin: 'chat' };
+    return normalizedTargets.length ? { mode: 'selection', origin, targets: normalizedTargets } : { mode: 'none', origin };
   }
-  if (mode === 'kb' || mode === 'knowledge_base') {
-    const kbId = raw.kb_id || raw.kbId || raw.id;
+  if (mode === 'kb') {
+    const kbId = String(raw.kb_id || '').trim();
     return kbId ? {
-      mode: 'kb', origin, kb_id: String(kbId),
-      ...(raw.kb_name || raw.kbName ? { kb_name: String(raw.kb_name || raw.kbName) } : {}),
-    } : { mode: 'all', origin };
+      mode: 'kb', origin, kb_id: kbId,
+      ...(raw.kb_name ? { kb_name: String(raw.kb_name) } : {}),
+    } : { mode: 'none', origin };
   }
-  if (mode === 'document' || mode === 'doc') {
-    const kbId = raw.kb_id || raw.kbId;
-    const dataId = raw.data_id || raw.dataId;
-    const fileName = raw.file_name || raw.fileName;
-    const ref = raw.ref;
-    if (kbId && (dataId || fileName || ref)) {
+  if (mode === 'document') {
+    const kbId = String(raw.kb_id || '').trim();
+    const dataId = String(raw.data_id || '').trim();
+    if (kbId && dataId.startsWith(`${kbId}::`)) {
       return {
-        mode: 'document', origin, kb_id: String(kbId),
-        ...(dataId ? { data_id: String(dataId) } : {}),
-        ...(raw.kb_name || raw.kbName ? { kb_name: String(raw.kb_name || raw.kbName) } : {}),
-        ...(fileName ? { file_name: String(fileName) } : {}),
-        ...(ref ? { ref: String(ref) } : {}),
+        mode: 'document', origin, kb_id: kbId, data_id: dataId,
+        ...(raw.kb_name ? { kb_name: String(raw.kb_name) } : {}),
         ...(raw.title ? { title: String(raw.title) } : {}),
       };
     }
   }
-  return { mode: 'all', origin };
+  return { mode: 'none', origin };
 }
 
 function defaultChatKnowledgeScope() {
@@ -4031,7 +4011,7 @@ function knowledgeScopeLabel(scope) {
   const s = normalizeKnowledgeScope(scope);
   if (s.mode === 'none') return t('kb.disabled');
   if (s.mode === 'kb') return `${s.kb_name || s.kb_id} · ${t('kb.allInKb')}`;
-  if (s.mode === 'document') return `${s.kb_name || s.kb_id} · ${s.title || s.file_name || s.data_id}`;
+  if (s.mode === 'document') return `${s.kb_name || s.kb_id} · ${s.title || s.data_id}`;
   if (s.mode === 'selection') {
     const targets = s.targets || [];
     const names = targets.map(target => target.kb_name || target.kb_id).filter(Boolean);
