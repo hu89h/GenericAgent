@@ -14,6 +14,20 @@ import llmcore
 
 
 class DesktopMultimodalTests(unittest.TestCase):
+    def test_desktop_plan_state_uses_package_import_when_loaded_as_module(self):
+        self.assertEqual(
+            desktop_bridge._sanitize_desktop_plan_path(
+                "sess-test", "temp/plan_example/plan.md"
+            ),
+            "temp/plan_example/plan.md",
+        )
+        self.assertEqual(
+            desktop_bridge._sanitize_desktop_plan_path(
+                "sess-test", "temp/not-a-plan/notes.md"
+            ),
+            "",
+        )
+
     def test_visual_probe_uses_pending_config_and_requires_correct_sequence(self):
         response = SimpleNamespace(content="RRRRRRRR")
         sessions = []

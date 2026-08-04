@@ -70,6 +70,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from knowledge_base.scope import normalize_scope as normalize_knowledge_scope
+from frontends import plan_state
 
 
 def _serialize_mykey_mutation(method):
@@ -292,7 +293,6 @@ def _load_plan_baseline(item: dict, msgs: list) -> int:
 
 def _sanitize_desktop_plan_path(session_id: str, plan_path: str) -> str:
     """Keep only real plan-mode paths; never invent a placeholder path on load."""
-    import plan_state
     p = (plan_path or "").strip()
     if not p:
         return ""
@@ -1597,7 +1597,6 @@ class AgentManager:
                     return
                 sess.partial = None
                 full = strip_final_info_marker(full)
-                import plan_state
                 plan_state.sync_plan_path_from_text(sess, full, sess.cwd or self.ga_root)
                 # 轨道2: 落库时带结构化全量轮(权威turn_segs),前端按轮渲染;content保留兜底
                 _final_segs = normalize_final_turn_segs(full, done_outputs)
@@ -1632,7 +1631,6 @@ class AgentManager:
             msgs = [m for m in sess.messages if int(m.get("id", 0)) > after]
             if limit > 0:
                 msgs = msgs[-limit:]
-            import plan_state
             return {
                 "sessionId": sid,
                 "status": sess.status,
@@ -1650,7 +1648,6 @@ class AgentManager:
             sess = self.sessions.get(sid)
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
-            import plan_state
             return {
                 "sessionId": sid,
                 "plan": plan_state.desktop_plan_payload_from_session(sess, self.ga_root),
