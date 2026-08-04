@@ -149,7 +149,7 @@ class MinerUDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             mineru.requests,
             "get",
-            side_effect=[requests.exceptions.SSLError("unexpected EOF"), response],
+            side_effect=[requests.exceptions.ConnectionError("connection reset"), response],
         ) as get, mock.patch.object(mineru, "wait_with_cancellation"):
             target = Path(directory) / "result.zip"
             mineru._download("https://cdn.example.test/result.zip", target)
@@ -157,6 +157,51 @@ class MinerUDownloadTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), payload)
             self.assertEqual(get.call_count, 2)
             self.assertEqual(list(Path(directory).glob("*.part")), [])
+
+    def test_proxy_tls_failure_falls_back_to_direct_cdn_session(self):
+        payload = b"complete result"
+        response = _Response(
+            [payload],
+            headers={"Content-Length": str(len(payload))},
+        )
+        direct_session = mock.Mock()
+        direct_session.get.return_value = response
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            mineru.requests,
+            "get",
+            side_effect=requests.exceptions.SSLError(
+                "SOCKSHTTPSConnectionPool: UNEXPECTED_EOF_WHILE_READING"
+            ),
+        ) as proxied_get, mock.patch.object(
+            mineru.requests,
+            "Session",
+            return_value=direct_session,
+        ) as session_factory, mock.patch.object(mineru, "wait_with_cancellation"):
+            target = Path(directory) / "result.zip"
+            mineru._download("https://cdn.example.test/result.zip", target)
+            self.assertEqual(target.read_bytes(), payload)
+            proxied_get.assert_called_once()
+            session_factory.assert_called_once_with()
+            self.assertFalse(direct_session.trust_env)
+            direct_session.get.assert_called_once()
+            direct_session.close.assert_called_once()
+            self.assertEqual(list(Path(directory).glob("*.part")), [])
+
+    def test_http_failure_does_not_bypass_proxy(self):
+        response = _Response([b"server error"], status=503)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            mineru.requests, "get", return_value=response
+        ) as proxied_get, mock.patch.object(
+            mineru.requests, "Session"
+        ) as session_factory, mock.patch.object(mineru, "wait_with_cancellation"):
+            target = Path(directory) / "result.zip"
+            with self.assertRaises(mineru.MinerUError):
+                mineru._download("https://cdn.example.test/result.zip", target)
+
+        self.assertEqual(proxied_get.call_count, 5)
+        session_factory.assert_not_called()
+        self.assertFalse(target.exists())
+        self.assertEqual(list(Path(directory).glob("*.part")), [])
 
     def test_cancelled_stream_does_not_leave_a_partial_result(self):
         cancelled = True

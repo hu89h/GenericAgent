@@ -100,9 +100,11 @@ def _run_cancelable(
         except KnowledgeBaseCancelled:
             with lock:
                 response = state.get("response")
-            if response is not None:
-                with contextlib.suppress(Exception):
-                    response.close()
+                session = state.get("session")
+            for resource in (response, session):
+                if resource is not None:
+                    with contextlib.suppress(Exception):
+                        resource.close()
             raise
         try:
             ok, value = result.get(timeout=0.1)
@@ -505,19 +507,59 @@ def _download(
     # complete response has been consumed.
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
 
-    response_holder: dict = {"response": None}
+    response_holder: dict = {"response": None, "session": None}
+    direct_fallback = False
+
+    def direct_fallback_enabled() -> bool:
+        value = os.environ.get("GA_MINERU_DIRECT_FALLBACK", "1").strip().lower()
+        return value not in {"0", "false", "no", "off"}
+
+    def should_try_direct(error: BaseException) -> bool:
+        if isinstance(error, (requests.exceptions.SSLError, requests.exceptions.ProxyError)):
+            return True
+        if isinstance(error, requests.exceptions.ConnectionError):
+            text = str(error).lower()
+            return any(
+                marker in text
+                for marker in ("proxy", "socks", "ssl", "tls", "unexpected eof")
+            )
+        return False
+
+    def get_response() -> requests.Response:
+        if not direct_fallback:
+            return requests.get(
+                url,
+                stream=True,
+                timeout=DEFAULT_TIMEOUT,
+                headers={"Accept": "application/zip", "User-Agent": "GenericAgent/KB"},
+            )
+        # A local SOCKS/HTTP proxy can complete the API request but fail the
+        # CDN TLS handshake.  Keep the user's proxy for the first attempt, then
+        # use a one-off session that explicitly ignores proxy environment
+        # variables.  The session remains owned by the download operation and
+        # is closed together with its response, including on cancellation.
+        session = requests.Session()
+        session.trust_env = False
+        response_holder["session"] = session
+        try:
+            return session.get(
+                url,
+                stream=True,
+                timeout=DEFAULT_TIMEOUT,
+                headers={"Accept": "application/zip", "User-Agent": "GenericAgent/KB"},
+            )
+        except BaseException:
+            response_holder["session"] = None
+            with contextlib.suppress(Exception):
+                session.close()
+            raise
 
     def operation() -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary.unlink(missing_ok=True)
         received = 0
         try:
-            response = requests.get(
-                url,
-                stream=True,
-                timeout=DEFAULT_TIMEOUT,
-                headers={"Accept": "application/zip", "User-Agent": "GenericAgent/KB"},
-            )
+            response = get_response()
             response_holder["response"] = response
             try:
                 status = int(response.status_code)
@@ -546,20 +588,37 @@ def _download(
                 response_holder["response"] = None
                 with contextlib.suppress(Exception):
                     response.close()
+                session = response_holder.pop("session", None)
+                if session is not None:
+                    with contextlib.suppress(Exception):
+                        session.close()
             check_cancelled(cancelled)
             os.replace(temporary, target)
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
 
-    try:
-        _retry(
-            "下载 MinerU 解析结果",
-            lambda: _run_cancelable(
+    def attempt() -> None:
+        nonlocal direct_fallback
+        try:
+            _run_cancelable(
                 operation,
                 cancelled,
                 response_holder=response_holder,
-            ),
+            )
+        except BaseException as error:
+            if (
+                not direct_fallback
+                and direct_fallback_enabled()
+                and should_try_direct(error)
+            ):
+                direct_fallback = True
+            raise
+
+    try:
+        _retry(
+            "下载 MinerU 解析结果",
+            attempt,
             attempts=5,
             cancelled=cancelled,
         )
