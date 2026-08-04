@@ -49,7 +49,45 @@ class KnowledgeScopeTests(unittest.TestCase):
 
     def test_enabled_scope_keeps_kb_tools(self):
         schema = list(agentmain.KB_TOOL_SCHEMAS)
-        self.assertIs(agentmain.tool_schema_for_scope(schema, {"mode": "all"}), schema)
+        self.assertIs(
+            agentmain.tool_schema_for_scope(
+                schema, {"mode": "all"}, supports_image_blocks=True,
+            ),
+            schema,
+        )
+
+    def test_text_model_does_not_receive_image_tool(self):
+        schema = [
+            {"function": {"name": "file_read"}},
+            *agentmain.KB_TOOL_SCHEMAS,
+        ]
+        filtered = agentmain.tool_schema_for_scope(
+            schema, {"mode": "all"}, supports_image_blocks=False,
+        )
+        names = {tool["function"]["name"] for tool in filtered}
+
+        self.assertEqual(
+            names,
+            {"file_read", "kb_search", "kb_read", "kb_list"},
+        )
+
+    def test_enabled_prompt_contains_usage_policy_once(self):
+        prompt = agentmain.knowledge_scope_prompt(
+            {"mode": "all"}, supports_image_blocks=False,
+        )
+
+        self.assertEqual(prompt.count("[KNOWLEDGE_BASE_USAGE]"), 1)
+        self.assertIn("不能查看知识库原图", prompt)
+        self.assertEqual(prompt.count("[知识库来源规则]"), 1)
+
+    def test_disabled_prompt_does_not_contain_kb_usage_policy(self):
+        prompt = agentmain.knowledge_scope_prompt(
+            {"mode": "none"}, supports_image_blocks=False,
+        )
+
+        self.assertNotIn("[KNOWLEDGE_BASE_USAGE]", prompt)
+        self.assertNotIn("[知识库来源规则]", prompt)
+        self.assertNotIn("不能查看知识库原图", prompt)
 
     def test_disabled_scope_rejects_direct_tool_call(self):
         outcome = _ScopeHandler("none").do_kb_search(
