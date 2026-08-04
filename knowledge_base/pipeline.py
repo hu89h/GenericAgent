@@ -115,7 +115,10 @@ class IngestPipeline:
         if not isinstance(checkpoint, dict):
             return None
         mode = str(checkpoint.get("mode") or "import").strip().lower()
-        if mode not in {"import", "add_documents", "retry_image_analysis"}:
+        if mode not in {"import", "add_documents"}:
+            return None
+        kb_id = str(manifest.get("kb_id") or "").strip()
+        if not kb_id or not config.valid_kb_id(kb_id):
             return None
         if not isinstance(manifest.get("files"), list):
             return None
@@ -126,6 +129,86 @@ class IngestPipeline:
         if created_at <= 0:
             return None
         return manifest
+
+    @staticmethod
+    def _path_identity(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return os.path.normcase(os.path.realpath(os.path.expanduser(text)))
+
+    @classmethod
+    def _source_file_identities(cls, values) -> set[str]:
+        return {
+            identity
+            for identity in (cls._path_identity(str(value or "")) for value in (values or []))
+            if identity
+        }
+
+    @classmethod
+    def _checkpoint_source_files(cls, manifest: dict) -> set[str]:
+        checkpoint = manifest.get("checkpoint") or {}
+        values = list(checkpoint.get("source_files") or [])
+        source_root = str(manifest.get("source_path") or "").strip()
+        if not values:
+            values = [
+                item.get("path")
+                for item in (manifest.get("source_fingerprint") or [])
+                if isinstance(item, dict) and item.get("path")
+            ]
+        values = [
+            (
+                value
+                if os.path.isabs(str(value or "")) or not source_root
+                else os.path.join(source_root, str(value or ""))
+            )
+            for value in values
+        ]
+        return cls._source_file_identities(values)
+
+    @classmethod
+    def _directory_source_files(cls, source_path: str) -> set[str]:
+        root = cls._path_identity(source_path)
+        if not root or not os.path.isdir(root):
+            return set()
+        values = []
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames[:] = [name for name in dirnames if not name.startswith(".")]
+            for filename in filenames:
+                if filename.startswith("."):
+                    continue
+                path = os.path.join(dirpath, filename)
+                if not os.path.islink(path) and os.path.isfile(path):
+                    values.append(path)
+        return cls._source_file_identities(values)
+
+    @classmethod
+    def _checkpoint_matches(
+        cls,
+        manifest: dict | None,
+        *,
+        kb_id: str,
+        mode: str,
+        source_path: str = "",
+        source_files=None,
+    ) -> bool:
+        if not manifest:
+            return False
+        checkpoint = manifest.get("checkpoint") or {}
+        if str(manifest.get("kb_id") or "") != str(kb_id or ""):
+            return False
+        if str(checkpoint.get("mode") or "") != str(mode or ""):
+            return False
+        if cls._path_identity(manifest.get("source_path") or "") != cls._path_identity(source_path):
+            return False
+        expected_files = cls._checkpoint_source_files(manifest)
+        requested_files = cls._source_file_identities(source_files)
+        return expected_files == requested_files
+
+    @classmethod
+    def _raise_checkpoint_conflict(cls, kb_id: str) -> None:
+        if cls._checkpoint_manifest(config.staging_root(str(kb_id or "").strip())):
+            raise RuntimeError("kb_checkpoint_conflict")
 
     @classmethod
     def _write_checkpoint_marker(
@@ -153,10 +236,17 @@ class IngestPipeline:
             "source_path": str(source_path or manifest.get("source_path") or ""),
             "state": "checkpoint",
         })
+        resolved_source_files = list(source_files or [])
+        if not resolved_source_files:
+            resolved_source_files = [
+                str(item.get("path") or "")
+                for item in (manifest.get("source_fingerprint") or [])
+                if isinstance(item, dict) and str(item.get("path") or "").strip()
+            ]
         manifest["checkpoint"] = {
             "created_at": int(time.time()),
             "mode": str(mode or "import"),
-            "source_files": [str(item) for item in (source_files or []) if item],
+            "source_files": [str(item) for item in resolved_source_files if item],
             "ready_documents": sum(
                 item.get("status") == "ready"
                 for item in manifest.get("files") or []
@@ -494,18 +584,20 @@ class IngestPipeline:
         check_cancelled(cancelled)
         sources = dict(existing_sources or {})
         for key, value in built.sources.items():
-            if key == "documents" and isinstance(value, list):
-                previous = {
-                    str(item.get("path") or "").replace("\\", "/"): item
-                    for item in sources.get(key) or []
-                    if isinstance(item, dict) and item.get("path")
+            if key == "documents" and isinstance(value, dict):
+                previous = dict(sources.get(key) or {})
+                if include_files is not None:
+                    previous = {
+                        path: fingerprint
+                        for path, fingerprint in previous.items()
+                        if str(path or "").replace("\\", "/").lstrip("/")
+                        not in normalized_files
+                    }
+                previous.update(value)
+                sources[key] = {
+                    path: previous[path]
+                    for path in sorted(previous, key=lambda item: str(item).casefold())
                 }
-                previous.update({
-                    str(item.get("path") or "").replace("\\", "/"): item
-                    for item in value
-                    if isinstance(item, dict) and item.get("path")
-                })
-                sources[key] = sorted(previous.values(), key=lambda item: str(item.get("path") or ""))
             elif key == "images" and isinstance(value, dict):
                 merged_images = dict(sources.get(key) or {})
                 merged_images.update(value)
@@ -636,13 +728,20 @@ class IngestPipeline:
             check_cancelled(cancelled)
             os.makedirs(root, exist_ok=True)
             checkpoint = self._checkpoint_manifest(stage)
+            current_source_files = self._directory_source_files(source_path)
             resume_manifest = (
                 checkpoint
-                if checkpoint
-                and os.path.normcase(os.path.realpath(str(checkpoint.get("source_path") or "")))
-                == os.path.normcase(source_path)
+                if self._checkpoint_matches(
+                    checkpoint,
+                    kb_id=kb_id,
+                    mode="import",
+                    source_path=source_path,
+                    source_files=current_source_files,
+                )
                 else None
             )
+            if checkpoint is not None and resume_manifest is None:
+                raise RuntimeError("kb_checkpoint_conflict")
             active_manifest = None
             if resume_manifest is None and rescan_source and os.path.isdir(config.active_root(kb_id)):
                 try:
@@ -710,6 +809,7 @@ class IngestPipeline:
                         name=name,
                         source_path=source_path,
                         mode="import",
+                        source_files=sorted(current_source_files),
                     )
                 else:
                     remove_tree(stage)
@@ -747,23 +847,15 @@ class IngestPipeline:
             self.index_builder.begin_build()
             stage = config.staging_root(value)
             checkpoint = self._checkpoint_manifest(stage)
-            checkpoint_meta = (checkpoint or {}).get("checkpoint") or {}
-            requested_keys = {
-                os.path.normcase(os.path.realpath(str(raw)))
-                for raw in source_files or []
-                if raw
-            }
-            checkpoint_keys = {
-                os.path.normcase(os.path.realpath(str(raw)))
-                for raw in checkpoint_meta.get("source_files") or []
-                if raw
-            }
-            resume_checkpoint = bool(
-                checkpoint
-                and checkpoint_meta.get("mode") == "add_documents"
-                and requested_keys
-                and requested_keys == checkpoint_keys
+            resume_checkpoint = self._checkpoint_matches(
+                checkpoint,
+                kb_id=value,
+                mode="add_documents",
+                source_path=kb.get("source_path") or "",
+                source_files=source_files,
             )
+            if checkpoint is not None and not resume_checkpoint:
+                raise RuntimeError("kb_checkpoint_conflict")
             if not resume_checkpoint:
                 remove_tree(stage)
             try:
@@ -997,10 +1089,11 @@ class IngestPipeline:
                         if record.get("kind") == "image" and record.get("image_path")
                     }
                     existing_index_sources = dict(existing_index_sources)
-                    existing_index_sources["documents"] = [
-                        item for item in (existing_index_sources.get("documents") or [])
-                        if self._relative_key(item.get("path")) not in replaced_processed_files
-                    ]
+                    existing_index_sources["documents"] = {
+                        key: fingerprint
+                        for key, fingerprint in (existing_index_sources.get("documents") or {}).items()
+                        if self._relative_key(key) not in replaced_processed_files
+                    }
                     existing_index_sources["images"] = {
                         key: value
                         for key, value in (existing_index_sources.get("images") or {}).items()
@@ -1025,12 +1118,53 @@ class IngestPipeline:
                 merged["source_fingerprint"] = sorted(
                     fingerprints.values(), key=lambda item: str(item.get("path") or "").casefold()
                 )
-                old_failures = list(old_manifest.get("failures") or [])
-                if resume_checkpoint:
-                    old_failures = [
-                        item for item in old_failures
-                        if not isinstance(item, dict) or item.get("source") not in selected_labels
-                    ]
+                refreshed_identities = set(build_selected_identities)
+                refreshed_labels = {
+                    self._relative_key(self.documents._selection_label(Path(path)))
+                    for path in selected
+                    if os.path.normcase(os.path.realpath(path)) in refreshed_identities
+                }
+                refreshed_processed = set(replaced_processed_files)
+                for old_entry in removed_entries:
+                    source_value = str(old_entry.get("source_path") or "").strip()
+                    if source_value:
+                        refreshed_identities.add(self._path_identity(source_value))
+                    for key in ("source", "name"):
+                        label = self._relative_key(old_entry.get(key))
+                        if label:
+                            refreshed_labels.add(label)
+                    refreshed_processed.update(
+                        self._relative_key(item)
+                        for item in (old_entry.get("processed") or [])
+                        if self._relative_key(item)
+                    )
+
+                def keep_old_failure(item) -> bool:
+                    if not isinstance(item, dict):
+                        return True
+                    source_path = self._path_identity(item.get("source_path") or "")
+                    if source_path and source_path in refreshed_identities:
+                        return False
+                    values = {
+                        self._relative_key(item.get(key))
+                        for key in ("source", "document", "source_document")
+                        if self._relative_key(item.get(key))
+                    }
+                    for candidate in values:
+                        if candidate in refreshed_labels or candidate in refreshed_processed:
+                            return False
+                        if any(
+                            label and candidate.startswith(f"{label}:")
+                            for label in refreshed_labels | refreshed_processed
+                        ):
+                            return False
+                    return True
+
+                old_failures = [
+                    item
+                    for item in (old_manifest.get("failures") or [])
+                    if keep_old_failure(item)
+                ]
                 failures = [
                     *old_failures,
                     *list(prepared.get("failures") or []),
@@ -1098,6 +1232,7 @@ class IngestPipeline:
             if kb is None or not kb.get("exists"):
                 raise KeyError("knowledge_base_not_found")
             check_cancelled(cancelled)
+            self._raise_checkpoint_conflict(kb_id)
             return self._reindex_records(
                 kb,
                 progress=progress,
@@ -1112,7 +1247,6 @@ class IngestPipeline:
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
-        retain_partial: Callable[[], bool] | None = None,
     ) -> dict:
         """Retry image understanding against the published processed content."""
         with mutation_lock:
@@ -1120,12 +1254,12 @@ class IngestPipeline:
             if kb is None or not kb.get("exists"):
                 raise KeyError("knowledge_base_not_found")
             check_cancelled(cancelled)
+            self._raise_checkpoint_conflict(kb_id)
             return self._repair_processed_content(
                 kb,
                 progress=progress,
                 logfn=logfn,
                 cancelled=cancelled,
-                retain_partial=retain_partial,
             )
 
     def _reindex_records(
@@ -1285,7 +1419,6 @@ class IngestPipeline:
         progress: Callable[[dict], None] | None = None,
         logfn: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
-        retain_partial: Callable[[], bool] | None = None,
     ) -> dict:
         """Retry processed image analyses and publish a rebuilt complete index."""
         kb_id = str(kb.get("id") or "")
@@ -1424,16 +1557,10 @@ class IngestPipeline:
             })
             return result
         except KnowledgeBaseCancelled:
-            if callable(retain_partial) and retain_partial():
-                self._write_checkpoint_marker(
-                    stage=stage,
-                    kb_id=kb_id,
-                    name=name,
-                    source_path=source_path,
-                    mode="retry_image_analysis",
-                )
-            else:
-                remove_tree(stage)
+            # Image analysis is durably cached outside staging as each request
+            # completes.  Staging itself is not a resumable unit and must never
+            # compete with an interrupted document import checkpoint.
+            remove_tree(stage)
             raise
         except Exception:
             remove_tree(stage)
@@ -1454,6 +1581,7 @@ class IngestPipeline:
         value = str(kb_id or "").strip()
         with mutation_lock:
             check_cancelled(cancelled)
+            self._raise_checkpoint_conflict(value)
             kb = config.kb_by_id(value)
             if kb is None or not kb.get("exists"):
                 raise KeyError("knowledge_base_not_found")
@@ -1713,6 +1841,7 @@ class IngestPipeline:
     ) -> dict:
         with mutation_lock:
             check_cancelled(cancelled)
+            self._raise_checkpoint_conflict(kb_id)
             kb = config.kb_by_id(kb_id)
             root = config.kb_root(kb_id)
             if kb is None and not os.path.lexists(root):

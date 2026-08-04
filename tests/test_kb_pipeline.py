@@ -347,7 +347,7 @@ class IngestRollbackTests(unittest.TestCase):
                 self.assertTrue(checkpoint.is_file())
                 self.assertEqual(json.loads(checkpoint.read_text(encoding="utf-8"))["state"], "checkpoint")
 
-    def test_startup_cleanup_removes_invalid_checkpoint_but_keeps_valid_image_checkpoint(self):
+    def test_startup_cleanup_keeps_only_resumable_document_checkpoints(self):
         with tempfile.TemporaryDirectory() as temp:
             data_root = os.path.join(temp, "kbs")
             config_path = os.path.join(temp, "kb.yaml")
@@ -363,6 +363,7 @@ class IngestRollbackTests(unittest.TestCase):
                 (invalid_stage / "manifest.json").write_text(
                     json.dumps({
                         "state": "checkpoint",
+                        "kb_id": kb_id,
                         "files": [],
                         "checkpoint": {
                             "mode": "unknown",
@@ -381,11 +382,12 @@ class IngestRollbackTests(unittest.TestCase):
                 pipeline.cleanup_orphans()
                 self.assertFalse(invalid_stage.exists())
 
-                valid_stage = root / "staging"
-                valid_stage.mkdir(parents=True)
-                (valid_stage / "manifest.json").write_text(
+                image_stage = root / "staging"
+                image_stage.mkdir(parents=True)
+                (image_stage / "manifest.json").write_text(
                     json.dumps({
                         "state": "checkpoint",
+                        "kb_id": kb_id,
                         "files": [],
                         "checkpoint": {
                             "mode": "retry_image_analysis",
@@ -395,7 +397,24 @@ class IngestRollbackTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 pipeline.cleanup_orphans()
-                self.assertTrue(valid_stage.exists())
+                self.assertFalse(image_stage.exists())
+
+                import_stage = root / "staging"
+                import_stage.mkdir(parents=True)
+                (import_stage / "manifest.json").write_text(
+                    json.dumps({
+                        "state": "checkpoint",
+                        "kb_id": kb_id,
+                        "files": [],
+                        "checkpoint": {
+                            "mode": "import",
+                            "created_at": int(time.time()),
+                        },
+                    }),
+                    encoding="utf-8",
+                )
+                pipeline.cleanup_orphans()
+                self.assertTrue(import_stage.exists())
 
 
 class DocumentResultTests(unittest.TestCase):

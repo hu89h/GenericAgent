@@ -2663,6 +2663,8 @@ def _kb_error_code(error) -> str:
         return "vision_unsupported"
     if "kb_mutation_locked" in text:
         return "kb_mutation_locked"
+    if "kb_checkpoint_conflict" in text:
+        return "kb_checkpoint_conflict"
     if "not found" in text or "不存在" in text:
         return "source_missing"
     if "encrypted" in text or "已加密" in text:
@@ -2965,9 +2967,6 @@ def _kb_job_snapshot(job: dict) -> dict:
         checkpoint_raw_available
         and checkpoint_mode in {"import", "add_documents"}
     )
-    maintenance_checkpoint_available = bool(
-        checkpoint_raw_available and checkpoint_mode == "retry_image_analysis"
-    )
     failures = job.get("failures") or result.get("failures") or []
     documents = job.get("documents") or result.get("documents") or []
     snapshot = {
@@ -3030,8 +3029,12 @@ def _kb_job_snapshot(job: dict) -> dict:
         "retainProcessed": bool(job.get("retainProcessed")),
         "checkpointAvailable": checkpoint_available,
         "resumeAvailable": checkpoint_available,
-        "maintenanceCheckpointAvailable": maintenance_checkpoint_available,
         "checkpoint": checkpoint,
+        "partialResultsRetained": bool(
+            job.get("partialResultsRetained")
+            or result.get("partialResultsRetained")
+            or result.get("partial_results_retained")
+        ),
         "cancellable": (
             isinstance(job.get("cancelEvent"), threading.Event)
             and job.get("state") not in _KB_TERMINAL_JOB_STATES
@@ -3699,7 +3702,9 @@ async def kb_job_cancel_handler(request):
         cancel_event = job.get("cancelEvent")
         if not isinstance(cancel_event, threading.Event):
             return json_ok({"ok": False, "error": "kb_job_not_cancellable"}, status=409)
-        job["retainProcessed"] = retain_processed
+        job["retainProcessed"] = bool(
+            retain_processed and str(job.get("mode") or "") == "import"
+        )
         cancel_event.set()
         job.update(
             state="cancelling",
@@ -4062,8 +4067,6 @@ async def _kb_maintenance_handler(request, operation: str):
                 "logfn": log,
                 "cancelled": job["cancelEvent"].is_set,
             }
-            if operation == "retry_image_analysis":
-                maintenance_kwargs["retain_partial"] = lambda: bool(job.get("retainProcessed"))
             result = method(kb_id, **maintenance_kwargs)
             if operation == "reindex":
                 stats = result.get("stats") or {}
@@ -4125,35 +4128,18 @@ async def _kb_maintenance_handler(request, operation: str):
                 )
         except Exception as error:
             if getattr(error, "code", "") == "kb_operation_cancelled":
-                checkpoint = {}
-                try:
-                    checkpoint = backend.checkpoint_status(kb_id)
-                except Exception:
-                    checkpoint = {}
-                has_checkpoint = bool(checkpoint.get("available"))
-                checkpoint_mode = str(checkpoint.get("mode") or "")
                 with _kb_jobs_lock:
                     _kb_jobs[job_id].update(
                         ok=True,
-                        state=(
-                            "cancelled_with_checkpoint"
-                            if has_checkpoint
-                            else "cancelled"
-                        ),
-                        phase=(
-                            "cancelled_with_checkpoint"
-                            if has_checkpoint
-                            else "cancelled"
-                        ),
+                        state="cancelled",
+                        phase="cancelled",
                         error="",
                         updatedAt=int(time.time()),
                         current="",
                         cancelRequested=True,
-                        checkpointAvailable=(
-                            has_checkpoint
-                            and checkpoint_mode in {"import", "add_documents"}
-                        ),
-                        checkpoint=dict(checkpoint),
+                        checkpointAvailable=False,
+                        checkpoint={},
+                        partialResultsRetained=(operation == "retry_image_analysis"),
                         progress={
                             "completed": 0,
                             "total": 0,

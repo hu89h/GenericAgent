@@ -241,22 +241,21 @@ class KnowledgeBaseJobRetentionTests(unittest.TestCase):
         self.assertEqual(snapshot["failures"][0]["source"], "books/alpha.pdf")
         self.assertNotIn("internal-a.md", snapshot["failures"][0]["source"])
 
-    def test_snapshot_distinguishes_retained_image_checkpoint_from_import_resume(self):
+    def test_cancelled_image_retry_reports_cached_partial_results_without_checkpoint(self):
         snapshot = desktop_bridge._kb_job_snapshot({
             "jobId": "kbimageretry-cancelled",
             "mode": "retry_image_analysis",
-            "state": "cancelled_with_checkpoint",
-            "phase": "cancelled_with_checkpoint",
+            "state": "cancelled",
+            "phase": "cancelled",
             "checkpointAvailable": False,
-            "checkpoint": {
-                "available": True,
-                "mode": "retry_image_analysis",
-            },
+            "checkpoint": {},
+            "partialResultsRetained": True,
         })
 
         self.assertFalse(snapshot["checkpointAvailable"])
         self.assertFalse(snapshot["resumeAvailable"])
-        self.assertTrue(snapshot["maintenanceCheckpointAvailable"])
+        self.assertTrue(snapshot["partialResultsRetained"])
+        self.assertNotIn("maintenanceCheckpointAvailable", snapshot)
 
     def test_failure_actions_follow_the_failed_stage(self):
         self.assertEqual(

@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from knowledge_base import config
+from knowledge_base import backend, config
 from knowledge_base.pipeline import IngestPipeline, Publisher
 
 
@@ -77,7 +77,7 @@ class _SelectionRecords:
             for value in (include_files or [])
         }
         records = []
-        sources = []
+        sources = {}
         for entry in manifest.get("files") or []:
             for relative in entry.get("processed") or []:
                 relative = str(relative).replace("\\", "/").lstrip("/")
@@ -91,7 +91,7 @@ class _SelectionRecords:
                     "title": entry.get("name") or relative,
                     "body": "test body",
                 })
-                sources.append({"path": relative, "size": 1, "mtime_ns": 1})
+                sources[relative] = {"size": 1, "mtime": 1}
         return SimpleNamespace(
             records=records,
             failures=[],
@@ -161,6 +161,86 @@ class _SelectionIndex:
 
 
 class DuplicatePolicyTests(unittest.TestCase):
+    def test_backend_image_retry_uses_the_non_resumable_maintenance_contract(self):
+        calls = []
+
+        class Pipeline:
+            @staticmethod
+            def retry_image_analysis(kb_id, *, progress=None, logfn=None, cancelled=None):
+                calls.append((kb_id, progress, logfn, cancelled))
+                return {"ok": True}
+
+        runtime = SimpleNamespace(pipeline=Pipeline())
+        with mock.patch.object(backend, "_runtime", return_value=runtime):
+            result = backend.retry_image_analysis("kb-images")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(calls[0][0], "kb-images")
+        self.assertFalse(backend._is_processing("kb-images"))
+
+    def test_status_marks_an_old_chunking_contract_as_structurally_updatable(self):
+        class OpenCollection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Index:
+            @staticmethod
+            def probe(_path):
+                return {
+                    "present": True,
+                    "openable": True,
+                    "schema_valid": True,
+                    "embedding_matches": True,
+                    "error": "",
+                    "meta": {"schema_version": 2},
+                }
+
+            @staticmethod
+            def path(path):
+                return str(Path(path) / ".kb_index" / "zvec")
+
+            @staticmethod
+            def open_collection(_path):
+                return OpenCollection()
+
+            @staticmethod
+            def embedding_config_matches(_meta):
+                return True
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            config, "DATA_ROOT", str(Path(temp) / "data")
+        ), mock.patch.object(
+            config, "CONFIG_PATH", str(Path(temp) / "kb.yaml")
+        ):
+            registered = config.create_kb("Old chunks")
+            active = Path(config.active_root(registered["id"]))
+            (active / "processed").mkdir(parents=True)
+            (active / "manifest.json").write_text(json.dumps({
+                "kb_id": registered["id"],
+                "name": "Old chunks",
+                "state": "ready",
+                "summary": {"n_docs": 1},
+                "failures": [],
+                "processing_fingerprint": {
+                    "chunking": {"markdown_parser": "older-contract"},
+                },
+            }), encoding="utf-8")
+            runtime = SimpleNamespace(
+                index=Index(),
+                pipeline=SimpleNamespace(
+                    checkpoint_status=lambda _kb_id: {"available": False}
+                ),
+                usage=SimpleNamespace(load=lambda _path: {}),
+            )
+            with mock.patch.object(backend, "_runtime", return_value=runtime):
+                status = backend.kb_status(config.kb_by_id(registered["id"]))
+
+        self.assertTrue(status["structure_update_available"])
+        self.assertEqual(status["state"], "ready")
+
     def test_skip_is_a_successful_noop_and_replace_is_explicit(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "paper.md"
@@ -198,6 +278,93 @@ class DuplicatePolicyTests(unittest.TestCase):
                 self.assertEqual(replaced["replaced_files"], [source.name])
                 self.assertEqual(documents.prepare_calls, 2)
                 self.assertEqual(index_builder.build_calls, 2)
+
+    def test_incremental_sources_are_merged_as_a_mapping_and_replacement_clears_stale_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            first = Path(temp) / "first.md"
+            second = Path(temp) / "second.md"
+            first.write_text("first", encoding="utf-8")
+            second.write_text("second", encoding="utf-8")
+            with mock.patch.object(config, "DATA_ROOT", str(Path(temp) / "data")), mock.patch.object(
+                config, "CONFIG_PATH", str(Path(temp) / "kb.yaml")
+            ):
+                kb = config.create_kb("Lifecycle")
+                pipeline = IngestPipeline(
+                    document_processor=_SelectionDocuments(),
+                    record_builder=_SelectionRecords(),
+                    index_builder=_SelectionIndexBuilder(),
+                    publisher=Publisher(),
+                    index=_SelectionIndex(),
+                )
+                pipeline.add_documents(kb["id"], [str(first)])
+                manifest_path = Path(config.active_root(kb["id"])) / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["failures"] = [{
+                    "source": f"files/{first.name}",
+                    "stage": "mineru",
+                    "error_type": "MinerUError",
+                    "error": "old failure",
+                }]
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                pipeline.add_documents(kb["id"], [str(second)])
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    set(manifest["index_sources"]["documents"]),
+                    {"documents/first.md", "documents/second.md"},
+                )
+                self.assertEqual(len(manifest["failures"]), 1)
+
+                pipeline.add_documents(
+                    kb["id"], [str(first)], duplicate_policy="replace"
+                )
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertFalse(manifest["failures"])
+                self.assertEqual(
+                    set(manifest["index_sources"]["documents"]),
+                    {"documents/first.md", "documents/second.md"},
+                )
+
+    def test_mismatched_checkpoint_blocks_new_mutations_without_deleting_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            first = Path(temp) / "first.md"
+            second = Path(temp) / "second.md"
+            first.write_text("first", encoding="utf-8")
+            second.write_text("second", encoding="utf-8")
+            with mock.patch.object(config, "DATA_ROOT", str(Path(temp) / "data")), mock.patch.object(
+                config, "CONFIG_PATH", str(Path(temp) / "kb.yaml")
+            ):
+                kb = config.create_kb("Lifecycle")
+                pipeline = IngestPipeline(
+                    document_processor=_SelectionDocuments(),
+                    record_builder=_SelectionRecords(),
+                    index_builder=_SelectionIndexBuilder(),
+                    publisher=Publisher(),
+                    index=_SelectionIndex(),
+                )
+                stage = Path(config.staging_root(kb["id"]))
+                stage.mkdir(parents=True)
+                marker = {
+                    "state": "checkpoint",
+                    "kb_id": kb["id"],
+                    "source_path": "",
+                    "files": [],
+                    "checkpoint": {
+                        "mode": "add_documents",
+                        "created_at": 1,
+                        "source_files": [str(first)],
+                    },
+                }
+                manifest_path = stage / "manifest.json"
+                manifest_path.write_text(json.dumps(marker), encoding="utf-8")
+
+                with self.assertRaisesRegex(RuntimeError, "kb_checkpoint_conflict"):
+                    pipeline.add_documents(kb["id"], [str(second)])
+                self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8")), marker)
+
+                with self.assertRaisesRegex(RuntimeError, "kb_checkpoint_conflict"):
+                    pipeline.delete(kb["id"])
+                self.assertTrue(stage.exists())
 
     def test_image_retry_with_no_pending_images_is_a_noop(self):
         with tempfile.TemporaryDirectory() as temp:

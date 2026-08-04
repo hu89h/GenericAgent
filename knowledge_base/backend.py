@@ -228,9 +228,7 @@ def reindex(kb_id: str, *, progress=None, logfn=None, cancelled=None) -> dict:
         _mark_processing(value, False)
 
 
-def retry_image_analysis(
-    kb_id: str, *, progress=None, logfn=None, cancelled=None, retain_partial=None
-) -> dict:
+def retry_image_analysis(kb_id: str, *, progress=None, logfn=None, cancelled=None) -> dict:
     value = str(kb_id or "").strip()
     _mark_processing(value, True)
     try:
@@ -239,7 +237,6 @@ def retry_image_analysis(
             progress=progress,
             logfn=logfn,
             cancelled=cancelled,
-            retain_partial=retain_partial,
         )
     finally:
         _mark_processing(value, False)
