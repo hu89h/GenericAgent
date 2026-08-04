@@ -164,6 +164,97 @@ class RetrievalContractTests(unittest.TestCase):
         self.assertEqual(hit["matched_by"], ["ref_exact"])
         self.assertNotIn("image_abspath", hit)
 
+    def test_table_read_assembles_the_complete_structure_and_reports_following_content(self):
+        data_id = "kb-a::documents/a.md"
+        rows = {
+            4: {
+                "data_id": data_id,
+                "chunk_index": 4,
+                "kind": "text",
+                "content_type": "table",
+                "structure_id": "table-1",
+                "structure_title": "重要财务与估值指标",
+                "structure_part_index": 0,
+                "structure_part_count": 2,
+                "title": "a.pdf",
+                "header_path": "/财务数据/",
+                "body": "| 指标 | 2020E |\n| --- | --- |\n| 收入 | 100 |",
+            },
+            5: {
+                "data_id": data_id,
+                "chunk_index": 5,
+                "kind": "text",
+                "content_type": "table",
+                "structure_id": "table-1",
+                "structure_title": "重要财务与估值指标",
+                "structure_part_index": 1,
+                "structure_part_count": 2,
+                "title": "a.pdf",
+                "header_path": "/财务数据/",
+                "body": "| 指标 | 2020E |\n| --- | --- |\n| 资产负债率 | 22.3% |",
+            },
+            6: {
+                "data_id": data_id,
+                "chunk_index": 6,
+                "kind": "text",
+                "content_type": "prose",
+                "title": "a.pdf",
+                "header_path": "/财务数据/",
+                "body": "表后说明",
+            },
+        }
+
+        self.retriever._zvec_fetch_doc = lambda _kb, _data_id, index, output_fields=None: (
+            SimpleNamespace(fields=rows[index]) if index in rows else None
+        )
+
+        result = self.retriever.read_content(
+            data_id=data_id,
+            chunk_index=5,
+            span=1,
+            kb_id="kb-a",
+            max_chars=4000,
+        )
+
+        self.assertEqual(result["start_chunk_index"], 4)
+        self.assertEqual(result["end_chunk_index"], 5)
+        self.assertIn("收入", result["content"])
+        self.assertIn("资产负债率", result["content"])
+        self.assertIn("22.3%", result["content"])
+        self.assertFalse(result["continuation"]["has_more"])
+        self.assertIsNone(result["continuation"]["next_chunk_index"])
+        self.assertFalse(result["continuation"]["same_structure"])
+        self.assertTrue(result["continuation"]["same_section"])
+
+    def test_read_does_not_point_continuation_back_to_a_partially_returned_chunk(self):
+        data_id = "kb-a::documents/report.md"
+        fields = {
+            "data_id": data_id,
+            "chunk_index": 0,
+            "body": "| 指标 | 2020E |\n| --- | --- |\n" + "| 很长的指标 | 22.3% |\n" * 80,
+            "content_type": "table",
+            "structure_id": "table-1",
+            "structure_part_index": 0,
+            "structure_part_count": 1,
+            "title": "report.pdf",
+            "header_path": "/财务数据/",
+        }
+        self.retriever._zvec_fetch_doc = (
+            lambda _kb, _data_id, index, output_fields=None:
+            SimpleNamespace(fields=fields) if index == 0 else None
+        )
+
+        result = self.retriever.read_content(
+            data_id=data_id,
+            chunk_index=0,
+            max_chars=500,
+        )
+
+        self.assertTrue(result["continuation"]["has_more"])
+        self.assertTrue(result["continuation"]["truncated_within_chunk"])
+        self.assertIsNone(result["continuation"]["next_chunk_index"])
+        self.assertGreater(result["continuation"]["required_max_chars"], 500)
+
 
 if __name__ == "__main__":
     unittest.main()

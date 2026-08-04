@@ -169,15 +169,11 @@ class ZvecIndex:
 
     @staticmethod
     def _record_cache_key(item: dict) -> str:
-        body = str(item.get("body") or "")
-        value = "\x00".join(
-            (
-                str(item.get("data_id") or ""),
-                str(item.get("chunk_index") or 0),
-                hashlib.sha256(body.encode("utf-8")).hexdigest(),
-            )
-        )
-        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+        # Embeddings depend on the actual model input, not the record's current
+        # ordinal. Rechunking may move an unchanged semantic unit to another
+        # chunk_index; hashing the input lets that vector remain reusable.
+        text = str(item.get("search_text") or item.get("body") or "")
+        return hashlib.sha256(("search-v2\x00" + text).encode("utf-8")).hexdigest()
 
     def _load_record_vector_cache(self, kb_path: str) -> tuple[str, dict]:
         path = os.path.join(self.index_dir(kb_path), "record_embeddings.json")
@@ -188,7 +184,7 @@ class ZvecIndex:
         try:
             with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
-            if not isinstance(payload, dict) or payload.get("version") != 1:
+            if not isinstance(payload, dict) or payload.get("version") != 2:
                 return path, {}
             if (
                 self._embedding_fingerprint(payload.get("embedding"))
@@ -252,7 +248,7 @@ class ZvecIndex:
                 if self._record_cache_key(item) not in vector_cache
             ]
             if missing:
-                texts = [item["body"] for item in missing]
+                texts = [str(item.get("search_text") or item.get("body") or "") for item in missing]
                 dense_usage = self.usage.current()["embedding"]
                 sparse_usage = self.usage.current()["sparse_embedding"]
                 dense_usage["calls"] += 1
@@ -324,7 +320,7 @@ class ZvecIndex:
                 self._write_json_atomic(
                     cache_path,
                     {
-                        "version": 1,
+                        "version": 2,
                         "embedding": embedding_used,
                         "sparse_embedding": sparse_embedding_used,
                         "records": vector_cache,

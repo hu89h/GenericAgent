@@ -18,6 +18,7 @@ from .locking import KnowledgeBaseLockedError, mutation_lock
 from .pipeline import IngestPipeline, Publisher
 from .providers import provider_settings
 from .retrieval import KnowledgeBaseRetriever
+from .schema import INDEX_SCHEMA_VERSION
 from .usage import UsageTracker
 from .zvec import ZvecIndex
 
@@ -398,7 +399,25 @@ def kb_status(kb: dict) -> dict:
         and not kb.get("source_path")
         and not manifest
     )
-    healthy = all(
+    index_meta = probe.get("meta") or {}
+    try:
+        index_schema_version = int(index_meta.get("schema_version") or 1)
+    except (TypeError, ValueError):
+        index_schema_version = 1
+    structure_update_available = bool(
+        kb.get("exists")
+        and probe.get("present")
+        and index_schema_version < INDEX_SCHEMA_VERSION
+    )
+    legacy_readable = False
+    if structure_update_available:
+        try:
+            with _runtime().index.open_collection(_runtime().index.path(kb["path"])):
+                pass
+            legacy_readable = _runtime().index.embedding_config_matches(index_meta)
+        except Exception:
+            legacy_readable = False
+    healthy = legacy_readable or all(
         probe.get(key)
         for key in ("present", "openable", "schema_valid", "embedding_matches")
     )
@@ -437,7 +456,6 @@ def kb_status(kb: dict) -> dict:
         source_change_reason = "unchanged"
     if state == "ready" and source_changed is True:
         state = "ready_with_warnings"
-    index_meta = probe.get("meta") or {}
     documents = []
     if kb.get("exists"):
         try:
@@ -464,10 +482,11 @@ def kb_status(kb: dict) -> dict:
         "state": state,
         "source_changed": source_changed,
         "source_change_reason": source_change_reason,
+        "structure_update_available": structure_update_available,
         "empty": is_empty,
         "index": {
             "present": bool(probe.get("present")),
-            "openable": bool(probe.get("openable")),
+            "openable": bool(probe.get("openable") or legacy_readable),
             "schema_valid": bool(probe.get("schema_valid")),
             "embedding_matches": bool(probe.get("embedding_matches")),
             "error": probe.get("error") or "",
@@ -523,6 +542,7 @@ def search(
     title: str | None = None,
     mode: str = "rrf",
     scope_targets: list[dict] | None = None,
+    evidence_types: list[str] | None = None,
 ) -> dict:
     return _runtime().retrieval.search(
         query,
@@ -533,6 +553,7 @@ def search(
         title=title,
         mode=mode,
         scope_targets=scope_targets,
+        evidence_types=evidence_types,
     )
 
 
@@ -550,6 +571,24 @@ def read_chunk(data_id=None, chunk_index=0, kb_id=None, ref=None, max_chars=4000
     return _runtime().retrieval.read_chunk(
         data_id=data_id,
         chunk_index=chunk_index,
+        kb_id=kb_id,
+        ref=ref,
+        max_chars=max_chars,
+    )
+
+
+def read_content(
+    data_id=None,
+    chunk_index=0,
+    span=1,
+    kb_id=None,
+    ref=None,
+    max_chars=4000,
+):
+    return _runtime().retrieval.read_content(
+        data_id=data_id,
+        chunk_index=chunk_index,
+        span=span,
         kb_id=kb_id,
         ref=ref,
         max_chars=max_chars,

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 
 
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
 
 STRING_FIELDS = (
     "data_id",
@@ -16,6 +16,10 @@ STRING_FIELDS = (
     "source_data_id",
     "header_path",
     "body",
+    "search_text",
+    "content_type",
+    "structure_id",
+    "structure_title",
     "image_id",
     "ref_key",
     "display_label",
@@ -28,7 +32,12 @@ STRING_FIELDS = (
     "related_text",
     "near_text",
 )
-INT_FIELDS = ("chunk_index", "source_chunk_index")
+INT_FIELDS = (
+    "chunk_index",
+    "source_chunk_index",
+    "structure_part_index",
+    "structure_part_count",
+)
 OUTPUT_FIELDS = list(STRING_FIELDS + INT_FIELDS)
 
 
@@ -36,9 +45,19 @@ def normalize_record(record: dict, *, kb_id: str) -> dict:
     value = {field: str(record.get(field) or "") for field in STRING_FIELDS}
     value["kb_id"] = str(kb_id)
     value["kind"] = value["kind"] or "text"
+    if not value["content_type"]:
+        if value["kind"] == "image":
+            value["content_type"] = "table" if value["table_markdown"] else "figure"
+        else:
+            value["content_type"] = "prose"
+    value["search_text"] = value["search_text"] or value["body"]
     value["chunk_index"] = int(record.get("chunk_index") or 0)
     source_index = record.get("source_chunk_index")
     value["source_chunk_index"] = int(source_index if source_index is not None else -1)
+    value["structure_part_index"] = int(record.get("structure_part_index") or 0)
+    value["structure_part_count"] = max(
+        1, int(record.get("structure_part_count") or 1)
+    )
     uncertain = record.get("uncertain")
     if isinstance(uncertain, (list, dict)):
         value["uncertain"] = json.dumps(uncertain, ensure_ascii=False) if uncertain else ""

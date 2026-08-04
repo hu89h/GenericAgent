@@ -126,6 +126,22 @@ class RetrievalModeTests(unittest.TestCase):
         })
         self.assertEqual(hit["final_rank"], 1)
 
+    def test_rrf_passes_expanded_candidate_pool_before_final_cut(self):
+        calls = []
+
+        def capture(_kb, _query, top_k, _snippet_chars, **_kwargs):
+            calls.append(top_k)
+            return []
+
+        self.retriever._search_exact_image_refs = capture
+        self.retriever._search_one_zvec = capture
+        self.retriever._search_one_zvec_sparse = capture
+
+        result = self.retriever.search("mixed", top_k=2, mode="rrf")
+
+        self.assertEqual(result["results"], [])
+        self.assertEqual(calls, [8, 8, 8])
+
     def test_selected_mode_failure_is_not_replaced_by_another_channel(self):
         with mock.patch.object(
             self.index,
