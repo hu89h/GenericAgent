@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+from dataclasses import dataclass, field
+from html.parser import HTMLParser
 
 
 INDEX_SUBDIR = ".kb_index"
@@ -58,8 +61,8 @@ def chunking_meta():
     return {
         "chunker": "markdown_sections_packer",
         "markdown_chunk_target_size": max(128, int(MD_CHUNK_SIZES[-1])),
-        "markdown_parser": "ga_markdown_sections_v1",
-        "markdown_packer": "ga_structural_blocks_v2_image_occurrences",
+        "markdown_parser": "ga_semantic_markdown_v2",
+        "markdown_packer": "ga_structural_blocks_v3_semantic",
     }
 
 
@@ -107,12 +110,33 @@ def _chunk_prefix(header_path):
     return f"章节路径：{header_path}\n\n"
 
 
-def _chunk_record(body, *, header_path="", image_occurrence_ids=None):
-    return {
+def _chunk_record(
+    body,
+    *,
+    header_path="",
+    image_occurrence_ids=None,
+    content_type="prose",
+    structure_id="",
+    structure_title="",
+    structure_part_index=0,
+    structure_part_count=1,
+    search_text="",
+    structure_warning="",
+):
+    result = {
         "body": body,
         "header_path": str(header_path or ""),
         "_image_occurrence_ids": list(image_occurrence_ids or []),
+        "content_type": str(content_type or "prose"),
+        "structure_id": str(structure_id or ""),
+        "structure_title": str(structure_title or ""),
+        "structure_part_index": int(structure_part_index or 0),
+        "structure_part_count": max(1, int(structure_part_count or 1)),
+        "search_text": str(search_text or body or ""),
     }
+    if structure_warning:
+        result["_structure_warning"] = str(structure_warning)
+    return result
 
 
 _MD_HEADING_LINE_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
@@ -135,9 +159,16 @@ def _markdown_sections(text):
         match = _MD_HEADING_LINE_RE.match(line)
         if match:
             flush()
-            buffer = [line]
+            buffer = []
             level = len(match.group(1))
-            title = re.sub(r"\s+", " ", match.group(2).strip().strip("#").strip())
+            title = re.sub(r"<[^>]+>", "", match.group(2))
+            title = re.sub(
+                r"^\s*\[Table\\?_?MaiN\]\s*",
+                "",
+                title,
+                flags=re.IGNORECASE,
+            )
+            title = re.sub(r"\s+", " ", title.strip().strip("#").strip())
             stack[:] = stack[: level - 1]
             stack.append(title)
             current_header = "/" + "/".join(stack) + "/" if stack else "/"
@@ -149,46 +180,350 @@ def _markdown_sections(text):
     return sections
 
 
-_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^\r\n]+\)")
-_MARKER_RE = re.compile(r"GAKB(?:IMAGE|TABLE|CODE|LIST)\d{6}")
-_IMAGE_MARKER_RE = re.compile(r"GAKBIMAGE\d{6}")
+_MD_IMAGE_RE = re.compile(
+    r"!\[[^\]]*\]\((?:[^()\\\s\r\n]|\\.|\([^()\r\n]*\))+"
+    r"(?:\s+\"[^\"\r\n]*\")?\)"
+)
+_MARKER_RE = re.compile(
+    r"GAKB(?:FIGURE|TABLE|CODE|LIST|EQUATION|QUOTE|NOTE)\d{6}"
+)
 _FENCE_RE = re.compile(r"^\s{0,3}(\`{3,}|~{3,})(.*)$")
 _LIST_ITEM_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+")
 _TABLE_SEPARATOR_RE = re.compile(
     r"^\s*\|?\s*:?-{1,}:?\s*(?:\|\s*:?-{1,}:?\s*)+\|?\s*$"
 )
+_FOOTNOTE_RE = re.compile(r"^\s*\[\^[^\]]+\]:\s*")
+_HTML_BLOCK_RE = re.compile(
+    r"<(?P<tag>table|pre|blockquote|ul|ol)\b[^>]*>.*?</(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_MATH_BEGIN_RE = re.compile(
+    r"^\s*\\begin\{(?P<env>equation\*?|align\*?|gather\*?|multline\*?|cases|matrix|array)\}"
+)
 
 
-def _marker(kind, value, replacements, marker_occurrences=None, occurrence_ids=None):
+@dataclass
+class _ProtectedBlock:
+    kind: str
+    raw: str
+    occurrence_ids: list[int] = field(default_factory=list)
+    warning: str = ""
+    parsed: dict | None = None
+
+
+@dataclass
+class _TableCell:
+    text: str
+    rowspan: int = 1
+    colspan: int = 1
+    header: bool = False
+
+
+class _HTMLTableParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[_TableCell]] = []
+        self.caption = ""
+        self._row: list[_TableCell] | None = None
+        self._cell: _TableCell | None = None
+        self._cell_parts: list[str] = []
+        self._in_caption = False
+        self._caption_parts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        attrs = {str(key).lower(): value for key, value in attrs}
+        if tag == "tr":
+            self._row = []
+        elif tag in {"td", "th"} and self._row is not None:
+            try:
+                rowspan = max(1, int(attrs.get("rowspan") or 1))
+            except (TypeError, ValueError):
+                rowspan = 1
+            try:
+                colspan = max(1, int(attrs.get("colspan") or 1))
+            except (TypeError, ValueError):
+                colspan = 1
+            self._cell = _TableCell("", rowspan, colspan, tag == "th")
+            self._cell_parts = []
+        elif tag == "caption":
+            self._in_caption = True
+            self._caption_parts = []
+        elif tag == "br" and self._cell is not None:
+            self._cell_parts.append(" ")
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in {"td", "th"} and self._cell is not None:
+            self._cell.text = _normalize_cell_text("".join(self._cell_parts))
+            if self._row is not None:
+                self._row.append(self._cell)
+            self._cell = None
+            self._cell_parts = []
+        elif tag == "tr" and self._row is not None:
+            if self._row:
+                self.rows.append(self._row)
+            self._row = None
+        elif tag == "caption":
+            self.caption = _normalize_cell_text("".join(self._caption_parts))
+            self._in_caption = False
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell_parts.append(data)
+        if self._in_caption:
+            self._caption_parts.append(data)
+
+
+class _HTMLTextParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag, _attrs):
+        if tag.lower() in {"br", "p", "div", "li", "tr"}:
+            self.parts.append("\n")
+        if tag.lower() == "li":
+            self.parts.append("- ")
+
+    def handle_endtag(self, tag):
+        if tag.lower() in {"p", "div", "li", "tr", "pre", "blockquote"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
+def _normalize_cell_text(value):
+    value = re.sub(r"<br\s*/?>", " ", str(value or ""), flags=re.IGNORECASE)
+    value = re.sub(r"<[^>]+>", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _html_plain_text(value):
+    parser = _HTMLTextParser()
+    try:
+        parser.feed(str(value or ""))
+        parser.close()
+        return re.sub(r"\n{3,}", "\n\n", "".join(parser.parts)).strip()
+    except Exception:
+        return _normalize_cell_text(value)
+
+
+def _expand_table_rows(rows):
+    expanded = []
+    pending: dict[int, tuple[str, int, bool]] = {}
+    for raw_row in rows:
+        row: list[str] = []
+        headers: list[bool] = []
+        column = 0
+
+        def fill_pending():
+            nonlocal column
+            while column in pending:
+                text, remaining, is_header = pending[column]
+                row.append(text)
+                headers.append(is_header)
+                if remaining <= 1:
+                    pending.pop(column, None)
+                else:
+                    pending[column] = (text, remaining - 1, is_header)
+                column += 1
+
+        for cell in raw_row:
+            fill_pending()
+            for _ in range(cell.colspan):
+                row.append(cell.text)
+                headers.append(cell.header)
+                if cell.rowspan > 1:
+                    pending[column] = (cell.text, cell.rowspan - 1, cell.header)
+                column += 1
+        fill_pending()
+        expanded.append((row, headers))
+    width = max((len(row) for row, _headers in expanded), default=0)
+    return [
+        (row + [""] * (width - len(row)), headers + [False] * (width - len(headers)))
+        for row, headers in expanded
+    ]
+
+
+def _parse_html_table(raw):
+    parser = _HTMLTableParser()
+    warning = ""
+    try:
+        parser.feed(raw)
+        parser.close()
+    except Exception:
+        warning = "HTML 表格结构不完整，已使用安全文本恢复"
+    expanded = _expand_table_rows(parser.rows)
+    if not expanded:
+        plain = _html_plain_text(raw)
+        return {
+            "title": "",
+            "headers": [],
+            "rows": [[plain]] if plain else [],
+            "warning": warning or "HTML 表格无法解析，已使用安全文本恢复",
+        }
+    header_count = 0
+    for _row, header_flags in expanded:
+        if any(header_flags):
+            header_count += 1
+        else:
+            break
+    if not header_count:
+        header_count = 1
+    header_rows = [row for row, _flags in expanded[:header_count]]
+    width = len(header_rows[0]) if header_rows else 0
+    headers = []
+    for column in range(width):
+        values = []
+        for row in header_rows:
+            value = row[column].strip()
+            if value and value not in values:
+                values.append(value)
+        headers.append(" / ".join(values))
+    title = parser.caption.strip() or (headers[0] if headers else "")
+    return {
+        "title": title,
+        "headers": headers,
+        "rows": [row for row, _flags in expanded[header_count:]],
+        "warning": warning,
+    }
+
+
+def _split_markdown_row(line):
+    value = line.strip().strip("|")
+    return [_normalize_cell_text(item.replace(r"\|", "|")) for item in re.split(r"(?<!\\)\|", value)]
+
+
+def _parse_markdown_table(raw):
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return {"title": "", "headers": [], "rows": [], "warning": "Markdown 表格不完整"}
+    headers = _split_markdown_row(lines[0])
+    rows = [_split_markdown_row(line) for line in lines[2:]]
+    width = len(headers)
+    rows = [row[:width] + [""] * max(0, width - len(row)) for row in rows]
+    return {
+        "title": headers[0] if headers else "",
+        "headers": headers,
+        "rows": rows,
+        "warning": "",
+    }
+
+
+def _markdown_table(headers, rows, *, title="", unit=""):
+    headers = list(headers or [])
+    rows = list(rows or [])
+    if not headers:
+        return "\n".join(" | ".join(row) for row in rows).strip()
+    lines = []
+    if title and title not in headers:
+        lines.append(f"表格：{title}")
+    if unit:
+        lines.append(unit if re.match(r"^单位\s*[:：]", unit) else f"单位：{unit}")
+    lines.append("| " + " | ".join(headers) + " |")
+    lines.append("| " + " | ".join("---" for _ in headers) + " |")
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    return "\n".join(lines)
+
+
+def _split_table_block(block, target_size):
+    parsed = block.parsed or (
+        _parse_html_table(block.raw)
+        if re.search(r"<table\b", block.raw, re.IGNORECASE)
+        else _parse_markdown_table(block.raw)
+    )
+    headers = parsed["headers"]
+    rows = parsed["rows"]
+    title = parsed["title"]
+    unit = parsed.get("unit") or ""
+    warning = parsed["warning"] or block.warning
+    if not rows:
+        body = _markdown_table(headers, [], title=title, unit=unit) or _html_plain_text(block.raw)
+        return [(body, title, warning)] if body else []
+    expanded_rows = []
+    for row in rows:
+        if len(_markdown_table(headers, [row], title=title, unit=unit)) <= target_size:
+            expanded_rows.append(row)
+            continue
+        cell_budget = max(80, target_size // max(1, len(row)))
+        cell_parts = [
+            _split_plain_block(cell, cell_budget) if len(cell) > cell_budget else [cell]
+            for cell in row
+        ]
+        part_count = max((len(parts) for parts in cell_parts), default=1)
+        for part_index in range(part_count):
+            expanded_rows.append([
+                parts[part_index] if len(parts) > 1 and part_index < len(parts) else (
+                    parts[0] if len(parts) == 1 else ""
+                )
+                for parts in cell_parts
+            ])
+    rows = expanded_rows
+    groups = []
+    current = []
+    for row in rows:
+        candidate = _markdown_table(headers, current + [row], title=title, unit=unit)
+        if current and len(candidate) > target_size:
+            groups.append(current)
+            current = [row]
+        else:
+            current.append(row)
+    if current:
+        groups.append(current)
+    return [
+        (_markdown_table(headers, group, title=title, unit=unit), title, warning)
+        for group in groups
+    ]
+
+
+def _marker(kind, value, replacements, *, occurrence_ids=None, warning=""):
     marker = f"GAKB{kind}{len(replacements):06d}"
-    replacements[marker] = value
-    if marker_occurrences is not None and occurrence_ids:
-        marker_occurrences[marker] = list(dict.fromkeys(int(item) for item in occurrence_ids))
+    replacements[marker] = _ProtectedBlock(
+        kind=kind.lower(),
+        raw=value,
+        occurrence_ids=list(dict.fromkeys(int(item) for item in (occurrence_ids or []))),
+        warning=warning,
+    )
     return marker
 
 
 def _protect_markdown_blocks(text, image_index=None):
-    """Collapse tables/code/lists/images into single-line markers before chunking.
-
-    Section splitting works on headings alone, so multi-line constructs are
-    hidden behind markers to keep them off the heading scan and intact as one
-    unit.  The originals are restored after packing: the image index resolves
-    those paths later and the source reader displays the original formatting.
-    """
-    lines = text.splitlines()
+    """Mask semantic Markdown/HTML structures without changing source offsets."""
     replacements = {}
-    marker_occurrences = {}
+
+    def mask_html(match):
+        raw = match.group(0)
+        tag = str(match.group("tag") or "").lower()
+        kind = {
+            "table": "TABLE",
+            "pre": "CODE",
+            "blockquote": "QUOTE",
+            "ul": "LIST",
+            "ol": "LIST",
+        }[tag]
+        occurrence_ids = (
+            image_index.occurrence_ids_between(match.start(), match.end())
+            if image_index is not None else []
+        )
+        marker = _marker(kind, raw, replacements, occurrence_ids=occurrence_ids)
+        masked = ["\n" if char == "\n" else " " for char in raw]
+        masked[:len(marker)] = marker
+        return "".join(masked)
+
+    text = _HTML_BLOCK_RE.sub(mask_html, text)
+    lines = text.splitlines()
     output = []
     index = 0
 
     def protect_images(value, base_offset):
         return _MD_IMAGE_RE.sub(
             lambda match: _marker(
-                "IMAGE",
+                "FIGURE",
                 match.group(0),
                 replacements,
-                marker_occurrences,
-                image_index.occurrence_ids_between(
+                occurrence_ids=image_index.occurrence_ids_between(
                     base_offset + match.start(), base_offset + match.end()
                 ) if image_index is not None else [],
             ),
@@ -203,6 +538,12 @@ def _protect_markdown_blocks(text, image_index=None):
 
     while index < len(lines):
         line = lines[index]
+        stripped = line.strip()
+        if stripped in replacements:
+            output.append(stripped)
+            index += 1
+            continue
+
         fence = _FENCE_RE.match(line)
         if fence:
             fence_char = fence.group(1)[0]
@@ -224,8 +565,7 @@ def _protect_markdown_blocks(text, image_index=None):
                 "CODE",
                 "\n".join(lines[index:end]),
                 replacements,
-                marker_occurrences,
-                image_index.occurrence_ids_between(block_start, block_end)
+                occurrence_ids=image_index.occurrence_ids_between(block_start, block_end)
                 if image_index is not None else [],
             ))
             index = end
@@ -245,16 +585,54 @@ def _protect_markdown_blocks(text, image_index=None):
                 ):
                     break
                 end += 1
-            block_start = line_starts[index]
-            block_end = line_starts[end - 1] + len(lines[end - 1])
+            output.append(_marker("TABLE", "\n".join(lines[index:end]), replacements))
+            index = end
+            continue
+
+        math_close = ""
+        if stripped == "$$":
+            math_close = "$$"
+        elif stripped == r"\[":
+            math_close = r"\]"
+        else:
+            math_begin = _MATH_BEGIN_RE.match(line)
+            if math_begin:
+                math_close = rf"\end{{{math_begin.group('env')}}}"
+        if math_close:
+            end = index + 1
+            found_close = False
+            while end < len(lines):
+                if lines[end].strip() == math_close:
+                    found_close = True
+                    end += 1
+                    break
+                end += 1
             output.append(_marker(
-                "TABLE",
+                "EQUATION",
                 "\n".join(lines[index:end]),
                 replacements,
-                marker_occurrences,
-                image_index.occurrence_ids_between(block_start, block_end)
-                if image_index is not None else [],
+                warning="" if found_close else "公式定界符不完整",
             ))
+            index = end
+            continue
+
+        if re.match(r"^\s{0,3}>", line):
+            end = index + 1
+            while end < len(lines) and (
+                re.match(r"^\s{0,3}>", lines[end]) or not lines[end].strip()
+            ):
+                end += 1
+            output.append(_marker("QUOTE", "\n".join(lines[index:end]), replacements))
+            index = end
+            continue
+
+        if _FOOTNOTE_RE.match(line):
+            end = index + 1
+            while end < len(lines) and (
+                not lines[end].strip() or lines[end][:1].isspace()
+            ):
+                end += 1
+            output.append(_marker("NOTE", "\n".join(lines[index:end]), replacements))
             index = end
             continue
 
@@ -268,31 +646,23 @@ def _protect_markdown_blocks(text, image_index=None):
                     end += 1
                     continue
                 break
-            block_start = line_starts[index]
-            block_end = line_starts[end - 1] + len(lines[end - 1])
-            output.append(_marker(
-                "LIST",
-                "\n".join(lines[index:end]),
-                replacements,
-                marker_occurrences,
-                image_index.occurrence_ids_between(block_start, block_end)
-                if image_index is not None else [],
-            ))
+            output.append(_marker("LIST", "\n".join(lines[index:end]), replacements))
             index = end
+            continue
+
+        if re.search(r"<table\b", line, re.IGNORECASE):
+            output.append(_marker(
+                "TABLE",
+                line,
+                replacements,
+                warning="HTML 表格缺少完整结束标签，已使用安全恢复",
+            ))
+            index += 1
             continue
 
         output.append(protect_images(line, line_starts[index]))
         index += 1
-    return "\n".join(output), replacements, marker_occurrences
-
-
-def _restore_markdown_blocks(text, replacements):
-    if not replacements or not text:
-        return text
-    return _MARKER_RE.sub(
-        lambda match: replacements.get(match.group(0), match.group(0)),
-        text,
-    )
+    return "\n".join(output), replacements
 
 
 def _best_split_position(text, target):
@@ -326,96 +696,274 @@ def _split_plain_block(text, target_size):
     return [chunk for chunk in chunks if chunk]
 
 
-def _split_structural_block(body, target_size, replacements):
-    if len(_restore_markdown_blocks(body, replacements)) <= target_size:
-        return [body]
-    image_markers = list(_IMAGE_MARKER_RE.finditer(body))
-    if image_markers:
-        # MinerU often puts a row of figures and captions into one structural
-        # block.  Split at image boundaries so each figure remains searchable
-        # with its immediately following caption instead of creating a huge
-        # image-only chunk.
-        pieces = []
-        cursor = 0
-        for marker_index, match in enumerate(image_markers):
-            before = body[cursor:match.start()].strip()
-            if before:
-                pieces.extend(_split_plain_block(before, target_size))
-            end = (
-                image_markers[marker_index + 1].start()
-                if marker_index + 1 < len(image_markers)
-                else len(body)
-            )
-            pieces.append(body[match.start():end].strip())
-            cursor = end
-        trailing = body[cursor:].strip()
-        if trailing:
-            pieces.extend(_split_plain_block(trailing, target_size))
-        return [piece for piece in pieces if piece]
-    # A table, list, code block, or image-containing block is kept intact.  A
-    # broken Markdown construct is harder to retrieve and display than a
-    # slightly oversized chunk.
-    if _MARKER_RE.search(body):
-        return [body]
-    return _split_plain_block(body, target_size)
+def _split_by_lines(lines, target_size):
+    groups = []
+    current = []
+    for line in lines:
+        candidate = "\n".join(current + [line])
+        if current and len(candidate) > target_size:
+            groups.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        groups.append(current)
+    return groups
 
 
-def _pack_blocks(blocks, replacements, target_size, marker_occurrences=None):
+def _split_code_block(raw, target_size):
+    if re.search(r"<pre\b", raw, re.IGNORECASE):
+        raw = "```\n" + _html_plain_text(raw) + "\n```"
+    lines = raw.splitlines()
+    fence = _FENCE_RE.match(lines[0] if lines else "")
+    if not fence or len(raw) <= target_size:
+        return [raw]
+    opening = lines[0]
+    has_close = len(lines) > 1 and bool(
+        re.match(r"^\s*(?:`{3,}|~{3,})\s*$", lines[-1])
+    )
+    closing = lines[-1] if has_close else fence.group(1)
+    inner = lines[1:-1] if has_close else lines[1:]
+    budget = max(128, target_size - len(opening) - len(closing) - 2)
+    return [
+        opening + "\n" + "\n".join(group) + "\n" + closing
+        for group in _split_by_lines(inner, budget)
+    ]
+
+
+def _split_list_block(raw, target_size):
+    value = (
+        _html_plain_text(raw)
+        if re.search(r"<(?:ul|ol)\b", raw, re.IGNORECASE)
+        else raw
+    )
+    items = []
+    current = []
+    for line in value.splitlines():
+        if _LIST_ITEM_RE.match(line) and current:
+            items.append("\n".join(current).strip())
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        items.append("\n".join(current).strip())
+    return ["\n".join(group) for group in _split_by_lines(items, target_size)]
+
+
+def _split_equation_block(raw, target_size):
+    if len(raw) <= target_size:
+        return [raw]
+    lines = raw.splitlines()
+    if len(lines) <= 2:
+        return [raw]
+    opening, closing = lines[0], lines[-1]
+    budget = max(128, target_size - len(opening) - len(closing) - 2)
+    return [
+        opening + "\n" + "\n".join(group) + "\n" + closing
+        for group in _split_by_lines(lines[1:-1], budget)
+    ]
+
+
+def _split_generic_structured(raw, target_size):
+    value = _html_plain_text(raw) if re.search(r"<[^>]+>", raw) else raw
+    paragraphs = [
+        item.strip() for item in re.split(r"\n\s*\n", value) if item.strip()
+    ]
+    return [
+        "\n\n".join(group)
+        for group in _split_by_lines(paragraphs, target_size)
+    ]
+
+
+def _structure_title(kind, raw):
+    if kind == "figure":
+        match = _MD_IMAGE_RE.search(raw)
+        if match:
+            alt = re.match(r"!\[([^\]]*)\]", match.group(0))
+            return re.sub(r"\s+", " ", alt.group(1)).strip() if alt else ""
+    if kind == "note":
+        match = re.match(r"\s*(\[\^[^\]]+\])", raw)
+        return match.group(1) if match else ""
+    return ""
+
+
+def _block_parts(block, target_size):
+    if block.kind == "table":
+        return _split_table_block(block, target_size)
+    if block.kind == "code":
+        bodies = _split_code_block(block.raw, target_size)
+    elif block.kind == "list":
+        bodies = _split_list_block(block.raw, target_size)
+    elif block.kind == "equation":
+        bodies = _split_equation_block(block.raw, target_size)
+    elif block.kind in {"quote", "note"}:
+        bodies = _split_generic_structured(block.raw, target_size)
+    else:
+        bodies = [block.raw]
+    title = _structure_title(block.kind, block.raw)
+    return [(body, title, block.warning) for body in bodies if body.strip()]
+
+
+def _section_tokens(body, replacements):
+    tokens = []
+    cursor = 0
+    for match in _MARKER_RE.finditer(body or ""):
+        before = body[cursor:match.start()].strip()
+        if before:
+            tokens.append(before)
+        block = replacements.get(match.group(0))
+        if block is not None:
+            tokens.append(block)
+        cursor = match.end()
+    trailing = body[cursor:].strip()
+    if trailing:
+        tokens.append(trailing)
+
+    for index, token in enumerate(tokens[:-1]):
+        if not isinstance(token, _ProtectedBlock) or token.kind != "figure":
+            continue
+        following = tokens[index + 1]
+        if not isinstance(following, str):
+            continue
+        parts = re.split(r"\n\s*\n", following, maxsplit=1)
+        caption = parts[0].strip()
+        if len(caption) <= 300 and re.match(
+            r"^(?:图|表|Figure|Fig\.?|注[:：])", caption, re.IGNORECASE
+        ):
+            token.raw = token.raw.rstrip() + "\n" + caption
+            tokens[index + 1] = parts[1].strip() if len(parts) > 1 else ""
+
+    # MinerU and hand-written Markdown often place a table title and unit on
+    # the lines immediately before the table instead of using ``<caption>``.
+    # Bind only unambiguous metadata lines so ordinary prose remains prose.
+    for index, token in enumerate(tokens):
+        if not isinstance(token, _ProtectedBlock) or token.kind != "table" or index == 0:
+            continue
+        preceding = tokens[index - 1]
+        if not isinstance(preceding, str):
+            continue
+        lines = preceding.rstrip().splitlines()
+        metadata = []
+        while lines and len(metadata) < 2:
+            candidate = lines[-1].strip()
+            if not candidate:
+                lines.pop()
+                continue
+            if re.match(
+                r"^(?:单位\s*[:：]|(?:附?表|Table)\s*[A-Za-z0-9一二三四五六七八九十.-]*)",
+                candidate,
+                re.IGNORECASE,
+            ):
+                metadata.insert(0, candidate)
+                lines.pop()
+                continue
+            break
+        if not metadata:
+            continue
+        parsed = dict(_table_data(token))
+        title = next(
+            (value for value in metadata if not re.match(r"^单位\s*[:：]", value)),
+            "",
+        )
+        unit = next(
+            (value for value in metadata if re.match(r"^单位\s*[:：]", value)),
+            "",
+        )
+        if title:
+            parsed["title"] = title
+        if unit:
+            parsed["unit"] = unit
+        token.parsed = parsed
+        tokens[index - 1] = "\n".join(lines).rstrip()
+    return [token for token in tokens if not isinstance(token, str) or token.strip()]
+
+
+def _table_data(block):
+    if block.parsed is not None:
+        return block.parsed
+    return (
+        _parse_html_table(block.raw)
+        if re.search(r"<table\b", block.raw, re.IGNORECASE)
+        else _parse_markdown_table(block.raw)
+    )
+
+
+def _merge_adjacent_tables(tokens):
+    merged = []
+    for token in tokens:
+        if (
+            merged
+            and isinstance(token, _ProtectedBlock)
+            and token.kind == "table"
+            and isinstance(merged[-1], _ProtectedBlock)
+            and merged[-1].kind == "table"
+        ):
+            previous = merged[-1]
+            left = _table_data(previous)
+            right = _table_data(token)
+            if (
+                left.get("headers") == right.get("headers")
+                and left.get("title") == right.get("title")
+            ):
+                previous.parsed = {
+                    **left,
+                    "rows": list(left.get("rows") or [])
+                    + list(right.get("rows") or []),
+                    "warning": left.get("warning") or right.get("warning") or "",
+                }
+                previous.occurrence_ids = sorted(
+                    set(previous.occurrence_ids + token.occurrence_ids)
+                )
+                continue
+        merged.append(token)
+    return merged
+
+
+def _pack_semantic_blocks(blocks, replacements, target_size, *, file_name=""):
     records = []
-    current_header = None
-    current_body = ""
-    # Restored length of current_body, tracked incrementally.  Markers never
-    # span the "\n\n" join between pieces (see _split_structural_block), so
-    # restoration distributes over concatenation and we avoid re-restoring the
-    # whole accumulated body on every append (was O(n²) per structural block).
-    current_restored = 0
-
-    def flush():
-        nonlocal current_body, current_header, current_restored
-        if not current_body.strip():
-            current_body = ""
-            current_header = None
-            current_restored = 0
-            return
-        raw_body = current_body.strip()
-        occurrence_ids = []
-        if marker_occurrences:
-            for marker in _MARKER_RE.findall(raw_body):
-                occurrence_ids.extend(marker_occurrences.get(marker, []))
-        restored = _restore_markdown_blocks(raw_body, replacements)
-        records.append(_chunk_record(
-            _chunk_prefix(current_header) + restored,
-            header_path=current_header,
-            image_occurrence_ids=sorted(set(occurrence_ids)),
-        ))
-        current_body = ""
-        current_header = None
-        current_restored = 0
-
+    structure_ordinal = 0
     for header_path, body in blocks:
         prefix = _chunk_prefix(header_path)
-        prefix_len = len(prefix)
-        effective_target = max(128, target_size - prefix_len)
-        for piece in _split_structural_block(body, effective_target, replacements):
-            piece_restored = len(_restore_markdown_blocks(piece, replacements))
-            if current_header is not None and header_path != current_header:
-                flush()
-            if not current_body:
-                current_header = header_path
-                current_body = piece
-                current_restored = piece_restored
+        effective_target = max(128, target_size - len(prefix))
+        tokens = _merge_adjacent_tables(_section_tokens(body, replacements))
+        for token in tokens:
+            if isinstance(token, str):
+                for piece in _split_plain_block(token, effective_target):
+                    value = prefix + piece
+                    records.append(_chunk_record(
+                        value,
+                        header_path=header_path,
+                        content_type="prose",
+                        search_text=value,
+                    ))
                 continue
-            # restored length of (current_body + "\n\n" + piece)
-            candidate_restored = current_restored + 2 + piece_restored
-            if prefix_len + candidate_restored > target_size:
-                flush()
-                current_header = header_path
-                current_body = piece
-                current_restored = piece_restored
-            else:
-                current_body = current_body + "\n\n" + piece
-                current_restored = candidate_restored
-    flush()
+            structure_ordinal += 1
+            raw_key = re.sub(r"\s+", " ", token.raw).strip()
+            structure_id = hashlib.sha1(
+                (
+                    f"{file_name}\x00{header_path}\x00{token.kind}\x00"
+                    f"{structure_ordinal}\x00{raw_key}"
+                ).encode("utf-8")
+            ).hexdigest()
+            parts = _block_parts(token, effective_target)
+            count = len(parts)
+            for part_index, (piece, title, warning) in enumerate(parts):
+                value = prefix + piece
+                search_text = "\n".join(
+                    item for item in (header_path.strip("/"), title, piece) if item
+                )
+                records.append(_chunk_record(
+                    value,
+                    header_path=header_path,
+                    image_occurrence_ids=token.occurrence_ids,
+                    content_type=token.kind,
+                    structure_id=structure_id,
+                    structure_title=title,
+                    structure_part_index=part_index,
+                    structure_part_count=count,
+                    search_text=search_text,
+                    structure_warning=warning,
+                ))
     return records
 
 
@@ -430,9 +978,14 @@ def chunk_document_records(text, *, ext="", file_name="", image_index=None):
     # Markers hide multi-line constructs so the heading scan sees only headings
     # and single-line marker rows; _markdown_sections then splits on headings
     # and always returns a non-empty result for non-empty text.
-    protected, replacements, marker_occurrences = _protect_markdown_blocks(text, image_index)
+    protected, replacements = _protect_markdown_blocks(text, image_index)
     blocks = _markdown_sections(protected)
-    return _pack_blocks(blocks, replacements, target_size, marker_occurrences)
+    return _pack_semantic_blocks(
+        blocks,
+        replacements,
+        target_size,
+        file_name=file_name,
+    )
 
 
 def chunk_document_text(text, *, ext="", file_name=""):

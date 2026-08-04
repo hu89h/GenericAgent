@@ -676,6 +676,7 @@ class ImageAssetProcessor:
     def image_records_for_document(
         self, kb, rel, data_id, body, title, log,
         image_jobs=None, image_index=None, existing_images=None, retry_only=False,
+        preserve_analysis_only=False,
     ):
         """Build one canonical asset record for every image reference in a document.
 
@@ -773,7 +774,9 @@ class ImageAssetProcessor:
                 or bool(existing.get("analysis_error"))
                 or not str(existing.get("description") or existing.get("table_markdown") or "").strip()
             )
-            if retry_only and existing is not None and not needs_analysis:
+            if existing is not None and (
+                preserve_analysis_only or (retry_only and not needs_analysis)
+            ):
                 for key in (
                     "description", "table_markdown", "uncertain", "analysis_error",
                     "analysis_warning", "ref_key", "display_label",
@@ -781,7 +784,11 @@ class ImageAssetProcessor:
                     if key in existing:
                         asset[key] = existing[key]
                 asset["_preserved_analysis"] = True
-            if analysis_enabled and (not retry_only or needs_analysis):
+            if (
+                analysis_enabled
+                and not preserve_analysis_only
+                and (not retry_only or needs_analysis)
+            ):
                 job = ImageContent(
                     image_sha=image_sha,
                     image_path=image_rel,

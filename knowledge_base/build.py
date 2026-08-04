@@ -52,6 +52,7 @@ class RecordBuilder:
         include_files: set[str] | None = None,
         existing_image_records: dict[str, dict] | None = None,
         retry_images_only: bool = False,
+        preserve_image_analysis: bool = False,
     ) -> RecordBuildResult:
         """Build records for all staged documents or a selected subset.
 
@@ -113,7 +114,16 @@ class RecordBuilder:
                 if not chunks:
                     raise ValueError("文档没有可索引正文")
                 docs_with_chunks += 1
+                warned_structures = set()
                 for chunk_index, chunk in enumerate(chunks):
+                    search_text = "\n".join(
+                        value
+                        for value in (
+                            title,
+                            str(chunk.get("search_text") or chunk.get("body") or ""),
+                        )
+                        if value
+                    )
                     records.append({
                         "data_id": data_id,
                         "chunk_index": chunk_index,
@@ -123,7 +133,30 @@ class RecordBuilder:
                         "source_chunk_index": -1,
                         "header_path": chunk.get("header_path", ""),
                         "body": chunk.get("body", ""),
+                        "search_text": search_text,
+                        "content_type": chunk.get("content_type") or "prose",
+                        "structure_id": chunk.get("structure_id") or "",
+                        "structure_title": chunk.get("structure_title") or "",
+                        "structure_part_index": int(
+                            chunk.get("structure_part_index") or 0
+                        ),
+                        "structure_part_count": max(
+                            1, int(chunk.get("structure_part_count") or 1)
+                        ),
                     })
+                    warning_key = (
+                        str(chunk.get("structure_id") or ""),
+                        str(chunk.get("_structure_warning") or ""),
+                    )
+                    if warning_key[1] and warning_key not in warned_structures:
+                        warned_structures.add(warning_key)
+                        failures.append({
+                            "source": rel,
+                            "document": rel,
+                            "stage": "structure_parse",
+                            "error_type": "StructureParseWarning",
+                            "error": warning_key[1],
+                        })
                 if image_index is not None:
                     image_result = self.assets.image_records_for_document(
                         kb,
@@ -136,6 +169,7 @@ class RecordBuilder:
                         image_index=image_index,
                         existing_images=existing_image_records,
                         retry_only=retry_images_only,
+                        preserve_analysis_only=preserve_image_analysis,
                     )
                     image_records.extend(image_result.get("assets") or [])
                     for missing in image_result.get("missing") or []:
