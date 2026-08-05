@@ -62,7 +62,7 @@ def chunking_meta():
         "chunker": "markdown_sections_packer",
         "markdown_chunk_target_size": max(128, int(MD_CHUNK_SIZES[-1])),
         "markdown_parser": "ga_semantic_markdown_v3_balanced",
-        "markdown_packer": "ga_structural_blocks_v4_correctness",
+        "markdown_packer": "ga_structural_blocks_v5_adjacent_context",
         "image_caption_binding": "ga_strict_adjacent_v3_explicit",
     }
 
@@ -1099,6 +1099,43 @@ def _table_data(block):
     )
 
 
+_TABLE_ADJACENT_CONTEXT_CHARS = 384
+
+
+def _adjacent_plain_context(tokens, index, *, before):
+    """Return one source-adjacent prose block without inferring its meaning."""
+    neighbour = index - 1 if before else index + 1
+    if neighbour < 0 or neighbour >= len(tokens):
+        return ""
+    value = tokens[neighbour]
+    if not isinstance(value, str):
+        return ""
+    blocks = [
+        item.strip()
+        for item in re.split(r"\n\s*\n", value)
+        if item.strip()
+    ]
+    if not blocks:
+        return ""
+    context = blocks[-1] if before else blocks[0]
+    limit = _TABLE_ADJACENT_CONTEXT_CHARS
+    if len(context) <= limit:
+        return context
+    if before:
+        return "…[相邻上文已截断]\n" + context[-limit:]
+    return context[:limit].rstrip() + "\n…[相邻下文已截断]"
+
+
+def _table_evidence_packet(body, *, before="", after=""):
+    sections = []
+    if before:
+        sections.append("[相邻上文]\n" + before)
+    sections.append("[表格正文]\n" + str(body or "").strip())
+    if after:
+        sections.append("[相邻下文]\n" + after)
+    return "\n\n".join(section for section in sections if section.strip())
+
+
 def _pack_semantic_blocks(blocks, replacements, target_size, *, file_name=""):
     records = []
     structure_ordinal = 0
@@ -1106,7 +1143,7 @@ def _pack_semantic_blocks(blocks, replacements, target_size, *, file_name=""):
         prefix = _chunk_prefix(header_path)
         effective_target = max(128, target_size - len(prefix))
         tokens = _section_tokens(body, replacements)
-        for token in tokens:
+        for token_index, token in enumerate(tokens):
             if isinstance(token, str):
                 for piece in _split_plain_block(token, effective_target):
                     value = prefix + piece
@@ -1128,6 +1165,16 @@ def _pack_semantic_blocks(blocks, replacements, target_size, *, file_name=""):
             parts = _block_parts(token, effective_target)
             count = len(parts)
             for part_index, (piece, title, warning) in enumerate(parts):
+                if token.kind == "table":
+                    piece = _table_evidence_packet(
+                        piece,
+                        before=_adjacent_plain_context(
+                            tokens, token_index, before=True
+                        ),
+                        after=_adjacent_plain_context(
+                            tokens, token_index, before=False
+                        ),
+                    )
                 value = prefix + piece
                 search_text = "\n".join(
                     item for item in (header_path.strip("/"), title, piece) if item

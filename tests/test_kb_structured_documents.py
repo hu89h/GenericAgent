@@ -239,6 +239,73 @@ $$
         self.assertIn("单位：%", records[0]["body"])
         self.assertIn("资产负债率", records[0]["search_text"])
 
+    def test_table_keeps_adjacent_prose_without_promoting_it_to_metadata(self):
+        markdown = """Performance results (ms)
+
+<table><tr><td>Case</td><td>Value</td></tr><tr><td>A</td><td>12</td></tr></table>
+
+Source: benchmark laboratory
+"""
+
+        records = self._chunks(markdown)
+        table = next(item for item in records if item["content_type"] == "table")
+        prose = [item["body"] for item in records if item["content_type"] == "prose"]
+
+        self.assertEqual(table["structure_title"], "Case")
+        self.assertIn("[相邻上文]\nPerformance results (ms)", table["body"])
+        self.assertIn("[表格正文]\n| Case | Value |", table["body"])
+        self.assertIn("[相邻下文]\nSource: benchmark laboratory", table["body"])
+        self.assertIn("Performance results (ms)", table["search_text"])
+        self.assertTrue(any("Performance results (ms)" in item for item in prose))
+        self.assertTrue(any("Source: benchmark laboratory" in item for item in prose))
+
+    def test_table_context_does_not_cross_an_adjacent_structure(self):
+        markdown = (
+            "before first\n\n"
+            "<table><tr><td>A</td></tr><tr><td>1</td></tr></table>\n\n"
+            "<table><tr><td>B</td></tr><tr><td>2</td></tr></table>\n\n"
+            "after second"
+        )
+
+        tables = [
+            item for item in self._chunks(markdown)
+            if item["content_type"] == "table"
+        ]
+
+        self.assertEqual(len(tables), 2)
+        self.assertIn("before first", tables[0]["body"])
+        self.assertNotIn("after second", tables[0]["body"])
+        self.assertNotIn("before first", tables[1]["body"])
+        self.assertIn("after second", tables[1]["body"])
+
+    def test_table_context_is_bounded_and_repeated_for_every_part(self):
+        rows = "".join(
+            f"<tr><td>row-{index}</td><td>{index}</td></tr>"
+            for index in range(20)
+        )
+        markdown = (
+            "BEGIN-" + "a" * 500 + "-END\n\n"
+            "<table><tr><td>Item</td><td>Value</td></tr>"
+            + rows + "</table>\n\n"
+            "START-" + "b" * 500 + "-FINISH"
+        )
+
+        tables = [
+            item for item in self._chunks(markdown, target=180)
+            if item["content_type"] == "table"
+        ]
+
+        self.assertGreater(len(tables), 1)
+        for table in tables:
+            self.assertIn("[相邻上文]", table["body"])
+            self.assertIn("…[相邻上文已截断]", table["body"])
+            self.assertNotIn("BEGIN-", table["body"])
+            self.assertIn("-END", table["body"])
+            self.assertIn("[相邻下文]", table["body"])
+            self.assertIn("…[相邻下文已截断]", table["body"])
+            self.assertIn("START-", table["body"])
+            self.assertNotIn("-FINISH", table["body"])
+
     def test_malformed_html_table_degrades_without_exposing_half_tags(self):
         markdown = """# 表格
 <table>
