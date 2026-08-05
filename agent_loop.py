@@ -8,6 +8,7 @@ class StepOutcome:
     data: Any
     next_prompt: Optional[str] = None
     should_exit: bool = False
+    finalize_only: bool = False
 def try_call_generator(func, *args, **kwargs):
     ret = func(*args, **kwargs)
     if hasattr(ret, '__iter__') and not isinstance(ret, (str, bytes, dict, list)): ret = yield from ret
@@ -74,6 +75,29 @@ def final_response_failure_message(reason="incomplete"):
         "抱歉，本次未能生成完整的用户可见答复，请重试。"
     )
 
+
+_FINALIZATION_INSTRUCTION = (
+    "[System] This is the final response pass. Tool use is disabled. "
+    "Using only the evidence already gathered, provide a concise, complete "
+    "user-facing answer now. State any unresolved limitation plainly. Do not "
+    "output internal thinking, summary-only text, or a tool-call tag."
+)
+
+
+def _messages_for_finalization(messages):
+    prepared = [dict(message) for message in messages]
+    if not prepared:
+        return [{"role": "user", "content": _FINALIZATION_INSTRUCTION}]
+    last = dict(prepared[-1])
+    content = last.get("content")
+    if isinstance(content, list):
+        content = list(content) + [{"type": "text", "text": _FINALIZATION_INSTRUCTION}]
+    else:
+        content = str(content or "") + "\n\n" + _FINALIZATION_INSTRUCTION
+    last["content"] = content
+    prepared[-1] = last
+    return prepared
+
 def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                       max_turns=40, verbose=True, initial_user_content=None, yield_info=False):
     messages = [
@@ -81,9 +105,26 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
         {"role": "user", "content": initial_user_content if initial_user_content is not None else user_input}
     ]
     turn = 0;  handler.max_turns = max_turns
+    finalize_only_next = False
+    max_turn_finalization_used = False
     _hook('agent_before', locals())
-    while turn < handler.max_turns:
-        turn += 1; turnstr = f'LLM Running (Turn {turn}) ...'
+    while True:
+        if turn >= handler.max_turns:
+            if max_turn_finalization_used:
+                break
+            max_turn_finalization_used = True
+            turn_finalization_only = True
+        else:
+            turn_finalization_only = finalize_only_next
+            finalize_only_next = False
+        turn += 1
+        if turn_finalization_only:
+            max_turn_finalization_used = True
+        handler._finalization_only_active = turn_finalization_only
+        turnstr = (
+            'LLM Finalizing ...' if turn_finalization_only
+            else f'LLM Running (Turn {turn}) ...'
+        )
         if handler.parent.task_dir: turnstr = f'Turn {turn} ...'
         if verbose: turnstr = f'**{turnstr}**'
         if yield_info: yield {'turn': turn}
@@ -91,7 +132,14 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
         if turn%10 == 0: client.last_tools = ''  # 每10轮重置一次工具描述
         _hook('turn_before', locals())
         _hook('llm_before', locals())
-        response_gen = client.chat(messages=messages, tools=tools_schema)
+        turn_messages = (
+            _messages_for_finalization(messages)
+            if turn_finalization_only else messages
+        )
+        response_gen = client.chat(
+            messages=turn_messages,
+            tools=[] if turn_finalization_only else tools_schema,
+        )
         if verbose:
             response = yield from response_gen
             yield '\n\n'
@@ -101,7 +149,8 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
             if cleaned: yield cleaned + '\n'
         _hook('llm_after', locals())
 
-        if not response.tool_calls: tool_calls = [{'tool_name': 'no_tool', 'args': {}}]
+        if turn_finalization_only or not response.tool_calls:
+            tool_calls = [{'tool_name': 'no_tool', 'args': {}}]
         else: tool_calls = [{'tool_name': tc.function.name, 'args': json.loads(tc.function.arguments), 'id': tc.id}
                           for tc in response.tool_calls]
        
@@ -143,6 +192,8 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
             
             if outcome.should_exit: 
                 exit_reason = {'result': 'EXITED', 'data': outcome.data}; break
+            if getattr(outcome, 'finalize_only', False):
+                finalize_only_next = True
             if not outcome.next_prompt: 
                 exit_reason = {'result': 'CURRENT_TASK_DONE', 'data': outcome.data}; break
             if outcome.next_prompt.startswith('未知工具'): client.last_tools = ''

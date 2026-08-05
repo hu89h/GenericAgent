@@ -1107,6 +1107,34 @@ def _parse_text_tool_calls(content):
             if name: tcs.append(MockToolCall(name, args))
         except: pass
     if tcs: content = re.sub(_xp, "", content, flags=re.DOTALL).strip()
+    # Some text-only model services emit an Anthropic-style function tag
+    # despite being instructed to use <tool_use>{...}</tool_use>. Treat this
+    # as a recoverable protocol variant instead of user-visible prose.
+    _fp = r"<function\s*=\s*([A-Za-z_][\w.-]*)\s*>(.*?)</function\s*>"
+    function_matches = list(re.finditer(_fp, content, re.DOTALL | re.IGNORECASE))
+    for match in function_matches:
+        name, payload = match.group(1), match.group(2).strip()
+        if not payload:
+            tcs.append(MockToolCall(name, {}))
+            continue
+        try:
+            parsed = tryparse(payload)
+            if not isinstance(parsed, dict):
+                raise ValueError("function arguments must be an object")
+            args = parsed
+            for key in ('arguments', 'args', 'input'):
+                if key in parsed:
+                    args = parsed[key]
+                    break
+            if not isinstance(args, dict):
+                raise ValueError("function arguments must be an object")
+            tcs.append(MockToolCall(name, args))
+        except Exception:
+            tcs.append(MockToolCall('bad_json', {
+                'msg': f'Failed to parse function arguments for {name}'
+            }))
+    if function_matches:
+        content = re.sub(_fp, "", content, flags=re.DOTALL | re.IGNORECASE).strip()
     return tcs, content
 
 def _ensure_text_block(blocks):

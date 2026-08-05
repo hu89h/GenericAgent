@@ -693,6 +693,53 @@ class KnowledgeBaseToolsMixin:
             next_prompt=next_prompt,
         )
 
+    def _remember_exact_image_ambiguity(self, exact_references, hits):
+        if not isinstance(exact_references, dict):
+            return
+        state = dict(getattr(self, "_unresolved_exact_image_reads", {}) or {})
+        requested = {
+            str(value or "").strip()
+            for value in (exact_references.get("requested") or [])
+            if str(value or "").strip()
+        }
+        if requested:
+            state = {
+                data_id: item for data_id, item in state.items()
+                if str(item.get("ref_key") or "").strip() not in requested
+            }
+        for ref_key in exact_references.get("ambiguous") or []:
+            ref_key = str(ref_key or "").strip()
+            candidates = [
+                {
+                    "data_id": str(hit.get("data_id") or "").strip(),
+                    "source_hint": str(hit.get("source_hint") or "").strip(),
+                }
+                for hit in hits
+                if str(hit.get("ref_key") or "").strip() == ref_key
+                and str(hit.get("data_id") or "").strip()
+            ]
+            candidates = list({item["data_id"]: item for item in candidates}.values())
+            for candidate in candidates:
+                state[candidate["data_id"]] = {
+                    "ref_key": ref_key,
+                    "candidates": candidates,
+                }
+        self._unresolved_exact_image_reads = state
+
+    def _unresolved_image_result(self, data_id):
+        state = getattr(self, "_unresolved_exact_image_reads", {}) or {}
+        unresolved = state.get(str(data_id or "").strip())
+        if not isinstance(unresolved, dict):
+            return None
+        return json.dumps({
+            "error_code": "image_ambiguous",
+            "message": (
+                "该图号在当前范围内对应多个候选，不能按候选顺序直接打开。"
+                "请先使用文档级 data_ids 缩小范围后重新搜索，或请用户明确来源。"
+            ),
+            "candidates": list(unresolved.get("candidates") or [])[:10],
+        }, ensure_ascii=False, indent=2)
+
     def do_kb_search(self, args, response):
         if self._knowledge_scope()["mode"] == "none":
             return self._anchor_outcome(
@@ -788,6 +835,7 @@ class KnowledgeBaseToolsMixin:
             "hits": [self._clean_hit(hit) for hit in hits],
         }
         exact_references = search_result.get("exact_image_references")
+        self._remember_exact_image_ambiguity(exact_references, result["hits"])
         if isinstance(exact_references, dict):
             missing = [
                 self._clip_text(value, 80)
@@ -1265,6 +1313,9 @@ class KnowledgeBaseToolsMixin:
         return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
     def do_kb_image_read(self, args, response):
+        unresolved = self._unresolved_image_result(args.get("data_id"))
+        if unresolved:
+            return self._anchor_outcome(args, unresolved)
         last_response = getattr(self, "_last_kb_image_response", None)
         same_response = (
             last_response is response

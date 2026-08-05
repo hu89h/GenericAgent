@@ -479,6 +479,34 @@ class RetrievalContractTests(unittest.TestCase):
         images = [item for item in result["results"] if item.get("kind") == "image"]
         self.assertEqual({item["ref_key"] for item in images}, {"图81"})
         self.assertTrue(any(item.get("kind") != "image" for item in result["results"]))
+        self.assertEqual(result["exact_image_references"], {
+            "requested": ["图81"], "matched": ["图81"], "missing": [],
+            "ambiguous": [],
+        })
+        self.assertEqual(self.index.dense_calls, 1)
+
+    def test_exact_image_ambiguity_does_not_require_image_filter_or_survive_top_k(self):
+        def exact(kb, _query, *_args, **_kwargs):
+            return [{
+                **_text_hit(kb["id"], f"documents/{kb['id']}.md"),
+                "kind": "image",
+                "data_id": f"{kb['id']}::documents/{kb['id']}.md::image::1",
+                "ref_key": "图1",
+                "score_type": "ref_exact",
+            }]
+
+        self.retriever._search_exact_image_refs = exact
+        self.retriever._search_one_zvec = lambda *_args, **_kwargs: []
+
+        result = self.retriever.search(
+            "讲讲图1", mode="vector", top_k=1,
+        )
+
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["exact_image_references"], {
+            "requested": ["图1"], "matched": ["图1"], "missing": [],
+            "ambiguous": ["图1"],
+        })
         self.assertEqual(self.index.dense_calls, 1)
 
     def test_table_read_continuation_starts_at_requested_part_without_rewinding(self):

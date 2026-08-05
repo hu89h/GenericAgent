@@ -503,6 +503,70 @@ class KnowledgeBaseAgentSchemaTests(unittest.TestCase):
         )
         self.assertTrue(all(hit["ref_key"] == "图79" for hit in payload["hits"]))
 
+    def test_ambiguous_search_candidate_cannot_be_opened_by_array_order(self):
+        original_search = _Backend.search
+        original_read = _Backend.read_image
+        image_id = "kb-test::documents/source.md::image::1"
+        read_calls = []
+        try:
+            _Backend.search = staticmethod(lambda *_args, **_kwargs: {
+                "results": [{
+                    "kind": "image",
+                    "data_id": image_id,
+                    "source_file_name": "source.pdf",
+                    "ref_key": "图1",
+                    "display_label": "图1：来源A",
+                }, {
+                    "kind": "image",
+                    "data_id": "kb-test::documents/other.md::image::1",
+                    "source_file_name": "other.pdf",
+                    "ref_key": "图1",
+                    "display_label": "图1：来源B",
+                }],
+                "exact_image_references": {
+                    "requested": ["图1"], "matched": ["图1"],
+                    "missing": [], "ambiguous": ["图1"],
+                },
+            })
+            _Backend.read_image = staticmethod(
+                lambda **kwargs: read_calls.append(kwargs) or {}
+            )
+            handler = _Handler()
+            handler.do_kb_search({
+                "query": "图1", "mode": "vector",
+            }, None)
+            payload = json.loads(handler.do_kb_image_read({
+                "data_id": image_id,
+                "focus": "讲解原图",
+            }, None).data)
+            _Backend.search = staticmethod(lambda *_args, **_kwargs: {
+                "results": [{
+                    "kind": "image",
+                    "data_id": image_id,
+                    "source_file_name": "source.pdf",
+                    "ref_key": "图1",
+                    "display_label": "图1：来源A",
+                }],
+                "exact_image_references": {
+                    "requested": ["图1"], "matched": ["图1"],
+                    "missing": [], "ambiguous": [],
+                },
+            })
+            handler.do_kb_search({
+                "query": "图1", "mode": "vector",
+                "data_ids": ["kb-test::documents/source.md"],
+            }, None)
+            cleared = handler._unresolved_image_result(image_id)
+        finally:
+            _Backend.search = original_search
+            _Backend.read_image = original_read
+
+        self.assertEqual(payload["error_code"], "image_ambiguous")
+        self.assertIn("data_ids", payload["message"])
+        self.assertEqual(len(payload["candidates"]), 2)
+        self.assertEqual(read_calls, [])
+        self.assertIsNone(cleared)
+
     def test_search_document_subset_is_validated_and_uses_scope_targets(self):
         _SubsetBackend.search_calls = []
         handler = _SubsetHandler({"mode": "all"})

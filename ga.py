@@ -289,6 +289,8 @@ class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
         self.code_stop_signal = []
         self._done_hooks = []
         self._pending_inline_blocks = []
+        self._consecutive_incomplete_responses = 0
+        self._finalization_only_active = False
         self.print = safe_print
 
     def take_pending_inline_blocks(self):
@@ -524,9 +526,19 @@ class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
         return StepOutcome({"result": "working key_info updated"}, next_prompt=next_prompt)
 
     def _retry_or_exit(self, prompt):
-        self._empty_ct = getattr(self, '_empty_ct', 0) + 1
-        if self._empty_ct >= 3:
+        if self._finalization_only_active:
             return StepOutcome(final_response_failure_message(), should_exit=True)
+        self._consecutive_incomplete_responses += 1
+        if self._consecutive_incomplete_responses >= 2:
+            return StepOutcome(
+                {},
+                next_prompt=(
+                    "[System] The previous responses did not contain a complete "
+                    "user-facing answer. Use the available results and provide "
+                    "the final answer now."
+                ),
+                finalize_only=True,
+            )
         return StepOutcome({}, next_prompt=prompt)
 
     def _retry_incomplete_response(self, prompt):
@@ -541,6 +553,18 @@ class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
             r"<(?:thinking|summary)\b[^>]*>[\s\S]*?</(?:thinking|summary)>",
             "",
             str(content or ""),
+            flags=re.IGNORECASE,
+        )
+        visible = re.sub(
+            r"<(?:tool_use|tool_call)>[\s\S]*?</(?:tool_use|tool_call)>",
+            "",
+            visible,
+            flags=re.IGNORECASE,
+        )
+        visible = re.sub(
+            r"<function\s*=\s*[A-Za-z_][\w.-]*\s*>[\s\S]*?(?:</function\s*>|$)",
+            "",
+            visible,
             flags=re.IGNORECASE,
         )
         return visible.strip()
@@ -569,7 +593,7 @@ class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
                 "[System] The previous response contained only internal thinking or summary. Now provide the user-facing answer. Only call a tool if a new investigation is genuinely needed."
             ))
 
-        self._empty_ct = 0
+        self._consecutive_incomplete_responses = 0
         
         if self._in_plan_mode() and any(kw in content for kw in ['任务完成', '全部完成', '已完成所有', '🏁']):
             if 'VERDICT' not in content and '[VERIFY]' not in content and '验证subagent' not in content:
@@ -661,13 +685,16 @@ class GenericAgentHandler(KnowledgeBaseToolsMixin, BaseHandler):
             next_prompt += "\n\n\n[SYSTEM] 必须在回复文本中包含<summary>！\n\n"
         summary = smart_format(summary.replace('\n', ''), max_str_len=80)
         self.history_info.append(f'[Agent] {summary}')
+        if any(call.get('tool_name') != 'no_tool' for call in tool_calls):
+            self._consecutive_incomplete_responses = 0
         _plan = self._in_plan_mode()
+        managed_long_task = bool(_plan or getattr(self.parent, 'task_dir', None))
 
         if turn % 175 == 0 and (not _plan):
             next_prompt += f"\n\n[DANGER] Turn {turn}. Must call ask_user to summarize progress and get direction. No more blind retries."
-        elif turn % 13 == 0:
+        elif managed_long_task and turn % 13 == 0:
             next_prompt += f"\n\n[SYSTEM] Turn {turn}. Call update_working_checkpoint to save key context. Stop ineffective retries; if no progress, switch strategy: 1) Probe physical boundaries 2) **Re-read relevant SOPs**"
-        elif turn % 31 == 0:
+        elif managed_long_task and turn % 31 == 0:
             next_prompt += f"\n\n[SYSTEM] Turn {turn}. Write checkpoints/key findings/tried approaches to a **file** for future reference (not only working_checkpoint!). Avoid losing critical info."
         elif turn % 10 == 0: next_prompt += get_global_memory()
 

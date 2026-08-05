@@ -866,12 +866,21 @@ class KnowledgeBaseRetriever:
             "results": results,
             "diagnostics": self.search_diagnostics(),
         }
-        if exact_image_only:
-            ref_counts: dict[str, int] = {}
-            for result in results:
+        if exact_ref_list:
+            ref_occurrences: dict[str, set[tuple[str, int]]] = {}
+            for result in channel_hits["ref_exact"]:
                 key = self._local_ref_key(result.get("ref_key") or "")
-                if key:
-                    ref_counts[key] = ref_counts.get(key, 0) + 1
+                if not key:
+                    continue
+                identity_key = (
+                    str(result.get("data_id") or ""),
+                    int(result.get("chunk_index") or 0),
+                )
+                ref_occurrences.setdefault(key, set()).add(identity_key)
+            ref_counts = {
+                key: len(occurrences)
+                for key, occurrences in ref_occurrences.items()
+            }
             matched_refs = set(ref_counts)
             response["exact_image_references"] = {
                 "requested": exact_ref_list,
