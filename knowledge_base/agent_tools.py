@@ -17,19 +17,13 @@ from .scope import normalize_scope
 
 KB_AGENT_SYSTEM_INSTRUCTIONS = """
 [KNOWLEDGE_BASE_USAGE]
-- 一般问题先搜索，再按用户指定的证据来源读取必要的正文或原图；用户已经给出明确图表编号并要求查看原图时，可以直接用 ref_key 调用 kb_image_read。有依赖的工具不得在同一轮并行调用。搜索结果是处理后候选，并非无损原文；其中完整、明确、未截断且直接包含答案的内容可以作为证据使用。
-- evidence_types 限制的是知识库记录的表现形式，不等同于用户所说的表格、原文或报告。指定来源可能被表现为文本、表格或图片；形式不明确时先检索全部类型并在查询中保留来源要求，不能用附近内容冒充指定来源。
-- 可以为检索目的自由改写、简化、扩展或拆分用户问题，但必须保持原始信息需求、范围和证据要求，不得把未经证实的前提带入结论。后续检索应有新的调查目的；若不再产生新证据，应停止穷举相近表达。
-- 正常结果无需反复核验。仅当指定来源与命中不一致、标题/编号/内容/数值/上下文明显冲突、候选歧义、内容截断或缺少直接证据时，才调整查询、证据类型或显式选择另一检索模式继续调查。
-- 搜索命中带 truncated=true、缺少必要上下文、存在歧义或冲突、需要读取结构后续部分，或当前内容不足以支撑回答时，才调用 kb_read。kb_read 用于扩展内容，不代表其数据天然比搜索结果更可靠。
-- 图片命中的 description/table_markdown 只表示已有辅助分析，不代表本轮查看了原图；locator_only=true 只用于定位图片，不是视觉事实。需要视觉信息时调用 kb_image_read，且不要批量打开所有定位器。文本模型只能说明发现了相关图片，不能声称已经核验原图。
-- 用户明确要求讲解、查看或核对某张图片/图表时，只要搜索命中 evidence_type=image，就必须调用 kb_image_read；不得只依据搜索结果中的辅助描述声称已经看图。focus 中写明需要从原图核对的问题。
-- 精确图片编号搜索返回 exact_image_references；missing 中的编号表示当前范围内确定未找到对应图片，不得换模式或移除图片限制后用相似图片冒充。只有用户要求扩大范围或寻找相关内容时才能另行搜索，并保留原编号未找到的结论。
-- 使用明确 ref_key 调用 kb_image_read 返回 not_found 时，同样表示该编号在当前范围内确定未找到；不得继续用其他检索模式确认同一编号。
-- 每次 kb_read 后检查 continuation：has_more=true 且返回 next_chunk_index 时只能按该值继续；返回 required_max_chars 时提高 max_chars 后重读同一分段；has_more=false 时不得自行递增 chunk_index。需要其他证据时重新搜索或通过 kb_list 导航。
-- 用户指代“这些文档、所选资料、当前报告”但来源集合不明确，或询问当前资料是否覆盖、披露某事项时，先用无参数 kb_list 确认文档集合；普通问答不要默认列目录。
-- 证据冲突时按用户指定来源回答并说明冲突；证据不足时明确说明，不得用相近内容补答。
-- 最终回答不得出现 data_id、chunk_index、内部路径、处理后文件名或检索诊断。实际使用知识库时，在末尾按 source_hint 生成“信息来源”，同一原始文档合并并去重章节或图号。
+- kb_search 返回Top-K候选而非全文扫描；可以在保持用户需求、范围和证据要求的前提下改写、拆分查询或显式更换检索模式。absence_supported=false 时不得据此断言某内容不存在。
+- 判断哪些文档出现或未出现明确字面表达时使用 kb_find；命中只证明相应词项至少出现一次，不能据此推断次数、语境或重要性。只有 absence_supported=true 才能说“当前可检索内容中未发现这些词项”，不得推广为宽泛主题不存在。
+- 文本命中带 requires_read=true 时必须按返回的 data_id 和 chunk_index 调用 kb_read；否则只有在内容不足、冲突或需要后续结构时扩展读取。continuation 只在仍有动作时返回，必须原样使用其中游标；没有 continuation 仅表示当前读取目标结束。
+- 图片搜索中的 description/table_markdown/uncertain 是辅助分析；locator_only=true 不是视觉事实，requires_image_read=true 表示辅助分析不完整。用户要求查看或核对原图时先检查图号状态：missing_image_refs不得用相似图片冒充，ambiguous_image_refs必须先消歧；目标唯一后再调用kb_image_read。
+- 同一模型回合只读取一张知识库原图；多图逐张查看。文本模型没有 kb_image_read 时不能声称查看过原图。
+- 直接证据与推断必须分开表述；来源、标题、编号、数值或上下文明显冲突时继续调查，证据不足时明确说明。
+- data_id、chunk_index、absence_supported、requires_read、locator_only、image_attached 等工具控制字段只用于下一步决策，不得原样写入最终回答。最终回答不得出现内部路径、处理后文件名或检索诊断；来源名称只能逐字使用工具返回的 source_hint，不得从 data_id 推导或改写。实际使用知识库时，在末尾按 source_hint 生成“信息来源”，同一原始文档合并并去重章节或图号。
 """.strip()
 
 
@@ -38,11 +32,11 @@ KB_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "kb_search",
-            "description": "在当前知识库范围内召回文本和图片候选。query 是检索表达，不必逐字复制用户原话；可以在保持原始信息需求、范围和证据要求的前提下改写、改变粒度或拆分复杂问题，不得引入未经证实的前提。结果不足、冲突或明显错位时，可以基于上一轮结果显式调整 query、evidence_types 或 mode，但后续调用应有新的调查目的；若不再产生新证据，应停止穷举相近表达。工具本身不会静默切换 mode。evidence_types 只限制知识库记录的表现形式；用户指定的表格、原文或报告可能被表现为文本、表格或图片，形式不明确时不要预先硬过滤。图片命中带 locator_only=true 时只有图题、上下文和原图定位，不是视觉事实；需要视觉信息时再调用 kb_image_read，不要批量打开所有定位器。明确图号且仅检索 image 时，编号是硬约束并返回范围内全部同号图片，不用相似图片填充；exact_image_references.missing 表示当前范围内确定未找到，不得改用相似图片冒充。完整、明确且没有 truncated 标记的文本命中可以直接作为证据；内容截断、存在歧义、缺少必要上下文或需要结构后续部分时，再使用命中的 data_id 和 chunk_index 调用 kb_read。",
+            "description": "在当前知识库范围内召回候选，不是全文扫描，absence_supported始终为false。完整文本命中返回body；requires_read要求继续读取。图片命中可能返回辅助分析、locator_only或requires_image_read。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "自然语言问题或检索词"},
+                    "query": {"type": "string", "description": "用于寻找证据的检索表达，可在不改变用户需求和范围的前提下改写或拆分。"},
                     "mode": {
                         "type": "string",
                         "enum": ["rrf", "vector", "sparse"],
@@ -61,7 +55,7 @@ KB_TOOL_SCHEMAS = [
                         "minItems": 1,
                         "maxItems": 50,
                         "uniqueItems": True,
-                        "description": "可选：仅在 kb_list 返回的这些文档中搜索。应原样复制文档 data_id；只能缩小当前会话范围，不接受图片 data_id。",
+                        "description": "可选：仅在 kb_list 返回的这些文档中搜索。必须原样复制完整的文档 data_id（包括其知识库前缀），不得截取、改写或传图片 data_id；只能缩小当前会话范围。",
                     },
                     "evidence_types": {
                         "type": "array",
@@ -80,13 +74,56 @@ KB_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "kb_read",
-            "description": "扩展读取 kb_search 命中的文本内容。表格、列表、代码、公式等会优先返回同一结构；普通正文由 span 控制。必须检查 continuation：has_more=true 时只使用返回的 next_chunk_index 续读，has_more=false 时不得自行递增 chunk_index；需要其他证据应重新搜索或通过 kb_list 导航。若正文与搜索内容明显冲突，以读取到的较完整内容为准。不要与依赖搜索结果的调用并行执行。",
+            "name": "kb_find",
+            "description": "完整扫描当前范围内的可检索文字，判断哪些文档出现指定字面词项。absence_supported表示扫描是否完整，且只适用于这些词项。它不做语义扩展、不提供词频；需要上下文时再限定文档调用kb_search。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "data_id": {"type": "string"},
-                    "chunk_index": {"type": "integer", "minimum": 0},
+                    "terms": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 100},
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "uniqueItems": True,
+                        "description": "需要完整扫描的字面词项。Agent应自行列出必要的表达变体；工具不会扩展同义词。",
+                    },
+                    "data_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 50,
+                        "uniqueItems": True,
+                        "description": "可选：只扫描 kb_list 返回的文档。必须原样复制完整的文档 data_id（包括其知识库前缀），不得截取、改写或传图片 data_id；只能缩小当前会话范围。",
+                    },
+                    "match": {
+                        "type": "string",
+                        "enum": ["any", "all"],
+                        "default": "any",
+                        "description": "any：文档命中任一词项；all：每个词项在该文档任意位置均至少出现一次。",
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "是否区分大小写；中文通常保持默认值 false。",
+                    },
+                },
+                "required": ["terms"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "kb_read",
+            "description": "读取kb_search或kb_list定位的文本证据，absence_supported始终为false。结构化内容优先按同一结构返回；仅在continuation存在时继续读取。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "data_id": {
+                        "type": "string",
+                        "description": "kb_search 文本命中返回的完整 data_id；必须与该命中的 chunk_index 一起原样使用。",
+                    },
+                    "chunk_index": {"type": "integer", "minimum": 0, "description": "必须原样使用kb_search、kb_list或continuation返回的分段位置。"},
                     "span": {
                         "type": "integer",
                         "minimum": 1,
@@ -110,11 +147,11 @@ KB_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "kb_list",
-            "description": "用于当前范围内的文档发现、来源集合确认和分段导航。不传 data_id 时列出允许访问的文档；传 data_id 时分页列出该文档的分段目录，并应使用返回的 next_offset 继续分页。offset/limit 仅在提供 data_id 时生效。不要在普通问答前默认调用，也不要把目录预览当作事实证据。",
+            "description": "列出当前范围内的文档，或分页导航指定文档的分段。目录预览只用于定位，不是事实证据；返回next_offset时用它继续分页。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "data_id": {"type": "string"},
+                    "data_id": {"type": "string", "description": "可选：kb_list文档列表返回的完整文档级data_id；提供后进入分段导航模式。"},
                     "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "提供 data_id 时使用的分页起点；后续分页使用工具返回的 next_offset。"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20, "description": "提供 data_id 时每页返回的分段数。"},
                 },
@@ -125,12 +162,15 @@ KB_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "kb_image_read",
-            "description": "读取知识库图片的原图、图题、辅助描述、必要上下文和引用信息。data_id 与 ref_key 至少提供一个；搜索已返回图片 data_id 时优先使用它，用户已给出明确图表编号并要求原图时也可以直接使用 ref_key。明确 ref_key 返回 not_found 表示该编号在当前范围内确定不存在，不要再换检索模式确认同一编号。用户明确要求讲解、查看或核对图片时必须调用本工具并在 focus 中写明视觉目标，不能只根据搜索描述回答。查看后应核对原图是否符合用户要求、编号、图题和来源；明显不一致时继续检索或说明疑点。调用成功后原图会自动加入下一轮多模态输入，不要批量打开所有命中图片。不得传入文档 ID、文本分段 ID或任意本地路径。",
+            "description": "将一张已定位的知识库原图加入下一模型回合；成功时返回image_attached=true。目标必须唯一，同一模型回合只能成功加入一张，多图需逐张查看。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "data_id": {"type": "string"},
-                    "ref_key": {"type": "string", "description": "图1-1、表8-1等知识库返回的图表编号"},
+                    "data_id": {
+                        "type": "string",
+                        "description": "kb_search 返回的完整图片级 data_id；必须原样复制，不得传文档级 data_id、文本分段 ID 或本地路径。",
+                    },
+                    "ref_key": {"type": "string", "description": "可选：当前允许范围内明确且唯一的图表编号，如图1-1或表8-1。"},
                     "focus": {
                         "type": "string",
                         "description": "补充需要从原图确认的视觉关注点。用户明确要求讲解或核对图片时应填写其具体关注点；不要填写内部路径或 ID。",
@@ -440,7 +480,6 @@ class KnowledgeBaseToolsMixin:
                 "source_file_name": reference.get("source_file_name"),
                 "source_section": reference.get("source_section"),
             }),
-            "matched_by": list(hit.get("matched_by") or []),
         }
         if kind != "image":
             result["chunk_index"] = int(reference.get("chunk_index") or 0)
@@ -472,24 +511,25 @@ class KnowledgeBaseToolsMixin:
             else:
                 result["locator_only"] = True
             if description_truncated or table_truncated:
-                result["truncated"] = True
+                result["requires_image_read"] = True
         else:
-            snippet = cls._clip_text(hit.get("snippet"), 320)
-            clip = (
-                cls._clip_structured_rows_state
-                if result["evidence_type"] == "table"
-                else cls._clip_text_state
-            )
-            body, body_truncated = clip(
-                hit.get("body"), 1600,
-                suffix="\n…[正文摘要已截断，完整内容请调用 kb_read]",
-            )
-            if snippet:
-                result["snippet"] = snippet
-            if body:
+            multi_part = int(hit.get("structure_part_count") or 1) > 1
+            body, body_truncated = "", False
+            if not multi_part:
+                clip = (
+                    cls._clip_structured_rows_state
+                    if result["evidence_type"] == "table"
+                    else cls._clip_text_state
+                )
+                body, body_truncated = clip(
+                    hit.get("body"), 1600,
+                    suffix="\n…[正文摘要已截断，完整内容请调用 kb_read]",
+                )
+            requires_read = multi_part or body_truncated or not body
+            if requires_read:
+                result["requires_read"] = True
+            else:
                 result["body"] = body
-            if body_truncated or int(hit.get("structure_part_count") or 1) > 1:
-                result["truncated"] = True
         return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
     @classmethod
@@ -528,6 +568,9 @@ class KnowledgeBaseToolsMixin:
             "image_read_failed": "读取图片资产失败。",
             "attach_failed": "原图无法加入模型输入。",
             "target_conflict": "提供的图片定位参数互相冲突。",
+            "find_unavailable": "知识库完整性查找暂不可用。",
+            "scope_too_broad": "当前文档范围过大，请先用 kb_list 确认文档并通过 data_ids 分批查找。",
+            "sequential_image_read_required": "本轮已加入一张知识库原图，请先核对后再决定是否查看下一张。",
         }
         payload = {
             "error_code": code,
@@ -578,6 +621,23 @@ class KnowledgeBaseToolsMixin:
             "data_id": reference.get("data_id", ""),
             "source_hint": reference.get("source_hint", ""),
         }
+
+    @classmethod
+    def _clean_find_document(cls, document, *, include_matches=True):
+        result = {
+            "data_id": str(document.get("data_id") or ""),
+            "source_hint": cls._source_hint({
+                "source_file_name": document.get("source_file_name") or "",
+                "kind": "document",
+            }),
+        }
+        if include_matches:
+            result["matched_terms"] = [
+                cls._clip_text(value, 100)
+                for value in document.get("matched_terms") or []
+                if cls._clip_text(value, 100)
+            ]
+        return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
     def _record_knowledge_citations(self, *items):
         """Keep only image references for Desktop open-image actions.
@@ -724,19 +784,125 @@ class KnowledgeBaseToolsMixin:
             )
         hits = search_result.get("results") or []
         result = {
-            "mode": search_result.get("mode") or mode,
+            "absence_supported": False,
             "hits": [self._clean_hit(hit) for hit in hits],
         }
         exact_references = search_result.get("exact_image_references")
         if isinstance(exact_references, dict):
-            result["exact_image_references"] = {
-                key: [self._clip_text(value, 80) for value in exact_references.get(key, [])]
-                for key in ("requested", "matched", "missing")
-            }
+            missing = [
+                self._clip_text(value, 80)
+                for value in exact_references.get("missing", [])
+                if self._clip_text(value, 80)
+            ]
+            ambiguous = [
+                self._clip_text(value, 80)
+                for value in exact_references.get("ambiguous", [])
+                if self._clip_text(value, 80)
+            ]
+            if missing:
+                result["missing_image_refs"] = missing
+            if ambiguous:
+                result["ambiguous_image_refs"] = ambiguous
         warnings = self._clean_warnings(search_result.get("diagnostics"))
         if warnings:
             result["warnings"] = warnings
         return self._anchor_outcome(args, json.dumps(result, ensure_ascii=False, indent=2))
+
+    def do_kb_find(self, args, response):
+        if self._knowledge_scope()["mode"] == "none":
+            return self._anchor_outcome(
+                args, self._safe_error("kb_find", "knowledge_disabled")
+            )
+        raw_terms = args.get("terms")
+        if not isinstance(raw_terms, list) or not 1 <= len(raw_terms) <= 10:
+            return self._anchor_outcome(
+                args, self._safe_error(
+                    "kb_find", "invalid_argument", field="terms",
+                    message="kb_find 的 terms 必须是包含 1 到 10 个词项的数组。",
+                )
+            )
+        terms, seen = [], set()
+        for value in raw_terms:
+            term = str(value or "").strip()
+            if not term or len(term) > 100:
+                return self._anchor_outcome(
+                    args, self._safe_error(
+                        "kb_find", "invalid_argument", field="terms",
+                        message="kb_find 的每个词项必须为 1 到 100 个字符。",
+                    )
+                )
+            if term not in seen:
+                seen.add(term)
+                terms.append(term)
+        match = str(args.get("match") or "any").strip().lower()
+        if match not in {"any", "all"}:
+            return self._anchor_outcome(
+                args, self._safe_error(
+                    "kb_find", "invalid_argument", field="match",
+                    message="kb_find 的 match 必须是 any 或 all。",
+                    allowed_values=["any", "all"],
+                )
+            )
+        case_sensitive = args.get("case_sensitive", False)
+        if not isinstance(case_sensitive, bool):
+            return self._anchor_outcome(
+                args, self._safe_error(
+                    "kb_find", "invalid_argument", field="case_sensitive",
+                    message="kb_find 的 case_sensitive 必须是布尔值。",
+                )
+            )
+        find_kwargs = self._scope_search_kwargs()
+        if "data_ids" in args:
+            find_kwargs, error_code = self._search_kwargs_for_data_ids(args.get("data_ids"))
+            if error_code:
+                return self._anchor_outcome(
+                    args, self._safe_error(
+                        "kb_find", error_code, field="data_ids",
+                        message=(
+                            "kb_find 的 data_ids 参数无效。"
+                            if error_code == "invalid_argument" else None
+                        ),
+                    )
+                )
+        try:
+            raw_result = self._kb_backend().find_terms(
+                terms,
+                match=match,
+                case_sensitive=case_sensitive,
+                **find_kwargs,
+            ) or {}
+        except Exception:
+            return self._anchor_outcome(
+                args, self._safe_error("kb_find", "find_unavailable")
+            )
+        if raw_result.get("error_code") == "scope_too_broad":
+            return self._anchor_outcome(
+                args, self._safe_error("kb_find", "scope_too_broad")
+            )
+        documents = [
+            self._clean_find_document(item)
+            for item in raw_result.get("documents") or []
+            if isinstance(item, dict)
+        ]
+        unmatched = [
+            self._clean_find_document(item, include_matches=False)
+            for item in raw_result.get("unmatched_documents") or []
+            if isinstance(item, dict)
+        ]
+        complete = bool(raw_result.get("complete"))
+        result = {
+            "absence_supported": complete,
+            "documents": documents,
+            "unmatched_documents": unmatched,
+        }
+        if not complete:
+            result["warnings"] = [{
+                "error_code": "scan_incomplete",
+                "message": "部分知识库记录无法扫描，不得据此作完整性或否定性结论。",
+            }]
+        return self._anchor_outcome(
+            args, json.dumps(result, ensure_ascii=False, indent=2)
+        )
 
     def do_kb_read(self, args, response):
         if self._knowledge_scope()["mode"] == "none":
@@ -811,15 +977,18 @@ class KnowledgeBaseToolsMixin:
         except Exception:
             reference = {}
         result = {
-            "data_id": str(content.get("data_id") or data_id or ""),
-            "evidence_type": self._evidence_type(content),
+            "absence_supported": False,
             "content": self._clean_content(content.get("content")),
-            "continuation": {
-                key: value for key, value in dict(content.get("continuation") or {}).items()
-                if key in {"has_more", "next_chunk_index", "required_max_chars"}
-                and value is not None
-            },
         }
+        raw_continuation = dict(content.get("continuation") or {})
+        if raw_continuation.get("has_more"):
+            continuation = {
+                key: raw_continuation.get(key)
+                for key in ("next_chunk_index", "required_max_chars")
+                if raw_continuation.get(key) is not None
+            }
+            if continuation:
+                result["continuation"] = continuation
         source_hint = self._source_hint({
             **(reference if isinstance(reference, dict) else {}),
             "structure_title": content.get("structure_title"),
@@ -898,14 +1067,12 @@ class KnowledgeBaseToolsMixin:
                     item["preview"] = preview_text
                 chunks.append(item)
             result = {
-                "data_id": str(raw_result.get("data_id") or data_id or ""),
-                "has_more": bool(raw_result.get("has_more")),
                 "chunks": chunks,
             }
             source_hint = self._source_hint(source)
             if source_hint:
                 result["source_hint"] = source_hint
-            if result["has_more"]:
+            if raw_result.get("has_more"):
                 result["next_offset"] = int(
                     raw_result.get("next_offset") or offset + len(chunks)
                 )
@@ -1064,7 +1231,6 @@ class KnowledgeBaseToolsMixin:
             if not data_id or data_id in seen:
                 continue
             seen.add(data_id)
-            item = {"data_id": data_id}
             ref_key = cls._clip_text(candidate.get("ref_key"), 80)
             label = cls._clip_text(
                 candidate.get("display_label") or ref_key or "图片", 200
@@ -1077,9 +1243,7 @@ class KnowledgeBaseToolsMixin:
                 }),
                 320,
             )
-            item["ref_key"] = ref_key
-            item["image_label"] = label
-            item["source_hint"] = source_hint
+            item = {"data_id": data_id, "source_hint": source_hint}
             public_candidates.append(item)
             if len(public_candidates) >= 10:
                 break
@@ -1093,49 +1257,27 @@ class KnowledgeBaseToolsMixin:
     def _public_image(cls, info):
         reference = cls._public_reference(info, kind="image")
         result = {
-            "data_id": reference.get("data_id", ""),
-            "evidence_type": "image",
             "source_hint": reference.get("source_hint", ""),
         }
         ref_key = str(reference.get("ref_key") or "").strip()
         if ref_key:
             result["ref_key"] = ref_key
-        description = cls._clip_text(info.get("description"), 2400)
-        if description:
-            result["description"] = description
-        table = cls._clip_text(
-            info.get("table_markdown"), 3000,
-            suffix="\n…[表格内容已截断]",
-        )
-        if table:
-            result["table_markdown"] = table
-        uncertain = info.get("uncertain")
-        if isinstance(uncertain, list):
-            values = [cls._clip_text(item, 200) for item in uncertain[:8]]
-            values = [item for item in values if item]
-            if values:
-                result["uncertain"] = values
-        elif uncertain:
-            result["uncertain"] = [cls._clip_text(uncertain, 200)]
-
-        near_text = cls._clip_text(info.get("near_text"), 1400)
-        related_text = cls._clip_text(info.get("related_text"), 1000)
-        if related_text and (
-            related_text == near_text
-            or related_text in near_text
-            or near_text in related_text
-        ):
-            related_text = ""
-        # A long sequence of figure/table labels is a document catalogue, not
-        # useful context for the selected image.
-        if related_text and len(re.findall(r"(?:图|表)\s*\d", related_text)) >= 8:
-            related_text = ""
-        context = "\n\n".join(value for value in (near_text, related_text) if value)
-        if context:
-            result["context"] = context
         return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
     def do_kb_image_read(self, args, response):
+        last_response = getattr(self, "_last_kb_image_response", None)
+        same_response = (
+            last_response is response
+            if response is not None else
+            last_response == ("turn", int(getattr(self, "current_turn", 0)))
+        )
+        if same_response:
+            return self._anchor_outcome(
+                args,
+                self._safe_error(
+                    "kb_image_read", "sequential_image_read_required"
+                ),
+            )
         info, error = self._read_image_asset(args)
         if error:
             return self._anchor_outcome(args, error)
@@ -1148,6 +1290,10 @@ class KnowledgeBaseToolsMixin:
             return self._anchor_outcome(
                 args, self._safe_error("kb_image_read", "attach_failed")
             )
+        self._last_kb_image_response = (
+            response if response is not None
+            else ("turn", int(getattr(self, "current_turn", 0)))
+        )
         self._record_knowledge_citations(info)
         result = self._public_image(info)
         result["image_attached"] = True

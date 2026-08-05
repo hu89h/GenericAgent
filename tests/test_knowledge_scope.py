@@ -68,7 +68,7 @@ class KnowledgeScopeTests(unittest.TestCase):
 
         self.assertEqual(
             names,
-            {"file_read", "kb_search", "kb_read", "kb_list"},
+            {"file_read", "kb_search", "kb_find", "kb_read", "kb_list"},
         )
 
     def test_enabled_prompt_contains_usage_policy_once(self):

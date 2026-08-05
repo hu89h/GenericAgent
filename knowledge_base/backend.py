@@ -566,6 +566,25 @@ def read_content(
     )
 
 
+def find_terms(
+    terms,
+    *,
+    kb_id=None,
+    file_name=None,
+    scope_targets=None,
+    match="any",
+    case_sensitive=False,
+):
+    return _runtime().retrieval.find_terms(
+        terms,
+        kb_id=kb_id,
+        file_name=file_name,
+        scope_targets=scope_targets,
+        match=match,
+        case_sensitive=case_sensitive,
+    )
+
+
 def reference_for_chunk(data_id=None, chunk_index=0, kb_id=None):
     return _runtime().retrieval.reference_for_chunk(
         data_id=data_id,

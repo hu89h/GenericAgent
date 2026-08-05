@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -88,6 +89,109 @@ class RetrievalContractTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def _write_find_records(self):
+        records = {
+            "kb-a": [
+                {
+                    "kind": "text", "content_type": "prose",
+                    "data_id": "kb-a::documents/a.md", "file_name": "documents/a.md",
+                    "source_file_name": "a.pdf", "chunk_index": 1,
+                    "body": "Dividend policy is disclosed here.",
+                },
+                {
+                    "kind": "text", "content_type": "table",
+                    "data_id": "kb-a::documents/a.md", "file_name": "documents/a.md",
+                    "source_file_name": "a.pdf", "chunk_index": 2,
+                    "body": "| 股利支付率 | 70% |", "structure_title": "分红表",
+                },
+                {
+                    "kind": "image", "content_type": "figure",
+                    "data_id": "kb-a::documents/a.md::image::1",
+                    "source_data_id": "kb-a::documents/a.md",
+                    "file_name": "documents/a.md", "source_file_name": "a.pdf",
+                    "chunk_index": 0, "ref_key": "图1", "caption": "二维码下载入口",
+                },
+                {
+                    "kind": "text", "content_type": "prose",
+                    "data_id": "kb-a::documents/other.md", "file_name": "documents/other.md",
+                    "source_file_name": "other.pdf", "chunk_index": 1,
+                    "body": "No matching disclosure.",
+                },
+            ],
+            "kb-b": [{
+                "kind": "text", "content_type": "table",
+                "data_id": "kb-b::documents/b.md", "file_name": "documents/b.md",
+                "source_file_name": "b.pdf", "chunk_index": 4,
+                "body": "股利支付率为 48%。",
+            }],
+        }
+        for kb in self.retriever._registry.kbs:
+            path = os.path.join(kb["path"], "records.jsonl")
+            kb["records_path"] = path
+            with open(path, "w", encoding="utf-8") as handle:
+                for record in records[kb["id"]]:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def test_literal_find_scans_every_scoped_record_without_embedding(self):
+        self._write_find_records()
+
+        result = self.retriever.find_terms(
+            ["dividend", "股利支付率"], match="all", case_sensitive=False,
+            scope_targets=[{
+                "kb_id": "kb-a", "all_documents": False,
+                "documents": [{"data_id": "kb-a::documents/a.md"}],
+            }],
+        )
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["searched_documents"], 1)
+        self.assertEqual([item["data_id"] for item in result["documents"]], [
+            "kb-a::documents/a.md",
+        ])
+        self.assertEqual(result["documents"][0]["matched_terms"], [
+            "dividend", "股利支付率",
+        ])
+        self.assertEqual(set(result["documents"][0]), {
+            "data_id", "source_file_name", "matched_terms",
+        })
+        self.assertEqual(self.index.dense_calls, 0)
+        self.assertEqual(self.index.sparse_calls, 0)
+
+    def test_literal_find_matches_image_text_without_returning_locations(self):
+        self._write_find_records()
+
+        image_result = self.retriever.find_terms(["二维码"], kb_id="kb-a")
+        self.assertTrue(image_result["complete"])
+        self.assertEqual(image_result["documents"][0]["matched_terms"], ["二维码"])
+        self.assertNotIn("occurrences", image_result["documents"][0])
+        self.assertEqual(
+            {item["data_id"] for item in image_result["unmatched_documents"]},
+            {"kb-a::documents/other.md"},
+        )
+
+        os.remove(self.retriever._registry.kbs[1]["records_path"])
+        broken = self.retriever.find_terms(["股利支付率"], kb_id="kb-b")
+        self.assertFalse(broken["complete"])
+        self.assertEqual(broken["warnings"], [{"error_code": "records_unavailable"}])
+
+    def test_literal_find_rejects_more_than_fifty_documents_as_one_scope(self):
+        kb = self.retriever._registry.kbs[0]
+        path = os.path.join(kb["path"], "records.jsonl")
+        kb["records_path"] = path
+        with open(path, "w", encoding="utf-8") as handle:
+            for index in range(51):
+                handle.write(json.dumps({
+                    "kind": "text", "content_type": "prose",
+                    "data_id": f"kb-a::documents/{index}.md",
+                    "file_name": f"documents/{index}.md",
+                    "source_file_name": f"{index}.pdf",
+                    "chunk_index": 0, "body": "needle",
+                }) + "\n")
+
+        result = self.retriever.find_terms(["needle"], kb_id="kb-a")
+        self.assertEqual(result["error_code"], "scope_too_broad")
+        self.assertEqual(result["searched_documents"], 51)
 
     def test_multi_kb_selection_stays_within_selected_documents_and_read_returns_body(self):
         calls = []
@@ -292,6 +396,7 @@ class RetrievalContractTests(unittest.TestCase):
         self.assertEqual({item["ref_key"] for item in result["results"]}, {"图81"})
         self.assertEqual(result["exact_image_references"], {
             "requested": ["图81"], "matched": ["图81"], "missing": [],
+            "ambiguous": ["图81"],
         })
         self.assertEqual(self.index.dense_calls, 0)
         self.assertEqual(self.index.sparse_calls, 0)
@@ -306,6 +411,7 @@ class RetrievalContractTests(unittest.TestCase):
         self.assertEqual(result["results"], [])
         self.assertEqual(result["exact_image_references"], {
             "requested": ["图999"], "matched": [], "missing": ["图999"],
+            "ambiguous": [],
         })
         self.assertEqual(self.index.dense_calls, 0)
         self.assertEqual(self.index.sparse_calls, 0)
@@ -340,6 +446,7 @@ class RetrievalContractTests(unittest.TestCase):
             "requested": ["图79", "图81"],
             "matched": ["图79", "图81"],
             "missing": [],
+            "ambiguous": [],
         })
         self.assertEqual(self.index.dense_calls, 0)
         self.assertEqual(self.index.sparse_calls, 0)

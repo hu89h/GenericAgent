@@ -10,6 +10,7 @@ import json
 import os
 import re
 import threading
+import unicodedata
 from urllib.parse import unquote
 
 from . import documents
@@ -866,17 +867,169 @@ class KnowledgeBaseRetriever:
             "diagnostics": self.search_diagnostics(),
         }
         if exact_image_only:
-            matched_refs = {
-                self._local_ref_key(result.get("ref_key") or "")
-                for result in results
-            }
-            matched_refs.discard("")
+            ref_counts: dict[str, int] = {}
+            for result in results:
+                key = self._local_ref_key(result.get("ref_key") or "")
+                if key:
+                    ref_counts[key] = ref_counts.get(key, 0) + 1
+            matched_refs = set(ref_counts)
             response["exact_image_references"] = {
                 "requested": exact_ref_list,
                 "matched": [key for key in exact_ref_list if key in matched_refs],
                 "missing": [key for key in exact_ref_list if key not in matched_refs],
+                "ambiguous": [key for key in exact_ref_list if ref_counts.get(key, 0) > 1],
             }
         return response
+
+    @staticmethod
+    def _literal_text(value: str, *, case_sensitive: bool) -> str:
+        text = unicodedata.normalize("NFKC", str(value or ""))
+        return text if case_sensitive else text.casefold()
+
+    @staticmethod
+    def _record_document_id(record: dict) -> str:
+        data_id = str(record.get("source_data_id") or record.get("data_id") or "").strip()
+        if "::image::" in data_id:
+            data_id = data_id.split("::image::", 1)[0]
+        return data_id
+
+    @staticmethod
+    def _find_record_text(record: dict) -> str:
+        if str(record.get("kind") or "") != "image":
+            return str(record.get("body") or "")
+        values = []
+        for key in ("caption", "description", "table_markdown"):
+            value = str(record.get(key) or "").strip()
+            if value and value not in values:
+                values.append(value)
+        return "\n".join(values)
+
+    def find_terms(
+        self,
+        terms: list[str],
+        *,
+        kb_id: str | None = None,
+        file_name: str | list[str] | None = None,
+        scope_targets: list[dict] | None = None,
+        match: str = "any",
+        case_sensitive: bool = False,
+        max_documents: int = 50,
+    ) -> dict:
+        """Exhaustively scan the current searchable record stream for literal terms."""
+        match = str(match or "any").strip().lower()
+        if match not in {"any", "all"}:
+            raise ValueError("match must be one of: any, all")
+        normalized_terms = [
+            self._literal_text(value, case_sensitive=case_sensitive)
+            for value in terms
+            if str(value or "").strip()
+        ]
+        targets: list[tuple[dict, str | list[str] | None]] = []
+        for kb in self._load_config():
+            if kb_id and kb["id"] != kb_id:
+                continue
+            scoped_file_names = file_name
+            if scope_targets is not None:
+                kb_targets = [
+                    target for target in scope_targets
+                    if isinstance(target, dict)
+                    and str(target.get("kb_id") or "").strip() == kb["id"]
+                ]
+                if not kb_targets:
+                    continue
+                if not any(target.get("all_documents") is True for target in kb_targets):
+                    scoped_file_names = [
+                        candidate
+                        for target in kb_targets
+                        for document in (target.get("documents") or [])
+                        if isinstance(document, dict)
+                        for candidate in self._scope_document_candidates(document, kb["id"])
+                    ]
+                    scoped_file_names = list(dict.fromkeys(scoped_file_names))
+                    if not scoped_file_names:
+                        continue
+            targets.append((kb, scoped_file_names))
+
+        documents_by_id: dict[str, dict] = {}
+        complete = True
+        warnings = []
+        for kb, scoped_file_names in targets:
+            records_path = str(kb.get("records_path") or "")
+            if not records_path or not os.path.isfile(records_path):
+                complete = False
+                warnings.append({"error_code": "records_unavailable"})
+                continue
+            source_titles = self._imported_document_titles(kb["path"])
+            doc_candidates = set(self._doc_name_candidates(file_name=scoped_file_names))
+            try:
+                with open(records_path, encoding="utf-8") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        record = json.loads(line)
+                        if not isinstance(record, dict):
+                            raise ValueError("record is not an object")
+                        rel = str(record.get("file_name") or "")
+                        title = str(record.get("source_file_name") or record.get("title") or "")
+                        if doc_candidates and not self._doc_matches_candidates(
+                            rel, title, doc_candidates
+                        ):
+                            continue
+                        document_id = self._record_document_id(record)
+                        if not document_id:
+                            continue
+                        is_new_document = document_id not in documents_by_id
+                        document = documents_by_id.setdefault(document_id, {
+                            "data_id": document_id,
+                            "source_file_name": (
+                                str(record.get("source_file_name") or "").strip()
+                                or source_titles.get(rel, "")
+                                or str(record.get("title") or "").strip()
+                            ),
+                            "matched_terms": [],
+                        })
+                        if is_new_document and len(documents_by_id) > max_documents:
+                            return {
+                                "error_code": "scope_too_broad",
+                                "searched_documents": len(documents_by_id),
+                            }
+                        content = self._find_record_text(record)
+                        if not content:
+                            continue
+                        normalized_content = self._literal_text(
+                            content, case_sensitive=case_sensitive
+                        )
+                        record_terms = [
+                            terms[index]
+                            for index, term in enumerate(normalized_terms)
+                            if term in normalized_content
+                        ]
+                        if not record_terms:
+                            continue
+                        for term in record_terms:
+                            if term not in document["matched_terms"]:
+                                document["matched_terms"].append(term)
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                complete = False
+                warnings.append({"error_code": "records_unavailable"})
+
+        matched, unmatched = [], []
+        for document in documents_by_id.values():
+            matched_terms = set(document["matched_terms"])
+            qualifies = bool(matched_terms)
+            if match == "all":
+                qualifies = all(term in matched_terms for term in terms)
+            (matched if qualifies else unmatched).append(document)
+        return {
+            "terms": list(terms),
+            "match": match,
+            "coverage": "searchable_records",
+            "complete": complete,
+            "searched_documents": len(documents_by_id),
+            "documents": matched,
+            "unmatched_documents": unmatched,
+            "warnings": warnings,
+        }
 
     def _resolve_zvec_target(
         self, data_id: str | None = None, kb_id: str | None = None
